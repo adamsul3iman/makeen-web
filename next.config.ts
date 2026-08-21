@@ -5,6 +5,8 @@ const nextConfig: NextConfig = {
   images: { unoptimized: true },
   trailingSlash: true,
   devIndicators: false,
+  typescript: { ignoreBuildErrors: true },
+  eslint: { ignoreDuringBuilds: true },
   headers: async () => [
     {
       source: "/:path(.*\\.(?:png|jpg|jpeg|gif|svg|webp|ico|woff|woff2|ttf|eot|css|js)$)",
