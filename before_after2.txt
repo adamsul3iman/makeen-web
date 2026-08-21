@@ -1,0 +1,6 @@
+﻿                      {column.parent.productCount.toLocaleString("ar-JO")} Ù…Ù†ØªØ¬ Ù…Ø±ØªØ¨Ø· Ù…Ø¨Ø§Ø´Ø±Ø©
+                    </footer>
+                  )}
+                </section>
+              </div>
+            </>

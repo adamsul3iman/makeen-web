@@ -1,0 +1,349 @@
+@import "tailwindcss";
+@config "../tailwind.config.ts";
+
+/*
+ * ────────────────────────────────────────────────────────────────
+ *  MAKEEN — نظام التصميم الموحّد
+ *
+ *  قواعد صارمة لكل المكونات:
+ *  1. ممنوع استخدام ألوان Tailwind الخام (emerald-*, rose-*, amber-*,
+ *     sky-*, slate-*) لأسطح الواجهة أو النصوص أو الحدود. كل لون يمرّ
+ *     عبر توكن دلالي من المجموعة أدناه. يُستثنى bg-black/45 للـ overlay
+ *     وقيم الأبيض/الأسود الدقيقة داخل قواعد الطباعة فقط.
+ *  2. لون هوية واحد (زمرد) + محايد بارد واحد. أي لون ثالث يجب أن
+ *     يكون دلالياً: warning / info / destructive.
+ *  3. الألوان *-bright مخصصة حصرياً للنصوص والمؤشرات فوق الترويسة
+ *     الداكنة (bg-header) — لا تُستخدم على خلفيات فاتحة.
+ *  4. الألوان *-soft خلفيات لطيفة للحالات، ويقابلها *-strong للنص
+ *     فوقها (تباين AA).
+ *
+ *  مقياس الأزرار المعتمد (لا ارتفاعات أخرى):
+ *    sm = h-9  → أزرار الجداول وأشرطة الأدوات
+ *    md = h-10 → أزرار النماذج وأزرار الترويسة
+ *    lg = h-12 → إجراءات الكاشير الرئيسية فقط (checkout / إغلاق وردية)
+ *    input = h-11 كحد أدنى للمس الآمن
+ *
+ *  نصف القطر الافتراضي: rounded-xl للأزرار والبطاقات، rounded-2xl للنوافذ،
+ *  rounded-lg للعناصر الدقيقة داخلها، وrounded-md للحقول الصغيرة فقط.
+ *  rounded-3xl ليس جزءاً من النظام. استخدم shadow-card / shadow-elevated /
+ *  shadow-overlay فقط؛ shadow-2xl والظلال العشوائية غير معتمدة للواجهة.
+ * ────────────────────────────────────────────────────────────────
+ */
+
+:root {
+  /* Shell layout dimensions — driven by JS state but animated via CSS. */
+  --sidebar-width: 256px;
+  --sidebar-collapsed-width: 72px;
+  --topbar-height: 56px;
+
+  /* ── الهوية: زمرد واحد هادئ ── */
+  --pos-primary: #059669;            /* emerald-600 — أهدأ من 500 على شاشات الكاشير */
+  --pos-primary-hover: #047857;
+  --pos-primary-bright: #34d399;     /* للمؤشرات فوق الترويسة الداكنة فقط */
+  --pos-primary-soft: #ecfdf5;
+  --pos-primary-foreground: #ffffff;
+
+  /* ── الحالات الدلالية ── */
+  --pos-success: #16a34a;
+  --pos-success-hover: #15803d;
+  --pos-success-soft: #f0fdf4;
+  --pos-success-strong: #15803d;
+  --pos-success-foreground: #ffffff;
+
+  --pos-warning: #d97706;
+  --pos-warning-soft: #fffbeb;
+  --pos-warning-strong: #92400e;
+  --pos-warning-bright: #fcd34d;     /* فوق الترويسة الداكنة فقط */
+
+  --pos-info: #0284c7;
+  --pos-info-soft: #f0f9ff;
+  --pos-info-strong: #0369a1;
+  --pos-info-bright: #38bdf8;        /* فوق الترويسة الداكنة فقط */
+
+  --pos-destructive: #dc2626;
+  --pos-destructive-hover: #b91c1c;
+  --pos-destructive-soft: #fef2f2;
+  --pos-destructive-strong: #b91c1c;
+  --pos-destructive-bright: #f87171; /* فوق الترويسة الداكنة فقط */
+  --pos-destructive-foreground: #ffffff;
+
+  /* ── الهيكل: محايد بارد ثابت ── */
+  --pos-background: #f4f5f7;
+  --pos-surface: #ffffff;
+  --pos-surface-muted: #f1f2f4;
+  --pos-border: #e3e5e8;
+  --pos-foreground: #18181b;
+  --pos-muted: #52525b;
+  --pos-muted-foreground: #71717a;
+
+  /* ── الترويسة الداكنة ── */
+  --pos-header: #0f172a;
+  --pos-header-muted: #94a3b8;
+
+  /* ── الارتفاع: توكن دلالي واحد لكل مستوى ── */
+  --pos-shadow-card: 0 1px 2px rgba(15, 23, 42, 0.06);
+  --pos-shadow-elevated: 0 8px 24px -8px rgba(15, 23, 42, 0.16);
+  --pos-shadow-overlay: 0 20px 48px -16px rgba(15, 23, 42, 0.28);
+
+  /* ── حلقة تركيز موحّدة لكل الحقول والأزرار ── */
+  --pos-focus-ring: 0 0 0 3px rgba(5, 150, 105, 0.25);
+
+  /* Radius scale — rounded-3xl is intentionally excluded. */
+  --pos-radius-md: 0.375rem;
+  --pos-radius-lg: 0.5rem;
+  --pos-radius-xl: 0.75rem;
+  --pos-radius-2xl: 1rem;
+}
+
+@theme inline {
+  --color-primary: var(--pos-primary);
+  --color-primary-hover: var(--pos-primary-hover);
+  --color-primary-bright: var(--pos-primary-bright);
+  --color-primary-soft: var(--pos-primary-soft);
+  --color-primary-foreground: var(--pos-primary-foreground);
+
+  --color-success: var(--pos-success);
+  --color-success-hover: var(--pos-success-hover);
+  --color-success-soft: var(--pos-success-soft);
+  --color-success-strong: var(--pos-success-strong);
+  --color-success-foreground: var(--pos-success-foreground);
+
+  --color-warning: var(--pos-warning);
+  --color-warning-soft: var(--pos-warning-soft);
+  --color-warning-strong: var(--pos-warning-strong);
+  --color-warning-bright: var(--pos-warning-bright);
+
+  --color-info: var(--pos-info);
+  --color-info-soft: var(--pos-info-soft);
+  --color-info-strong: var(--pos-info-strong);
+  --color-info-bright: var(--pos-info-bright);
+
+  --color-destructive: var(--pos-destructive);
+  --color-destructive-hover: var(--pos-destructive-hover);
+  --color-destructive-soft: var(--pos-destructive-soft);
+  --color-destructive-strong: var(--pos-destructive-strong);
+  --color-destructive-bright: var(--pos-destructive-bright);
+  --color-destructive-foreground: var(--pos-destructive-foreground);
+
+  --color-background: var(--pos-background);
+  --color-surface: var(--pos-surface);
+  --color-surface-muted: var(--pos-surface-muted);
+  --color-border: var(--pos-border);
+  --color-foreground: var(--pos-foreground);
+  --color-muted: var(--pos-muted);
+  --color-muted-foreground: var(--pos-muted-foreground);
+
+  --color-header: var(--pos-header);
+  --color-header-muted: var(--pos-header-muted);
+
+  /* الارتفاع: shadow-card للبطاقات، shadow-elevated للقوائم
+     المنبثقة، shadow-overlay للتنبيهات والنوافذ فوق كل شيء. */
+  --shadow-card: var(--pos-shadow-card);
+  --shadow-elevated: var(--pos-shadow-elevated);
+  --shadow-overlay: var(--pos-shadow-overlay);
+
+  --radius-md: var(--pos-radius-md);
+  --radius-lg: var(--pos-radius-lg);
+  --radius-xl: var(--pos-radius-xl);
+  --radius-2xl: var(--pos-radius-2xl);
+
+  --font-sans: var(--font-tajawal);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  font-family: var(--font-tajawal), system-ui, -apple-system, sans-serif;
+  background: var(--pos-background);
+  color: var(--pos-foreground);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+*, *::before, *::after {
+  font-family: inherit;
+}
+
+::selection {
+  background: var(--pos-primary-soft);
+  color: var(--pos-foreground);
+}
+
+@utility scrollbar-hidden {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* حلقة التركيز الموحّدة — تُركّب على الحقول والأزرار القابلة للتركيز:
+   `focus-visible:focus-ring` بدل خليط focus:border-primary و focus:ring-2. */
+@utility focus-ring {
+  outline: none;
+  box-shadow: var(--pos-focus-ring);
+}
+
+/* Springy entrance for grid micro-cards (staggered via inline delay). */
+@keyframes pos-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@utility animate-pos-pop-in {
+  animation: pos-pop-in 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Notice toast — slides down with a springy settle, keeping the centered
+   translate(-50%) so it never shifts off-axis. */
+@keyframes pos-toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -10px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+}
+
+@utility animate-pos-toast {
+  animation: pos-toast-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Gentle levitation for empty-state icons — a quiet nudge, never busy. */
+@keyframes pos-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+@utility animate-pos-float {
+  animation: pos-float 3.5s ease-in-out infinite;
+}
+
+/* Breathing halo for the primary checkout CTA — reads from the brand
+   token so a palette change never breaks the glow. */
+@keyframes pos-glow {
+  0%,
+  100% {
+    box-shadow: 0 10px 24px -6px rgba(5, 150, 105, 0.4);
+  }
+  50% {
+    box-shadow: 0 10px 32px -2px rgba(5, 150, 105, 0.62);
+  }
+}
+
+@utility animate-pos-glow {
+  animation: pos-glow 3.2s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* 80mm thermal receipt printing.
+   `@page` must have zero margin so the driver uses the full paper width. */
+@page {
+  margin: 0;
+}
+
+@media print {
+  html,
+  body {
+    background: #ffffff !important;
+  }
+
+  /* Hide the whole terminal (buttons, panels, modals, banners). */
+  body * {
+    visibility: hidden !important;
+  }
+
+  /* Reveal only the receipt. */
+  #thermal-receipt,
+  #thermal-receipt * {
+    visibility: visible !important;
+  }
+
+  /* Reveal Z/X report print divs. */
+  #z-report-print,
+  #z-report-print *,
+  #x-report-print,
+  #x-report-print *,
+  #z-report-admin-print,
+  #z-report-admin-print * {
+    visibility: visible !important;
+  }
+
+  #thermal-receipt {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: var(--receipt-width, 80mm) !important;
+    max-width: var(--receipt-width, 80mm) !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+    border: none !important;
+    background: #ffffff !important;
+    color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    -webkit-print-color-adjust: exact !important;
+  }
+
+  /* Reveal only the barcode label sheet. */
+  #barcode-sheet,
+  #barcode-sheet * {
+    visibility: visible !important;
+  }
+
+  #barcode-sheet {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    margin: 0 !important;
+    /* No extra padding/gap: the page box is sized to the label pitch, so any
+       inset shifts content onto the next physical sticker (blank-label
+       overrun). */
+    padding: 0 !important;
+    gap: 0 !important;
+    flex-direction: column !important;
+    flex-wrap: nowrap !important;
+    justify-content: flex-start !important;
+    align-items: stretch !important;
+    box-shadow: none !important;
+    border: none !important;
+    background: #ffffff !important;
+    color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    -webkit-print-color-adjust: exact !important;
+  }
+
+  /* Each sticker stays on a single physical label (sticky roll pitch). */
+  .barcode-label {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+    overflow: hidden !important;
+  }
+
+  /* One physical label per printed page: page size == label size, so forcing
+     each subsequent label onto a fresh page yields exactly one label/page with
+     no trailing blank page. */
+  .barcode-label:not(:first-child) {
+    break-before: page !important;
+    page-break-before: always !important;
+  }
+}

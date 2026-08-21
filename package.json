@@ -1,0 +1,121 @@
+{
+  "name": "pos",
+  "version": "0.1.0",
+  "description": "MAKEEN POS desktop application",
+  "author": "MAKEEN Software",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "migrate": "node db/migrate.mjs",
+    "migrate:check": "node db/migrate.mjs --check",
+    "migrate:verify": "node db/migrate.mjs --verify",
+    "migrate:audit": "node db/audit.mjs",
+    "verify:api": "node tests/api.health.mjs",
+    "verify:perf": "node tests/perf.apis.mjs",
+    "verify:security": "tsx tests/security.sessions.ts",
+    "verify:hardware": "tsx tests/hardware.workflows.ts",
+    "verify:stress": "tsx tests/stress.stress.ts",
+    "verify:store": "tsx tests/store.workflows.ts",
+    "verify:receiving": "tsx tests/receiving.workflows.ts",
+    "verify:customer-memory": "tsx tests/customer-memory.workflows.ts",
+    "verify:shortages": "tsx tests/shortages.workflows.ts",
+    "verify:accounting": "node scripts/verify_accounting_consistency.mjs",
+    "verify:pwa": "node scripts/verify-pwa.mjs",
+    "verify:shift-recovery": "node --env-file=.env tests/shift.recovery.integration.mjs",
+    "verify": "node tests/run.mjs",
+    "verify:e2e": "node scripts/e2e_lifecycle_audit.mjs",
+    "deploy:phase5": "tsx scripts/deploy_phase5.ts",
+    "deploy:phase5:dry": "tsx scripts/deploy_phase5.ts --dry-run",
+    "deploy:phase5:local": "tsx scripts/deploy_phase5.ts --local-only",
+    "verify:db": "tsx scripts/check_db.ts",
+    "export:usb": "node export-to-usb.js",
+    "electron:dev": "electron electron/main.js",
+    "electron:build": "npm run build && electron-builder --win nsis"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.112.3",
+    "@tanstack/react-virtual": "^3.14.9",
+    "@zxing/browser": "^0.2.1",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "dotenv": "^17.4.2",
+    "electron-serve": "^3.0.1",
+    "electron-updater": "^6.8.9",
+    "idb": "^8.0.3",
+    "jsbarcode": "^3.12.3",
+    "lucide-react": "^1.28.0",
+    "next": "16.3.0",
+    "papaparse": "^5.5.4",
+    "qrcode": "^1.5.4",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "recharts": "^3.10.1",
+    "tailwind-merge": "^3.6.0",
+    "xlsx": "^0.18.5",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/jsbarcode": "^3.11.4",
+    "@types/node": "^20",
+    "@types/papaparse": "^5.5.2",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "electron": "^43.4.1",
+    "electron-builder": "^26.15.3",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.0",
+    "fake-indexeddb": "^6.2.5",
+    "pg": "^8.22.0",
+    "tailwindcss": "^4",
+    "tsx": "^4.23.7",
+    "typescript": "^5"
+  },
+  "build": {
+    "appId": "com.makeen.pos",
+    "productName": "MAKEEN POS",
+    "electronDist": "node_modules/electron/dist",
+    "asar": true,
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "electron/**/*",
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "MAKEEN-Setup.${ext}",
+      "executableName": "MAKEEN-POS"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "MAKEEN POS"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "adamsul3iman",
+        "repo": "makeen-pos"
+      }
+    ]
+  }
+}

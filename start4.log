@@ -1,0 +1,9 @@
+
+> pos@0.1.0 start
+> next start -p 3996
+
+▲ Next.js 16.3.0
+- Local:         http://localhost:3996
+- Network:       http://172.18.160.1:3996
+✓ Ready in 660ms
+✓ Running next.config.ts took 106ms

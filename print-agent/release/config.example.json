@@ -1,0 +1,9 @@
+{
+  "supabase_url": "https://your-project.supabase.co",
+  "supabase_key": "eyJ...your-service-role-key...",
+  "terminal_id": "your-terminal-uuid",
+  "thermal_printer": "Rongta RP80",
+  "a4_printer": "HP LaserJet Pro",
+  "port": 9100,
+  "log_level": "info"
+}

@@ -1,0 +1,24 @@
+{
+  "name": "makeen-print-agent",
+  "version": "1.0.0",
+  "description": "MAKEEN Print Agent — bridges MAKEEN POS to local printers",
+  "main": "dist/index.js",
+  "bin": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "build:exe": "node scripts/build-exe.js",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.0",
+    "dotenv": "^16.4.0",
+    "pdf-to-printer": "^5.8.0",
+    "puppeteer-core": "^25.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0",
+    "postject": "^1.0.0-alpha.6",
+    "typescript": "^5.7.0"
+  }
+}

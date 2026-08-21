@@ -1,0 +1,86 @@
+import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+import {
+  getDeviceSessionFromRequest,
+  getAdminSessionFromRequest,
+} from "@/lib/proxySession";
+import { deviceCanAccessPath, homePathForDevice } from "@/lib/permissions";
+
+/**
+ * Root proxy — strict role-based routing for the POS.
+ *
+ * Next 16 replaces the deprecated `middleware` convention with this file.
+ * It runs on every navigation and redirects based on the signed device
+ * session:
+ *
+ *   - unauthenticated app routes     → /login
+ *   - authenticated /login           → the role's home (owner → /admin,
+ *                                     cashier → /pos, inventory clerk →
+ *                                     /mobile/add-product, back-office staff
+ *                                     → /admin)
+ *   - `/`                            → role home (or /login)
+ *   - wrong area for a role          → the role's home (an inventory clerk is
+ *                                     bounced off /pos and /admin; a cashier is
+ *                                     bounced off /admin; ...)
+ *
+ * API routes, static assets and the platform login/super-admin pages are
+ * skipped. The admin cookie alone never unlocks app pages — only the device
+ * session does.
+ */
+
+const PUBLIC_PATHS = ["/login", "/register", "/super-admin"];
+
+function redirectTo(path: string, request: NextRequest): NextResponse {
+  return NextResponse.redirect(new URL(path, request.url));
+}
+
+export function proxy(request: NextRequest): NextResponse {
+  const { pathname } = request.nextUrl;
+
+  // Platform / auth pages are public.
+  if (PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
+    // An authenticated user does not belong on the login screen.
+    if (pathname === "/login") {
+      const device = getDeviceSessionFromRequest(request);
+      if (device) return redirectTo(homePathForDevice(device), request);
+    }
+    return NextResponse.next();
+  }
+
+  // Route handlers own API authentication and always return JSON errors.
+  // Letting the page guard redirect API requests would turn a failed login
+  // into a 200 HTML response after fetch follows the redirect to /login.
+  if (pathname.startsWith("/api/")) {
+    return NextResponse.next();
+  }
+
+  // `/` has no content of its own — resolve it to the role's home.
+  if (pathname === "/") {
+    const device = getDeviceSessionFromRequest(request);
+    return redirectTo(device ? homePathForDevice(device) : "/login", request);
+  }
+
+  // Every other app route needs a device session.
+  const device = getDeviceSessionFromRequest(request);
+  if (!device) return redirectTo("/login", request);
+
+  // `getAdminSessionFromRequest` is used purely to keep the owner cookie on the
+  // request for route handlers that still rely on it; the device session is the
+  // source of truth for routing.
+  void getAdminSessionFromRequest(request);
+
+  if (!deviceCanAccessPath(device, pathname)) {
+    return redirectTo(homePathForDevice(device), request);
+  }
+
+  return NextResponse.next();
+}
+
+export const config = {
+  // Static assets and metadata files never need the proxy. API routes remain
+  // matched so the explicit JSON-preserving bypass above is kept visible and
+  // testable; _next/data stays covered like the pages it represents.
+  matcher: [
+    "/((?!_next/static|_next/image|favicon.ico|sitemap.xml|robots.txt|.*\\.(?:png|jpg|jpeg|gif|svg|webp|ico|woff2?)$).*)",
+  ],
+};
