@@ -614,60 +614,28 @@ async function recordDebtLedger(
     }
   }
 
-  const { data: customer, error: readError } = await supabase
-    .from("customers")
-    .select("id,balance")
-    .eq("id", customerId)
-    .eq("store_id", storeId)
-    .single();
-  if (readError || !customer) return { recorded: false, error: readError?.message };
-
-  // Settlements are capped at the current balance so the ledger can never go
-  // negative; overpayments are recorded up to the outstanding amount only.
-  const effectiveAmount = isDebtSale
-    ? amount
-    : Math.min(amount, Math.max(0, customer.balance ?? 0));
-  if (!isDebtSale && effectiveAmount <= 0) {
-    return { recorded: true, error: undefined };
-  }
-  const balanceAfter = round2((customer.balance ?? 0) + (isDebtSale ? effectiveAmount : -effectiveAmount));
-
-  // Idempotency: a failed ack (or timeout) triggers a retry, so guard
-  // against double-inserting the same event into the customer ledger.
+  // Atomic, idempotent ledger append. The RPC serializes concurrent
+  // terminals on a row lock, clamps settlements to the live balance and
+  // rolls the balance forward RELATIVELY (never an absolute overwrite), so
+  // two queues draining at the same millisecond cannot lose an update — and
+  // a retried event replays as the original ledger effect via its key.
+  // A customer deleted mid-queue surfaces as P0002 (deterministic failure).
   const marker = `sync:${event.sync_id}`;
   const description = isDebtSale
     ? amount < 0
       ? "مرتجع ذمة"
       : "فاتورة آجلة"
     : "سداد ذمة";
-  const { data: existingTx } = await supabase
-    .from("customer_transactions")
-    .select("id")
-    .eq("customer_id", customer.id)
-    .eq("store_id", storeId)
-    .eq("type", isDebtSale ? "SALE_DEBT" : "SETTLEMENT")
-    .ilike("description", `%${marker}%`)
-    .maybeSingle();
-  if (existingTx) return { recorded: true };
-
-  const { error: txError } = await supabase.from("customer_transactions").insert({
-    customer_id: customer.id,
-    store_id: storeId,
-    type: isDebtSale ? "SALE_DEBT" : "SETTLEMENT",
-    amount: effectiveAmount,
-    balance_after: balanceAfter,
-    description: `${description} • ${marker}`,
-    shift_id: payload.shiftId ?? null,
+  const { error: ledgerError } = await supabase.rpc("apply_customer_ledger_event", {
+    p_store_id: storeId,
+    p_customer_id: customerId,
+    p_type: isDebtSale ? "SALE_DEBT" : "SETTLEMENT",
+    p_amount: amount,
+    p_description: `${description} • ${marker}`,
+    p_shift_id: payload.shiftId ?? null,
+    p_idempotency_key: marker,
   });
-  if (txError) return { recorded: false, error: txError.message };
-
-  const { error: updateError } = await supabase
-    .from("customers")
-    .update({ balance: balanceAfter })
-    .eq("id", customer.id)
-    .eq("store_id", storeId);
-  if (updateError) return { recorded: false, error: updateError.message };
-
+  if (ledgerError) return { recorded: false, error: ledgerError.message };
   return { recorded: true };
 }
 

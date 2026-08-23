@@ -1,5 +1,6 @@
 import { getSupabaseBrowser } from "./supabaseBrowser";
 import { getTenantStoreId } from "./tenantClient";
+import { fetchAllRows } from "./supabase";
 import {
   buildTaxBreakdown,
   invoiceReference,
@@ -980,5 +981,128 @@ export async function fetchProfitabilityReport(params: {
     },
     previous: null,
     generatedAt: new Date().toISOString(),
+  };
+}
+
+/* ─── Sales ledger CSV export (client-side, formerly /api/reports/sales/export) ── */
+
+const MAX_EXPORT_ROWS = 50_000;
+const EXPORT_PAGE_SIZE = 1000;
+
+function csvCell(value: unknown): string {
+  return `"${String(value ?? "").replaceAll('"', '""')}"`;
+}
+
+/**
+ * Walks the full filtered sales ledger (up to MAX_EXPORT_ROWS) and builds the
+ * same UTF-8 BOM CSV the legacy export endpoint produced.
+ */
+export async function exportSalesLedgerCsv(params: {
+  from: string;
+  to: string;
+  kind?: string;
+  branchId?: string;
+  terminalId?: string;
+  cashierId?: string;
+  paymentMethod?: string;
+  search?: string;
+}): Promise<{ filename: string; csv: string }> {
+  const sb = getSupabaseBrowser();
+  const storeId = getTenantStoreId();
+  if (!sb || !storeId) throw new Error("Supabase غير مهيأة");
+
+  const { from, to } = params;
+  if (!from || !to) throw new Error("حدد تاريخ البداية والنهاية");
+  const fromDate = new Date(`${from}T00:00:00.000+03:00`);
+  const toDate = new Date(`${to}T23:59:59.999+03:00`);
+  if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+    throw new Error("تاريخ غير صالح");
+  }
+  if (fromDate > toDate) throw new Error("تاريخ البداية يجب أن يكون قبل تاريخ النهاية");
+  if (toDate.getTime() - fromDate.getTime() > 731 * DAY_MS) {
+    throw new Error("المدة المطلوبة أطول من سنتين — قسّم التصدير");
+  }
+
+  const paymentMethod = ["CASH", "VISA", "SPLIT", "DEBT", "CLIQ"].includes(params.paymentMethod ?? "")
+    ? params.paymentMethod!
+    : null;
+  const kind = params.kind === "SALE" || params.kind === "RETURN" ? params.kind : "ALL";
+
+  let q = sb
+    .from("sales_invoices")
+    .select(
+      "id,sync_id,branch_id,terminal_id,cashier_name,customer_id,customer_name,customer_phone,payment_method,subtotal,tax,discount,delivery_fee,total,cash_amount,visa_amount,cliq_amount,debt_amount,item_count,gross_profit,is_return,is_cancellation,completed_at",
+    )
+    .eq("store_id", storeId)
+    .gte("created_at", from)
+    .lte("created_at", to + "T23:59:59.999+03:00");
+  if (params.branchId) q = q.eq("branch_id", params.branchId);
+  if (params.terminalId) q = q.eq("terminal_id", params.terminalId);
+  if (params.cashierId) q = q.eq("cashier_id", params.cashierId);
+  if (paymentMethod) q = q.eq("payment_method", paymentMethod);
+  if (kind === "SALE") q = q.eq("is_return", false);
+  if (kind === "RETURN") q = q.eq("is_return", true);
+  if (params.search?.trim()) q = q.ilike("cashier_name", `%${params.search.trim()}%`);
+
+  const [branchRows, terminalRows] = await Promise.all([
+    fetchAllRows<{ id: string; name: string }>(sb, "branches", "id,name", storeId),
+    fetchAllRows<{ id: string; name: string }>(sb, "terminals", "id,name", storeId),
+  ]);
+  const branchNames = new Map(branchRows.map((b) => [b.id, b.name]));
+  const terminalNames = new Map(terminalRows.map((t) => [t.id, t.name]));
+
+  const rawRows: Record<string, unknown>[] = [];
+  for (let offset = 0; offset < MAX_EXPORT_ROWS; offset += EXPORT_PAGE_SIZE) {
+    const { data, error } = await q
+      .order("created_at", { ascending: false })
+      .range(offset, offset + EXPORT_PAGE_SIZE - 1);
+    if (error) throw new Error(error.message);
+    const batch = (data ?? []) as Record<string, unknown>[];
+    rawRows.push(...batch);
+    if (batch.length < EXPORT_PAGE_SIZE) break;
+  }
+  if (rawRows.length >= MAX_EXPORT_ROWS) {
+    throw new Error("حجم التصدير يتجاوز 50 ألف فاتورة. قسّم الفترة إلى نطاقات أصغر");
+  }
+
+  const invoices = rawRows.map((row) => ({
+    ...row,
+    branch_name: branchNames.get(String(row.branch_id ?? "")) ?? "",
+    terminal_name: terminalNames.get(String(row.terminal_id ?? "")) ?? "",
+  })).map(mapSalesLedgerInvoice);
+
+  const header = [
+    "المرجع", "نوع المستند", "التاريخ", "الفرع", "الجهاز", "الكاشير", "العميل", "هاتف العميل", "طريقة الدفع",
+    "ما قبل الخصم", "الضريبة", "الخصم", "رسوم التوصيل", "الإجمالي", "النقدي", "البطاقة", "كليك", "الذمم", "عدد الأصناف",
+    "الربح الإجمالي", "هامش الربح %", "موثوقية الربح",
+  ];
+  const lines = [header, ...invoices.map((invoice) => [
+    invoice.reference,
+    invoice.isReturn ? "مرتجع" : "مبيعات",
+    invoice.completedAt,
+    invoice.branchName,
+    invoice.terminalName,
+    invoice.cashierName,
+    invoice.customerName,
+    invoice.customerPhone,
+    invoice.paymentMethod,
+    invoice.subtotal,
+    invoice.tax,
+    invoice.discount,
+    invoice.deliveryFee,
+    invoice.total,
+    invoice.cashAmount,
+    invoice.visaAmount,
+    invoice.cliqAmount,
+    invoice.debtAmount,
+    invoice.itemCount,
+    invoice.grossProfit ?? "غير محسوم",
+    invoice.profitMargin ?? "",
+    invoice.profitReliable ? "موثوق" : "غير موثوق",
+  ])].map((row) => row.map(csvCell).join(","));
+
+  return {
+    filename: `sales-ledger-${from}-${to}.csv`,
+    csv: "\uFEFF" + lines.join("\r\n"),
   };
 }

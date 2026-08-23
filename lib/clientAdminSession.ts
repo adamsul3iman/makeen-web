@@ -1,37 +1,26 @@
 "use client";
 
 import { usePosStore } from "@/store/usePosStore";
+import { hasCapability, isStaffCapability, type StaffCapability } from "@/lib/permissions";
 
 export type AdminSessionProbe = "valid" | "invalid" | "unreachable";
 
+/**
+ * Static export: there is no server to validate an HttpOnly cookie against.
+ * The admin session lives in the persisted zustand store (established at
+ * login through `authenticate_admin_client`), so validity is a local check.
+ */
 export async function probeAdminSession(): Promise<AdminSessionProbe> {
-  try {
-    const response = await fetch("/api/admin/account", {
-      method: "GET",
-      cache: "no-store",
-      credentials: "same-origin",
-    });
-    if (response.ok) return "valid";
-    if (response.status === 401) return "invalid";
-    return "unreachable";
-  } catch {
-    return "unreachable";
-  }
+  return usePosStore.getState().adminSession ? "valid" : "invalid";
 }
 
 export async function probeStaffCapability(capability: string): Promise<AdminSessionProbe> {
-  try {
-    const response = await fetch(`/api/access?capability=${encodeURIComponent(capability)}`, {
-      method: "GET",
-      cache: "no-store",
-      credentials: "same-origin",
-    });
-    if (response.ok) return "valid";
-    if (response.status === 401 || response.status === 403) return "invalid";
-    return "unreachable";
-  } catch {
-    return "unreachable";
-  }
+  const state = usePosStore.getState();
+  if (state.adminSession) return "valid";
+  if (!isStaffCapability(capability)) return "invalid";
+  const actor = state.currentCashier;
+  if (!actor) return "invalid";
+  return hasCapability(actor, capability as StaffCapability) ? "valid" : "invalid";
 }
 
 export function expireLocalAdminSession(): void {

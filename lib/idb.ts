@@ -65,6 +65,12 @@ export interface InvoiceCreatedPayload {
   shiftId?: string;
   branchId?: string;
   terminalId?: string;
+  /**
+   * Terminal-scoped human-readable number minted locally at checkout
+   * (e.g. T1-0007). Carried so the server ledger and reports can show the
+   * same number the receipt printed.
+   */
+  invoiceNumber?: string;
   completed_at: string;
   /** ISTD/JoFotara clearance UUID returned by the fast-path push, if any. */
   istd_uuid?: string;

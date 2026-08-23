@@ -28,7 +28,7 @@ import {
 } from "@/components/ui/AdminDataTable";
 import { PageHeader } from "@/components/ui/Card";
 import { formatMoney } from "@/lib/format";
-import { fetchSalesReport } from "@/lib/reportsClient";
+import { fetchSalesReport, exportSalesLedgerCsv } from "@/lib/reportsClient";
 import type { SalesLedgerResponse, SalesPaymentMethod } from "@/types/salesLedger.types";
 
 const isoDate = (date: Date): string => date.toISOString().slice(0, 10);
@@ -223,17 +223,19 @@ export default function SalesLedgerPage() {
   const summary = data?.summary;
   const pagination = data?.pagination;
 
-  function exportCsv() {
-    const params = new URLSearchParams({ from, to, kind });
-    if (branchId) params.set("branchId", branchId);
-    if (terminalId) params.set("terminalId", terminalId);
-    if (cashierId) params.set("cashierId", cashierId);
-    if (paymentMethod) params.set("paymentMethod", paymentMethod);
-    if (search) params.set("search", search);
-    const link = document.createElement("a");
-    link.href = `/api/reports/sales/export?${params.toString()}`;
-    link.download = "";
-    link.click();
+  async function exportCsv() {
+    try {
+      const { filename, csv } = await exportSalesLedgerCsv({ from, to, kind, branchId, terminalId, cashierId, paymentMethod, search });
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "تعذر تصدير سجل المبيعات");
+    }
   }
 
   return (

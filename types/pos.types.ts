@@ -283,6 +283,18 @@ export interface Terminal {
   createdAt: string;
 }
 
+/**
+ * Durable per-terminal invoice counter state. Each register owns a local
+ * sequence so receipts stay sequential and readable (T1-0001) while fully
+ * offline; distinct prefixes keep numbers collision-free across terminals.
+ */
+export interface TerminalInvoiceCounter {
+  /** Stable prefix derived from the terminal identity (e.g. "T1"). */
+  prefix: string;
+  /** Last issued sequence number for this terminal. */
+  last: number;
+}
+
 /** Auto-calculated money totals for the current invoice. */
 export interface SaleTotals {
   subtotal: Money;
@@ -331,6 +343,12 @@ export interface CompletedInvoice {
   cashierName?: string;
   /** True when this document is a debt settlement voucher (سند قبض), not a sale. */
   isSettlement?: boolean;
+  /**
+   * Human-readable terminal-scoped number minted at checkout (e.g. T1-0007).
+   * Printed on the receipt; absent for legacy/unsynced documents, which fall
+   * back to the UUID-derived reference.
+   */
+  invoiceNumber?: string;
   /** Invoice id this document reverses (secure returns). Printed on the receipt. */
   originalInvoiceId?: string;
   /** Branch/terminal that settled this invoice (printed on receipts). */

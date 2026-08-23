@@ -15,6 +15,9 @@ import {
   Trash,
 } from "lucide-react";
 import BarcodeScanner from "@/components/mobile/BarcodeScanner";
+import { fetchTaxonomy } from "@/lib/categoriesClient";
+import { fetchSuppliers } from "@/lib/suppliersClient";
+import { createInventoryProduct } from "@/lib/inventoryClient";
 
 interface CategoryOption {
   id: string;
@@ -22,16 +25,6 @@ interface CategoryOption {
 }
 
 interface SupplierOption {
-  id: string;
-  name: string;
-}
-
-interface CategoryReferenceItem {
-  id: string;
-  name: string;
-}
-
-interface SupplierReferenceItem {
   id: string;
   name: string;
 }
@@ -49,8 +42,8 @@ function normalizeBarcode(value: string): string {
 /**
  * Camera-driven product creation for the mobile page. Scans one or more
  * barcodes for the product, collects name + prices + category + supplier, and
- * POSTs the same payload shape as the back-office catalog form to
- * /api/catalog/products (authorized for the narrow `catalog.add` capability).
+ * saves through `createInventoryProduct` (authorized for the narrow
+ * `catalog.add` capability).
  */
 export default function AddProductForm({
   storeName,
@@ -81,21 +74,19 @@ export default function AddProductForm({
 
   useEffect(() => {
     let active = true;
-    void fetch("/api/catalog/references?type=category", { credentials: "same-origin" })
-      .then((response) => (response.ok ? response.json() : null))
-      .then((data: { items?: CategoryReferenceItem[] } | null) => {
-        if (!active || !data?.items) return;
-        const sorted = [...data.items].sort((a, b) => a.name.localeCompare(b.name, "ar"));
+    fetchTaxonomy()
+      .then((data) => {
+        if (!active) return;
+        const sorted = [...data.categories].sort((a, b) => a.name.localeCompare(b.name, "ar"));
         setCategories(sorted.map((item) => ({ id: item.id, name: item.name })));
       })
       .catch(() => {
         // The dropdown is optional — the form still works without categories.
       });
-    void fetch("/api/catalog/references?type=supplier", { credentials: "same-origin" })
-      .then((response) => (response.ok ? response.json() : null))
-      .then((data: { items?: SupplierReferenceItem[] } | null) => {
-        if (!active || !data?.items) return;
-        const sorted = [...data.items].sort((a, b) => a.name.localeCompare(b.name, "ar"));
+    fetchSuppliers()
+      .then((rows) => {
+        if (!active) return;
+        const sorted = [...rows].sort((a, b) => a.name.localeCompare(b.name, "ar"));
         setSuppliers(sorted.map((item) => ({ id: item.id, name: item.name })));
       })
       .catch(() => {
@@ -166,51 +157,36 @@ export default function AddProductForm({
 
     setBusy(true);
     try {
-      const response = await fetch("/api/catalog/products", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify({
-          name: productName,
-          categoryId,
-          category: "",
-          brandId: "",
-          brand: "",
-          supplierId,
-          supplier: "",
-          baseUnit: "حبة",
-          stock: 0,
-          taxPercent: storeTax,
-          taxIncluded: true,
-          isActive: true,
-          showInPos: true,
-          isSellable: true,
-          isPurchasable: true,
-          allowPriceChange: false,
-          reorderLevel: 0,
-          variants: barcodes.map((barcode, index) => ({
-            barcode,
-            variantLabel: "",
-            costPrice: costValue,
-            price: priceValue,
-            wholesalePrice: wholesaleValue,
-            isDefaultSale: index === 0,
-          })),
-        }),
+      await createInventoryProduct({
+        name: productName,
+        categoryId,
+        category: "",
+        brandId: "",
+        brand: "",
+        supplierId,
+        supplier: "",
+        baseUnit: "حبة",
+        stock: 0,
+        taxPercent: storeTax,
+        taxIncluded: true,
+        isActive: true,
+        showInPos: true,
+        isSellable: true,
+        isPurchasable: true,
+        allowPriceChange: false,
+        reorderLevel: 0,
+        variants: barcodes.map((barcode, index) => ({
+          barcode,
+          variantLabel: "",
+          costPrice: costValue,
+          price: priceValue,
+          wholesalePrice: wholesaleValue,
+          isDefaultSale: index === 0,
+        })),
       });
-      const data = (await response.json().catch(() => ({}))) as { error?: string };
-      if (response.status === 401 || response.status === 403) {
-        setError("انتهت الجلسة — سجّل الدخول مجدداً");
-        onLogout();
-        return;
-      }
-      if (!response.ok) {
-        setError(data.error ?? "تعذر حفظ المنتج");
-        return;
-      }
       setSaved({ name: productName, barcodes: [...barcodes] });
-    } catch {
-      setError("تعذر الاتصال بالخادم — تحقق من اتصالك وحاول مجدداً");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "تعذر حفظ المنتج");
     } finally {
       setBusy(false);
     }

@@ -13,6 +13,7 @@ import {
 import { usePosStore } from "@/store/usePosStore";
 import { formatMoney } from "@/lib/format";
 import { evaluateShiftCloseGuard } from "@/lib/shiftGuard";
+import { fetchShiftItemAnalytics } from "@/lib/shiftsClient";
 import { useModalEscape } from "@/hooks/useModalEscape";
 import type { CashMovement } from "@/types/pos.types";
 import { formatShiftTime, formatShiftDateTime } from "@/lib/dateTime";
@@ -295,10 +296,9 @@ function ProductsTab({ shiftId }: { shiftId: string }) {
     let cancelled = false;
     async function load() {
       try {
-        const res = await fetch(`/api/shifts/${shiftId}/items?tab=products`);
-        const data = await res.json();
+        const data = await fetchShiftItemAnalytics(shiftId, "products");
         if (!cancelled) {
-          setItems(data.items ?? []);
+          setItems((data.items as ProductRow[]) ?? []);
           setTotalProducts(data.totalProducts ?? 0);
         }
       } catch {
@@ -376,9 +376,8 @@ function TaxesTab({ shiftId }: { shiftId: string }) {
     let cancelled = false;
     async function load() {
       try {
-        const res = await fetch(`/api/shifts/${shiftId}/items?tab=taxes`);
-        const data = await res.json();
-        if (!cancelled) setItems(data.items ?? []);
+        const data = await fetchShiftItemAnalytics(shiftId, "taxes");
+        if (!cancelled) setItems((data.items as TaxRow[]) ?? []);
       } catch {
         if (!cancelled) setItems([]);
       } finally {

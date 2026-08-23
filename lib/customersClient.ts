@@ -153,8 +153,12 @@ export async function fetchCustomerTransactions(customerId: string): Promise<Cus
  *   - "payment" / "SETTLEMENT" → credit (reduces balance)
  *   - "SALE_DEBT" and other types → debit (increases balance)
  *
- * balance_after snapshots the resulting total so the ledger stays
- * auditable even after later edits.
+ * Delegates to the atomic `apply_customer_ledger_event` RPC: it locks the
+ * customer row, applies the delta RELATIVELY (never an absolute overwrite),
+ * caps credits at the live balance and appends the ledger row in one
+ * statement — a manual payment racing a synced DEBT sale can no longer
+ * lose an update. `balance_after` snapshots the resulting total so the
+ * ledger stays auditable even after later edits.
  */
 export async function createCustomerTransaction(
   customerId: string,
@@ -169,45 +173,36 @@ export async function createCustomerTransaction(
   const amount = Number(input.amount);
   if (!Number.isFinite(amount) || amount <= 0) throw new Error("قيمة الحركة غير صالحة");
 
-  const { data: customer, error: customerError } = await sb
-    .from("customers")
-    .select("id,balance")
-    .eq("id", customerId)
-    .eq("store_id", storeId)
-    .maybeSingle();
-  if (customerError) throw new Error(customerError.message);
-  if (!customer) throw new Error("العميل غير موجود");
-
   // Convention: positive balance = customer owes the store.
-  // "payment" and "SETTLEMENT" are credits (reduce what customer owes).
+  // "payment" and "SETTLEMENT" are credits (reduce what customer owes);
   // "SALE_DEBT" and other types are debits (increase what customer owes).
   const isCredit = type === "payment" || type === "SETTLEMENT";
-  const delta = isCredit ? -amount : amount;
-  const balanceAfter = Number(customer.balance ?? 0) + delta;
+  const rpcType = isCredit ? "SETTLEMENT" : "SALE_DEBT";
 
-  const { data: transaction, error } = await sb
-    .from("customer_transactions")
-    .insert({
-      customer_id: customerId,
-      store_id: storeId,
-      type,
-      amount,
-      balance_after: balanceAfter,
-      description: input.description ?? null,
-      shift_id: input.shift_id ?? null,
-    })
-    .select("id,customer_id,type,amount,balance_after,description,shift_id,created_at")
-    .single();
-  if (error || !transaction) {
-    throw new Error(error?.message ?? "تعذر تسجيل حركة العميل");
-  }
+  const { data, error } = await sb.rpc("apply_customer_ledger_event", {
+    p_store_id: storeId,
+    p_customer_id: customerId,
+    p_type: rpcType,
+    p_amount: amount,
+    p_description: input.description ?? "",
+    p_shift_id: input.shift_id ?? null,
+  });
+  if (error) throw new Error(error.message);
 
-  const { error: balanceError } = await sb
-    .from("customers")
-    .update({ balance: balanceAfter })
-    .eq("id", customerId)
-    .eq("store_id", storeId);
-  if (balanceError) throw new Error(balanceError.message);
+  // PostgREST wraps SETOF-record results in an array.
+  const row = (Array.isArray(data) ? data[0] : data) as
+    | { transaction_id?: string | null; applied_amount?: number; balance_after?: number }
+    | undefined;
+  if (!row) throw new Error("تعذر تسجيل حركة العميل");
 
-  return transaction as CustomerTransaction;
+  return {
+    id: row.transaction_id ?? "",
+    customer_id: customerId,
+    type,
+    amount: Number(row.applied_amount ?? amount),
+    balance_after: Number(row.balance_after ?? 0),
+    description: input.description ?? null,
+    shift_id: input.shift_id ?? null,
+    created_at: new Date().toISOString(),
+  };
 }

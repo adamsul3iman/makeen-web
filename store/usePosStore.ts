@@ -23,11 +23,12 @@ import type {
   ShiftTotals,
   ShiftTransaction,
   ShortageFlag,
-  Store,
-  StoreSummary,
-  SubscriptionStatus,
-  Terminal,
-} from "@/types/pos.types";
+   Store,
+   StoreSummary,
+   SubscriptionStatus,
+   Terminal,
+   TerminalInvoiceCounter,
+ } from "@/types/pos.types";
 import {
   countIstdFailed,
   countIstdPending,
@@ -58,7 +59,7 @@ import { loadDeviceHardwareSettings } from "@/lib/deviceHardware";
 import { pushAudit } from "@/lib/audit";
 import { newUuid } from "@/lib/uuid";
 import { getTenantStoreId, setTenantStoreId } from "@/lib/tenantClient";
-import { STORE_HEADER } from "@/lib/tenant";
+import { fetchCatalogSnapshot, fetchCustomersPayload } from "@/lib/clientCatalog";
 import { effectiveTaxPercent } from "@/lib/qr";
 import { computeFiscalBreakdown, computeSaleTotals } from "@/lib/saleMath";
 import { derivePaymentBuckets } from "@/lib/paymentBuckets";
@@ -330,6 +331,12 @@ interface PosStoreState {
   activeBranchId: string | null;
   /** Terminal whose drawer this register operates. */
   activeTerminalId: string | null;
+  /**
+   * Durable per-terminal invoice counters, keyed by terminal id. Survives
+   * reloads and cashier changes (persisted) so each register's receipt
+   * numbers keep increasing forever. Never reset on logout.
+   */
+  terminalInvoiceCounters: Record<string, TerminalInvoiceCounter>;
   /** Password re-entry gate for destructive admin actions (P2). */
   isSecondaryAuthOpen: boolean;
   /** The action waiting on the owner's password. */
@@ -697,6 +704,41 @@ function setCompletingCrossTab(active: boolean): void {
   } catch {
     // storage unavailable: per-tab isCompleting still guards this tab.
   }
+}
+
+/**
+ * Terminal-prefixed invoice numbers (رقم الفاتورة). Checkout is offline-first
+ * — the receipt prints long before the server ever sees the sale — so each
+ * terminal owns a durable local counter and mints `PREFIX-0001` at checkout.
+ * Prefixes are unique per terminal, so numbers stay sequential per register
+ * and collision-free across registers without any network round-trip.
+ */
+const TERMINAL_PREFIX_RE = /^T\d{1,4}$/;
+
+/** Resolve (and lazily pin) a stable prefix for the given terminal. */
+function resolveTerminalPrefix(
+  state: { terminals: Terminal[]; terminalInvoiceCounters?: Record<string, TerminalInvoiceCounter> },
+  terminalId: string,
+): string {
+  const pinned = state.terminalInvoiceCounters?.[terminalId]?.prefix;
+  if (pinned) return pinned;
+  // Prefer an explicit T#-style terminal name; otherwise derive a stable
+  // ordinal from the store's terminal registry (creation order, then id).
+  const named = state.terminals
+    .find((t) => t.id === terminalId)
+    ?.name?.trim()
+    .toUpperCase()
+    .replace(/\s+/g, "");
+  if (named && TERMINAL_PREFIX_RE.test(named)) return named;
+  const ordered = [...state.terminals].sort(
+    (a, b) => (a.createdAt || "").localeCompare(b.createdAt || "") || a.id.localeCompare(b.id),
+  );
+  const ordinal = ordered.findIndex((t) => t.id === terminalId);
+  return `T${ordinal >= 0 ? ordinal + 1 : 1}`;
+}
+
+export function formatTerminalInvoiceNumber(prefix: string, sequence: number): string {
+  return `${prefix}-${String(sequence).padStart(4, "0")}`;
 }
 
 function flushCriticalPersistWrites(): void {
@@ -1231,6 +1273,7 @@ export const usePosStore = create<PosStore>()(
       activeCartIndex: 0,
       items: [],
       totals: emptyTotals(),
+      terminalInvoiceCounters: {},
       notice: null,
       heldInvoices: [],
       isCheckoutModalOpen: false,
@@ -3047,14 +3090,6 @@ export const usePosStore = create<PosStore>()(
         const job = (async () => {
           const matchesStore = () =>
             (get().currentStore?.id ?? getTenantStoreId()) === storeId;
-          const catalogHeaders: Record<string, string> = { [STORE_HEADER]: storeId };
-          if (get().catalogUpdatedAt) {
-            catalogHeaders["If-None-Match"] = get().catalogUpdatedAt;
-          }
-          const customerHeaders: Record<string, string> = { [STORE_HEADER]: storeId };
-          if (get().customersUpdatedAt) {
-            customerHeaders["If-None-Match"] = get().customersUpdatedAt;
-          }
 
           set({ customersLoading: true });
 
@@ -3066,13 +3101,13 @@ export const usePosStore = create<PosStore>()(
             console.error("Failed to read customers cache:", err);
             return null;
           });
-          const remoteCatalogPromise = fetch("/api/catalog", {
-            cache: "no-store",
-            headers: catalogHeaders,
+          const remoteCatalogPromise = fetchCatalogSnapshot(storeId).catch((err) => {
+            console.error("Failed to load catalog snapshot:", err);
+            return null;
           });
-          const remoteCustomersPromise = fetch("/api/customers", {
-            cache: "no-store",
-            headers: customerHeaders,
+          const remoteCustomersPromise = fetchCustomersPayload(storeId).catch((err) => {
+            console.error("Failed to load customers:", err);
+            return null;
           });
           const [localCatalog, localCustomers] = await Promise.all([
             localCatalogPromise,
@@ -3117,62 +3152,44 @@ export const usePosStore = create<PosStore>()(
 
           if (!matchesStore()) return;
 
-          if (remoteCatalog.status === "fulfilled") {
-            const response = remoteCatalog.value;
-            if (response.status === 304) {
-              catalogOnline = true;
-            } else if (response.ok) {
-              catalogOnline = true;
-              const snapshot = (await response.json()) as PosSnapshot;
-              if (snapshot.updatedAt !== get().catalogUpdatedAt) {
-                await saveCatalogCache(
-                  {
-                    storeId,
-                    categories: snapshot.categories,
-                    products: snapshot.products,
-                    barcodes: snapshot.barcodes,
-                    barcodeIndex: snapshot.barcodeIndex,
-                    quickKeys: snapshot.quickKeys,
-                    cashiers: snapshot.cashiers,
-                    pinSalt: snapshot.pinSalt,
-                    updatedAt: snapshot.updatedAt,
-                  },
+          if (remoteCatalog.status === "fulfilled" && remoteCatalog.value) {
+            catalogOnline = true;
+            const snapshot = remoteCatalog.value;
+            if (snapshot.updatedAt !== get().catalogUpdatedAt) {
+              await saveCatalogCache(
+                {
                   storeId,
-                );
-                if (!matchesStore()) return;
-                get().loadSnapshot(snapshot);
-              }
+                  categories: snapshot.categories,
+                  products: snapshot.products,
+                  barcodes: snapshot.barcodes,
+                  barcodeIndex: snapshot.barcodeIndex,
+                  quickKeys: snapshot.quickKeys,
+                  cashiers: snapshot.cashiers,
+                  pinSalt: snapshot.pinSalt,
+                  updatedAt: snapshot.updatedAt,
+                },
+                storeId,
+              );
+              if (!matchesStore()) return;
+              get().loadSnapshot(snapshot);
             }
           }
 
-          if (remoteCustomers.status === "fulfilled") {
-            const response = remoteCustomers.value;
-            if (response.status === 304) {
-              customersOnline = true;
-            } else if (response.ok) {
-              const data = (await response.json()) as {
-                customers?: PosCustomer[];
-                updatedAt?: string;
-              };
-              const customers = normalizeCustomers(
-                Array.isArray(data.customers) ? data.customers : [],
-              );
-              const updatedAt =
-                typeof data.updatedAt === "string" && data.updatedAt
-                  ? data.updatedAt
-                  : `remote:${Date.now()}`;
-              customersOnline = true;
-              if (
-                updatedAt !== get().customersUpdatedAt ||
-                customers.length !== get().customers.length
-              ) {
-                await saveCustomersCache({ storeId, customers, updatedAt }, storeId);
-                if (!matchesStore()) return;
-                set((state) => ({
-                  customers: mergeCustomers(state.customers, customers),
-                  customersUpdatedAt: updatedAt,
-                }));
-              }
+          if (remoteCustomers.status === "fulfilled" && remoteCustomers.value) {
+            const data = remoteCustomers.value;
+            const customers = normalizeCustomers(data.customers);
+            const updatedAt = data.updatedAt || `remote:${Date.now()}`;
+            customersOnline = true;
+            if (
+              updatedAt !== get().customersUpdatedAt ||
+              customers.length !== get().customers.length
+            ) {
+              await saveCustomersCache({ storeId, customers, updatedAt }, storeId);
+              if (!matchesStore()) return;
+              set((state) => ({
+                customers: mergeCustomers(state.customers, customers),
+                customersUpdatedAt: updatedAt,
+              }));
             }
           }
 
