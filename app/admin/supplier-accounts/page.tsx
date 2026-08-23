@@ -22,7 +22,7 @@ import {
 } from "@/components/ui/AdminDataTable";
 import { PageHeader } from "@/components/ui/Card";
 import { formatMoney } from "@/lib/format";
-import { posFetch } from "@/lib/tenantClient";
+import { fetchSuppliers, fetchSupplierInvoices } from "@/lib/suppliersClient";
 import type {
   SupplierAccountsResponse,
   SupplierInvoiceFilterStatus,
@@ -76,16 +76,74 @@ export default function SupplierAccountsPage() {
       setLoading(true);
       setError("");
     }, 0);
-    const params = new URLSearchParams({ from, to, status, page: String(page), pageSize: "50" });
-    if (supplierId) params.set("supplierId", supplierId);
-    if (submittedSearch) params.set("search", submittedSearch);
-    posFetch(`/api/supplier-accounts?${params}`, { cache: "no-store" })
-      .then(async (response) => {
-        const body = await response.json().catch(() => null);
-        if (!response.ok) throw new Error(body?.error ?? "تعذر تحميل حسابات الموردين");
-        return body as SupplierAccountsResponse;
+    const filterStatus = status === "ALL" || status === "OVERDUE" ? undefined : status;
+    Promise.all([
+      fetchSupplierInvoices({ status: filterStatus, page, pageSize: 50 }),
+      fetchSuppliers(),
+    ])
+      .then(([ledger, supplierList]) => {
+        if (!alive) return;
+        const dueSoonCutoff = ammanDate(new Date(Date.now() + 7 * DAY_MS));
+        const invoices: SupplierInvoiceListItem[] = ledger.invoices.map((invoice) => ({
+          id: invoice.id,
+          supplierId: invoice.supplierId,
+          supplierName: invoice.supplierName,
+          purchaseOrderId: null,
+          invoiceNumber: invoice.invoiceNumber,
+          invoiceDate: invoice.invoiceDate || invoice.createdAt?.slice(0, 10) || "",
+          dueDate: invoice.dueDate ?? "",
+          subtotal: invoice.subtotal,
+          taxAmount: invoice.taxAmount,
+          totalAmount: invoice.totalAmount,
+          paidAmount: invoice.paidAmount,
+          balanceDue: invoice.balanceDue,
+          status: invoice.status as SupplierInvoiceListItem["status"],
+          notes: invoice.notes ?? "",
+          itemCount: 0,
+          paymentCount: 0,
+          isOverdue:
+            invoice.balanceDue > 0 &&
+            invoice.status !== "PAID" &&
+            invoice.status !== "VOID" &&
+            invoice.dueDate !== null &&
+            invoice.dueDate < today,
+          createdAt: invoice.createdAt ?? "",
+        }));
+        const openRows = invoices.filter((invoice) => invoice.status === "OPEN" || invoice.status === "PARTIAL");
+        const overdueRows = invoices.filter((invoice) => invoice.isOverdue);
+        const sum = (pick: (invoice: SupplierInvoiceListItem) => number) => invoices.reduce((acc, invoice) => acc + pick(invoice), 0);
+        const dueSoonBalance = openRows
+          .filter((invoice) => !invoice.isOverdue && invoice.dueDate !== "" && invoice.dueDate <= dueSoonCutoff)
+          .reduce((acc, invoice) => acc + invoice.balanceDue, 0);
+        const next: SupplierAccountsResponse = {
+          invoices,
+          summary: {
+            invoiceCount: ledger.total,
+            purchasesExcludingTax: sum((invoice) => invoice.subtotal),
+            inputTax: sum((invoice) => invoice.taxAmount),
+            purchasesIncludingTax: sum((invoice) => invoice.totalAmount),
+            paymentCount: 0,
+            payments: 0,
+            openInvoiceCount: openRows.length,
+            outstandingBalance: openRows.reduce((acc, invoice) => acc + invoice.balanceDue, 0),
+            overdueCount: overdueRows.length,
+            overdueBalance: overdueRows.reduce((acc, invoice) => acc + invoice.balanceDue, 0),
+            dueSoonBalance,
+          },
+          suppliers: supplierList.map((supplier) => ({ id: supplier.id, name: supplier.name, balance: supplier.balance })),
+          products: [],
+          pagination: {
+            page: ledger.page,
+            pageSize: ledger.pageSize,
+            total: ledger.total,
+            totalPages: Math.max(1, Math.ceil(ledger.total / ledger.pageSize)),
+          },
+          generatedAt: new Date().toISOString(),
+        };
+        // The direct query has no product lookup; keep any options already loaded.
+        if (!alive) return;
+        setData((previous) => ({ ...next, products: previous?.products ?? [] }));
       })
-      .then((body) => { if (alive) setData(body); })
       .catch((reason) => { if (alive) setError(reason instanceof Error ? reason.message : "تعذر تحميل حسابات الموردين"); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; window.clearTimeout(loadingTimer); };

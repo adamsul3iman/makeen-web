@@ -15,8 +15,8 @@ import {
 import BarcodeLabel, { type BarcodeLabelData } from "@/components/print/BarcodeLabel";
 import ReceiptTemplatePreview from "@/components/print/ReceiptTemplatePreview";
 import { cacheDefaultPrintTemplate, defaultPrintConfig } from "@/lib/clientPrintTemplates";
+import { deletePrintTemplate, fetchPrintTemplates, savePrintTemplate, updateLogo } from "@/lib/printClient";
 import { LABEL_ELEMENT_LABELS, RECEIPT_SECTION_LABELS } from "@/lib/printTemplates";
-import { posFetch } from "@/lib/tenantClient";
 import { usePosStore } from "@/store/usePosStore";
 import type {
   BarcodeLabelElementId,
@@ -87,12 +87,7 @@ export default function PrintStudioPage() {
 
   useEffect(() => {
     let cancelled = false;
-    posFetch("/api/print-templates", { cache: "no-store" })
-      .then(async (response) => {
-        const body = (await response.json().catch(() => null)) as { templates?: PrintTemplate[]; error?: string } | null;
-        if (!response.ok) throw new Error(body?.error ?? "تعذر تحميل القوالب");
-        return body?.templates ?? [];
-      })
+    fetchPrintTemplates()
       .then((rows) => {
         if (cancelled) return;
         setTemplates(rows);
@@ -157,14 +152,7 @@ export default function PrintStudioPage() {
     setSaving(true);
     setMessage(null);
     try {
-      const response = await posFetch(activeId ? `/api/print-templates/${activeId}` : "/api/print-templates", {
-        method: activeId ? "PUT" : "POST",
-        headers: { "Content-Type": "application/json", "x-pos-role": "admin" },
-        body: JSON.stringify({ kind, name: name.trim(), isDefault, config }),
-      });
-      const body = (await response.json().catch(() => null)) as { template?: PrintTemplate; error?: string } | null;
-      if (!response.ok || !body?.template) throw new Error(body?.error ?? "تعذر حفظ القالب");
-      const saved = body.template;
+      const saved = await savePrintTemplate({ kind, name: name.trim(), isDefault, config }, activeId ?? undefined);
       setTemplates((current) => {
         const next = current.filter((row) => row.id !== saved.id).map((row) => saved.isDefault && row.kind === saved.kind ? { ...row, isDefault: false } : row);
         return [saved, ...next];
@@ -183,9 +171,11 @@ export default function PrintStudioPage() {
 
   const remove = async () => {
     if (!activeId || isDefault || !window.confirm(`حذف القالب «${name}»؟`)) return;
-    const response = await posFetch(`/api/print-templates/${activeId}`, { method: "DELETE", headers: { "x-pos-role": "admin" } });
-    const body = (await response.json().catch(() => null)) as { error?: string } | null;
-    if (!response.ok) return setMessage({ tone: "error", text: body?.error ?? "تعذر حذف القالب" });
+    try {
+      await deletePrintTemplate(activeId);
+    } catch (error) {
+      return setMessage({ tone: "error", text: error instanceof Error ? error.message : "تعذر حذف القالب" });
+    }
     const remaining = templates.filter((row) => row.id !== activeId);
     setTemplates(remaining);
     const fallback = remaining.find((row) => row.kind === kind && row.isDefault)
@@ -211,10 +201,12 @@ export default function PrintStudioPage() {
       reader.onerror = () => reject(new Error("تعذر قراءة الشعار"));
       reader.readAsDataURL(file);
     });
-    const response = await posFetch("/api/settings/logo", { method: "PATCH", headers: { "Content-Type": "application/json", "x-pos-role": "admin" }, body: JSON.stringify({ logo: dataUrl }) });
-    const body = (await response.json().catch(() => null)) as { logoUrl?: string; error?: string } | null;
-    if (!response.ok) return setMessage({ tone: "error", text: body?.error ?? "تعذر حفظ الشعار" });
-    if (currentStore) setCurrentStore({ ...currentStore, logoUrl: body?.logoUrl ?? "" });
+    try {
+      await updateLogo(dataUrl);
+    } catch (error) {
+      return setMessage({ tone: "error", text: error instanceof Error ? error.message : "تعذر حفظ الشعار" });
+    }
+    if (currentStore) setCurrentStore({ ...currentStore, logoUrl: dataUrl });
     setMessage({ tone: "success", text: "تم تحديث شعار الفاتورة" });
   };
 

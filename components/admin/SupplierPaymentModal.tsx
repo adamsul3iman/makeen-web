@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { CheckCircle2, X } from "lucide-react";
 import { formatMoney } from "@/lib/format";
-import { posFetch } from "@/lib/tenantClient";
+import { recordSupplierPayment } from "@/lib/suppliersClient";
 import type { SupplierInvoiceListItem, SupplierPaymentMethod } from "@/types/supplierAccounts.types";
 
 export default function SupplierPaymentModal({ invoice, onClose, onPaid }: { invoice: SupplierInvoiceListItem; onClose: () => void; onPaid: () => void }) {
@@ -20,9 +20,7 @@ export default function SupplierPaymentModal({ invoice, onClose, onPaid }: { inv
     setSaving(true);
     setError("");
     try {
-      const response = await posFetch("/api/supplier-accounts", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ invoiceId: invoice.id, amount: value, method, reference, notes }) });
-      const body = (await response.json().catch(() => null)) as { error?: string } | null;
-      if (!response.ok) throw new Error(body?.error ?? "تعذر تسجيل الدفعة");
+      await recordSupplierPayment(invoice.id, { amount: value, method, reference, notes });
       onPaid();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "تعذر تسجيل الدفعة");
@@ -44,7 +42,7 @@ export default function SupplierPaymentModal({ invoice, onClose, onPaid }: { inv
           {value > invoice.balanceDue ? <p className="text-sm font-black text-red-700">المبلغ يتجاوز الرصيد المستحق</p> : null}
           {error ? <p className="rounded-lg bg-red-50 px-3 py-2 text-sm font-black text-red-700">{error}</p> : null}
         </div>
-        <footer className="flex gap-2 border-t border-border p-4"><button type="button" onClick={onClose} disabled={saving} className="h-11 flex-1 rounded-lg border border-border text-sm font-black text-muted">إلغاء</button><button type="submit" disabled={saving || value <= 0 || value > invoice.balanceDue} className="inline-flex h-11 flex-[2] items-center justify-center gap-2 rounded-lg bg-emerald-600 text-sm font-black text-white disabled:opacity-40"><CheckCircle2 className="h-4 w-4" /> {saving ? "جارٍ التسجيل…" : value === invoice.balanceDue ? "سداد كامل" : "تسجيل دفعة جزئية"}</button></footer>
+        <footer className="flex gap-2 border-t border-border p-4"><button type="button" onClick={onClose} disabled={saving} className="h-11 flex-1 rounded-lg border border-border text-sm font-black text-muted">إلغاء</button><button type="submit" disabled={saving || value <= 0 || value > invoice.balanceDue} className="inline-flex h-11 flex-[2] items-center justify-center gap-2 rounded-lg bg-green-600 text-sm font-black text-white disabled:opacity-40"><CheckCircle2 className="h-4 w-4" /> {saving ? "جارٍ التسجيل…" : value === invoice.balanceDue ? "سداد كامل" : "تسجيل دفعة جزئية"}</button></footer>
       </form>
     </div>
   );

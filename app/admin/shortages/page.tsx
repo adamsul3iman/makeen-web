@@ -19,7 +19,7 @@ import {
   buildShortageWhatsAppText,
   buildWhatsAppUrl,
 } from "@/lib/shortages";
-import { posFetch } from "@/lib/tenantClient";
+import { fetchShortageSuppliers, fetchShortages } from "@/lib/shortagesClient";
 import { usePosStore } from "@/store/usePosStore";
 import type {
   CategoryMap,
@@ -34,22 +34,6 @@ const FILTER_LABELS: Record<FilterMode, string> = {
   zero: "نافدة المخزون فقط",
   below_reorder: "تحت الحد الأدنى فقط",
 };
-
-function mapFlags(raw: unknown[]): ShortageFlag[] {
-  if (!Array.isArray(raw)) return [];
-  return raw.map((f) => {
-    const row = f as Record<string, unknown>;
-    return {
-      id: String(row.id ?? ""),
-      productId: String(row.product_id ?? ""),
-      productName: String(row.product_name ?? ""),
-      currentStock: Number(row.current_stock ?? 0),
-      reason: (row.reason as string) ?? undefined,
-      resolved: Boolean(row.resolved),
-      createdAt: String(row.created_at ?? ""),
-    };
-  });
-}
 
 function buildHierarchy(
   items: ReturnType<typeof computeShortageRadar>,
@@ -141,10 +125,18 @@ export default function AdminShortagesPage() {
     setLoading(true);
     setError("");
     try {
-      const res = await posFetch("/api/shortages", { cache: "no-store" });
-      if (!res.ok) throw new Error("load_failed");
-      const data = await res.json();
-      setFlags(mapFlags(data.flags ?? data.shortage_flags ?? []));
+      const rows = await fetchShortages();
+      setFlags(
+        rows.map((row) => ({
+          id: row.id,
+          productId: row.productId,
+          productName: row.productName,
+          currentStock: row.currentStock,
+          reason: row.reason ?? undefined,
+          resolved: row.resolved,
+          createdAt: row.createdAt,
+        })),
+      );
     } catch {
       setError("تعذر تحميل بيانات نقص المخزون — تحقق من الاتصال");
     } finally {
@@ -157,16 +149,13 @@ export default function AdminShortagesPage() {
   }, [load, refreshKey]);
 
   useEffect(() => {
-    posFetch("/api/suppliers", { cache: "no-store" })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (Array.isArray(data?.suppliers)) {
-          const map: Record<string, string> = {};
-          for (const s of data.suppliers) {
-            if (s.phone) map[s.id] = s.phone;
-          }
-          setSupplierPhones(map);
+    fetchShortageSuppliers()
+      .then((suppliers) => {
+        const map: Record<string, string> = {};
+        for (const supplier of suppliers) {
+          if (supplier.phone) map[supplier.id] = supplier.phone;
         }
+        setSupplierPhones(map);
       })
       .catch(() => {});
   }, []);

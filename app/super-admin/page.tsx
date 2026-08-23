@@ -15,20 +15,17 @@ import {
   Trash2,
   UserRound,
 } from "lucide-react";
-import { posFetch } from "@/lib/tenantClient";
+import {
+  createStore as createStoreRequest,
+  deleteStore as deleteStoreRequest,
+  fetchStores,
+  updateStoreStatus,
+  type SuperAdminStore,
+} from "@/lib/superAdminClient";
 
 const SUPER_PIN_STORAGE_KEY = "pos-super-admin-pin";
 
-interface AdminStore {
-  id: string;
-  code: string;
-  name: string;
-  ownerName: string;
-  email: string;
-  phone: string;
-  subscriptionStatus: "active" | "suspended";
-  createdAt?: string;
-}
+type AdminStore = SuperAdminStore;
 
 const EMPTY_FORM = { name: "", owner_name: "", email: "", phone: "", password: "", code: "" };
 
@@ -128,26 +125,12 @@ export default function SuperAdminPage() {
     window.setTimeout(() => setCopiedId((prev) => (prev === store.id ? null : prev)), 1500);
   }, []);
 
-  const superHeaders = (p: string): Record<string, string> => ({
-    "x-pos-super-admin-pin": p,
-  });
-
-  const loadStores = useCallback(async (p: string) => {
+  const loadStores = useCallback(async () => {
     setLoading(true);
     setListError("");
     try {
-      const res = await posFetch("/api/admin/stores", {
-        cache: "no-store",
-        headers: superHeaders(p),
-      });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setListError(data.error ?? "تعذر تحميل المتاجر");
-        setStores([]);
-        return;
-      }
-      const data = (await res.json()) as { stores?: AdminStore[] };
-      setStores(Array.isArray(data.stores) ? data.stores : []);
+      const data = await fetchStores();
+      setStores(Array.isArray(data) ? data : []);
     } catch {
       setListError("تعذر الاتصال بالخادم");
       setStores([]);
@@ -162,7 +145,7 @@ export default function SuperAdminPage() {
     if (!saved) return;
     let cancelled = false;
     void Promise.resolve()
-      .then(() => loadStores(saved))
+      .then(() => loadStores())
       .then(() => {
         if (cancelled) return;
         setPin(saved);
@@ -181,17 +164,15 @@ export default function SuperAdminPage() {
     }
     setBusy(true);
     setPinError("");
-    const res = await posFetch("/api/admin/stores", {
-      cache: "no-store",
-      headers: superHeaders(code),
-    });
-    setBusy(false);
-    if (res.ok) {
+    try {
+      await fetchStores();
       sessionStorage.setItem(SUPER_PIN_STORAGE_KEY, code);
       setAuthorized(true);
-      void loadStores(code);
-    } else {
+      void loadStores();
+    } catch {
       setPinError("رمز PIN غير صحيح");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -206,21 +187,14 @@ export default function SuperAdminPage() {
     const next = store.subscriptionStatus === "active" ? "suspended" : "active";
     setToggling(store.id);
     try {
-      const res = await posFetch(`/api/admin/stores/${store.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json", ...superHeaders(pin) },
-        body: JSON.stringify({ subscription_status: next }),
-      });
-      if (res.ok) {
-        setStores((prev) =>
-          prev.map((s) => (s.id === store.id ? { ...s, subscriptionStatus: next } : s)),
-        );
-      } else {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setListError(data.error ?? "تعذر تحديث حالة المتجر");
-      }
-    } catch {
-      setListError("تعذر الاتصال بالخادم");
+      await updateStoreStatus(store.id, next);
+      setStores((prev) =>
+        prev.map((s) => (s.id === store.id ? { ...s, subscriptionStatus: next } : s)),
+      );
+    } catch (err) {
+      setListError(
+        err instanceof Error && err.message ? err.message : "تعذر تحديث حالة المتجر",
+      );
     } finally {
       setToggling(null);
     }
@@ -232,18 +206,10 @@ export default function SuperAdminPage() {
     setDeleting(id);
     setListError("");
     try {
-      const res = await posFetch(`/api/admin/stores/${id}`, {
-        method: "DELETE",
-        headers: superHeaders(pin),
-      });
-      if (res.ok) {
-        setStores((prev) => prev.filter((s) => s.id !== id));
-      } else {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setListError(data.error ?? "تعذر حذف المتجر");
-      }
-    } catch {
-      setListError("تعذر الاتصال بالخادم");
+      await deleteStoreRequest(id);
+      setStores((prev) => prev.filter((s) => s.id !== id));
+    } catch (err) {
+      setListError(err instanceof Error && err.message ? err.message : "تعذر حذف المتجر");
     } finally {
       setDeleting(null);
       setConfirmDeleteId(null);
@@ -269,23 +235,13 @@ export default function SuperAdminPage() {
     setCreating(true);
     setFormError("");
     try {
-      const res = await posFetch("/api/admin/stores", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...superHeaders(pin) },
-        body: JSON.stringify({ ...form, code: storeCode }),
-      });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setFormError(data.error ?? "تعذر إنشاء المتجر");
-        return;
-      }
-      const data = (await res.json()) as { store: AdminStore };
-      setStores((prev) => [data.store, ...prev]);
-      setCreatedStore(data.store);
+      const created = await createStoreRequest({ ...form, code: storeCode });
+      setStores((prev) => [created, ...prev]);
+      setCreatedStore(created);
       setForm(EMPTY_FORM);
       setCreateOpen(false);
-    } catch {
-      setFormError("تعذر الاتصال بالخادم");
+    } catch (err) {
+      setFormError(err instanceof Error && err.message ? err.message : "تعذر إنشاء المتجر");
     } finally {
       creatingRef.current = false;
       setCreating(false);

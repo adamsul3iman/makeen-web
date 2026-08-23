@@ -2,10 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { cacheDefaultPrintTemplate, loadCachedPrintConfig, PRINT_TEMPLATE_EVENT } from "@/lib/clientPrintTemplates";
-import { posFetch } from "@/lib/tenantClient";
+import { fetchPrintTemplates } from "@/lib/printClient";
 import type {
   BarcodeLabelTemplateConfig,
-  PrintTemplate,
   PrintTemplateConfig,
   PrintTemplateKind,
   ReceiptTemplateConfig,
@@ -31,14 +30,10 @@ export function useDefaultPrintTemplate(kind: PrintTemplateKind, storeId?: strin
     };
     window.addEventListener(PRINT_TEMPLATE_EVENT, refreshFromCache);
     let cancelled = false;
-    posFetch(`/api/print-templates?kind=${kind}`, { cache: "no-store" })
-      .then(async (response) => {
-        if (!response.ok) return null;
-        return response.json() as Promise<{ templates?: PrintTemplate[] }>;
-      })
-      .then((body) => {
+    fetchPrintTemplates(kind)
+      .then((templates) => {
         if (cancelled) return;
-        const template = body?.templates?.find((row) => row.isDefault) ?? body?.templates?.[0];
+        const template = templates.find((row) => row.isDefault) ?? templates[0];
         if (!template) return;
         cacheDefaultPrintTemplate(template, storeId);
         setSnapshot({ scope, config: template.config });

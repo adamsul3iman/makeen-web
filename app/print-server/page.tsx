@@ -2,26 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { Printer, Loader2, CheckCircle2, TriangleAlert, Radio } from "lucide-react";
-import { posFetch, setTenantStoreId } from "@/lib/tenantClient";
+import { setTenantStoreId } from "@/lib/tenantClient";
+import { claimPrintJob, resolvePrintJob, type ClaimedPrintJob } from "@/lib/printClient";
 import BarcodeLabel, { type BarcodeLabelData } from "@/components/print/BarcodeLabel";
 import { DEFAULT_BARCODE_LABEL_TEMPLATE, normalizeBarcodeLabelTemplate } from "@/lib/printTemplates";
 import type { BarcodeLabelTemplateConfig } from "@/types/printTemplates";
 
 const POLL_MS = 2500;
 
-interface ClaimedJob {
-  id: string;
-  kind: string;
-  payload: {
-    barcode: string;
-    name: string;
-    variantLabel?: string;
-    unitName: string;
-    price: number;
-    quantity: number;
-    templateSize: { widthMm: number; heightMm: number };
-  };
-}
+type ClaimedJob = ClaimedPrintJob;
 
 function workerId(): string {
   const KEY = "pos-print-server-worker";
@@ -61,11 +50,7 @@ export default function PrintServerPage() {
 
   const resolve = useCallback(async (jobId: string, printed: boolean) => {
     try {
-      await posFetch("/api/print-server", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "resolve", jobId, printed }),
-      });
+      await resolvePrintJob(jobId, printed);
     } catch {
       // A failed resolve leaves the job CLAIMED; the claim timeout requeues
       // it so the label still prints from this (or another) kiosk.
@@ -73,15 +58,8 @@ export default function PrintServerPage() {
   }, []);
 
   const claim = useCallback(async (): Promise<ClaimedJob | null> => {
-    const res = await posFetch("/api/print-server", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "claim", workerId: worker }),
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { success?: boolean; job?: ClaimedJob | null };
-    if (!data.success) return null;
-    return data.job ?? null;
+    const job = await claimPrintJob(worker);
+    return job ?? null;
   }, [worker]);
 
   const printJob = useCallback(
@@ -193,7 +171,7 @@ export default function PrintServerPage() {
           )}
         </div>
         <div className="flex items-center gap-2 text-sm font-bold text-slate-300">
-          {connected === "waiting" && <Radio className="h-4 w-4 animate-pulse text-emerald-400" />}
+          {connected === "waiting" && <Radio className="h-4 w-4 animate-pulse text-green-400" />}
           {connected === "printing" && <Loader2 className="h-4 w-4 animate-spin text-amber-400" />}
           {connected === "error" && <TriangleAlert className="h-4 w-4 text-red-400" />}
           {connected === "waiting" && "في انتظار أوامر الطباعة"}
@@ -242,7 +220,7 @@ export default function PrintServerPage() {
 
         <div className="mt-4 flex items-center gap-4 rounded-2xl border border-slate-800 bg-slate-900 px-4 py-3 text-xs font-bold text-slate-300">
           <span className="flex items-center gap-1.5">
-            <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+            <CheckCircle2 className="h-4 w-4 text-green-400" />
             مطبوع: {total}
           </span>
           {lastPrinted && <span className="truncate text-slate-400">آخر: {lastPrinted}</span>}

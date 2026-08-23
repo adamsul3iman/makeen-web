@@ -55,7 +55,7 @@ const CategoryCard = memo(function CategoryCard({
     <button
       type="button"
       onClick={() => onOpen(category.id)}
-      className="flex min-h-[56px] items-center gap-2.5 rounded-xl border border-slate-100 bg-white p-3 text-start shadow-sm transition hover:border-emerald-200 hover:shadow-md active:scale-[0.97]"
+      className="flex min-h-[56px] items-center gap-2.5 rounded-xl border border-slate-100 bg-white p-3 text-start shadow-sm transition hover:border-green-200 hover:shadow-md active:scale-[0.97]"
     >
       <span
         className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-white shadow-sm"
@@ -115,9 +115,9 @@ const ProductCard = memo(function ProductCard({
     <button
       type="button"
       onClick={() => onAdd(item)}
-      className="flex min-h-[56px] items-center gap-2.5 rounded-xl border border-slate-100 bg-white p-3 text-start shadow-sm transition hover:border-emerald-200 hover:shadow-md active:scale-[0.97]"
+      className="flex min-h-[56px] items-center gap-2.5 rounded-xl border border-slate-100 bg-white p-3 text-start shadow-sm transition hover:border-green-200 hover:shadow-md active:scale-[0.97]"
     >
-      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-emerald-50 text-emerald-600">
+      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-green-50 text-green-600">
         <PackageSearch className="h-4.5 w-4.5" />
       </span>
       <div className="min-w-0 flex-1">

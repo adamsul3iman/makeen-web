@@ -153,7 +153,7 @@ export default function ShiftDetailModal({ shift, open, onClose }: ShiftDetailMo
                       </td>
                       <td className="py-2 text-center tabular-nums">{formatMoney(r.expected)}</td>
                       <td className="py-2 text-center tabular-nums">{formatMoney(r.actual)}</td>
-                      <td className={`py-2 text-center tabular-nums font-bold ${r.variance === 0 ? "text-emerald-600" : "text-amber-600"}`}>
+                      <td className={`py-2 text-center tabular-nums font-bold ${r.variance === 0 ? "text-green-600" : "text-amber-600"}`}>
                         {formatMoney(r.variance)}
                       </td>
                     </tr>

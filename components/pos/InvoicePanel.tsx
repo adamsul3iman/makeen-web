@@ -73,7 +73,7 @@ const CartRow = memo(function CartRow({
             type="button"
             aria-label="زيادة الكمية"
             onClick={() => updateQty(index, item.qty + 1)}
-            className="grid h-11 w-11 place-items-center rounded-lg border border-emerald-200 text-sm font-bold text-emerald-600 transition hover:bg-emerald-50 hover:text-emerald-700 active:scale-95"
+            className="grid h-11 w-11 place-items-center rounded-lg border border-green-200 text-sm font-bold text-green-600 transition hover:bg-green-50 hover:text-green-700 active:scale-95"
           >
             +
           </button>
@@ -264,7 +264,7 @@ export default function InvoicePanel() {
                 onClick={() => switchCart(idx)}
                 className={`flex h-11 items-center gap-1.5 rounded-t-xl border border-b-0 px-3 text-xs font-bold transition ${
                   isActive
-                    ? "border-emerald-400 bg-white text-emerald-700 shadow-sm"
+                    ? "border-green-400 bg-white text-green-700 shadow-sm"
                     : "border-transparent bg-slate-100/70 text-slate-500 hover:bg-slate-200/70"
                 }`}
               >
@@ -273,7 +273,7 @@ export default function InvoicePanel() {
                 {count > 0 && (
                   <span
                     className={`grid h-5 min-w-5 place-items-center rounded-full px-1 text-xs font-black ${
-                      isActive ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-500"
+                      isActive ? "bg-green-100 text-green-700" : "bg-slate-200 text-slate-500"
                     }`}
                   >
                     {count}
@@ -340,8 +340,8 @@ export default function InvoicePanel() {
       <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hidden">
         {items.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-            <div className="animate-pos-float grid h-20 w-20 place-items-center rounded-full bg-gradient-to-br from-emerald-50 via-white to-slate-50 shadow-inner ring-1 ring-emerald-100/80">
-              <ReceiptText className="h-10 w-10 text-emerald-300" />
+            <div className="animate-pos-float grid h-20 w-20 place-items-center rounded-full bg-gradient-to-br from-green-50 via-white to-slate-50 shadow-inner ring-1 ring-green-100/80">
+              <ReceiptText className="h-10 w-10 text-green-300" />
             </div>
             <p className="text-base font-black text-slate-700">لا توجد أصناف بعد</p>
             <p className="max-w-60 text-sm font-semibold leading-relaxed text-slate-500">

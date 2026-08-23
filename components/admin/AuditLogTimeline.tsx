@@ -3,8 +3,7 @@
 import { useEffect, useState } from "react";
 import { Ban, Banknote, FileText, HandCoins, History, PackageSearch, RefreshCw, RotateCcw, ScrollText, ShieldCheck, Tag, UserCog, X } from "lucide-react";
 import { usePosStore } from "@/store/usePosStore";
-import { posFetch } from "@/lib/tenantClient";
-import { STORE_HEADER } from "@/lib/tenant";
+import { fetchAuditLogs } from "@/lib/auditClient";
 import { formatMoney } from "@/lib/format";
 import type { AuditEntry } from "@/lib/audit";
 
@@ -14,15 +13,15 @@ const ACTION_META: Record<
 > = {
   OVERRIDE_PRICE: { label: "تعديل سعر صنف", icon: Tag, badge: "bg-sky-50 text-sky-600", iconCls: "bg-sky-100 text-sky-600" },
   CANCEL_INVOICE: { label: "إلغاء فاتورة", icon: Ban, badge: "bg-rose-50 text-rose-600", iconCls: "bg-rose-100 text-rose-600" },
-  OPEN_DRAWER: { label: "فتح الدرج النقدي", icon: Banknote, badge: "bg-emerald-50 text-emerald-600", iconCls: "bg-emerald-100 text-emerald-600" },
+  OPEN_DRAWER: { label: "فتح الدرج النقدي", icon: Banknote, badge: "bg-green-50 text-green-600", iconCls: "bg-green-100 text-green-600" },
   SAVE_CASHIER: { label: "حفظ موظف", icon: UserCog, badge: "bg-violet-50 text-violet-600", iconCls: "bg-violet-100 text-violet-600" },
   DELETE_CASHIER: { label: "حذف موظف", icon: UserCog, badge: "bg-amber-50 text-amber-600", iconCls: "bg-amber-100 text-amber-600" },
   ENTER_RETURN_MODE: { label: "تفعيل وضع المرتجع", icon: RotateCcw, badge: "bg-orange-50 text-orange-600", iconCls: "bg-orange-100 text-orange-600" },
   ADJUST_STOCK: { label: "تسوية مخزون", icon: PackageSearch, badge: "bg-indigo-50 text-indigo-600", iconCls: "bg-indigo-100 text-indigo-600" },
   CREATE_SUPPLIER_INVOICE: { label: "تسجيل فاتورة مورد", icon: FileText, badge: "bg-blue-50 text-blue-700", iconCls: "bg-blue-100 text-blue-700" },
-  RECORD_SUPPLIER_PAYMENT: { label: "تسجيل دفعة مورد", icon: HandCoins, badge: "bg-emerald-50 text-emerald-700", iconCls: "bg-emerald-100 text-emerald-700" },
+  RECORD_SUPPLIER_PAYMENT: { label: "تسجيل دفعة مورد", icon: HandCoins, badge: "bg-green-50 text-green-700", iconCls: "bg-green-100 text-green-700" },
   SHIFT_VARIANCE: { label: "فرق صندوق وردية", icon: Banknote, badge: "bg-rose-50 text-rose-700", iconCls: "bg-rose-100 text-rose-700" },
-  SHIFT_VARIANCE_APPROVED: { label: "اعتماد فرق الصندوق", icon: ShieldCheck, badge: "bg-emerald-50 text-emerald-700", iconCls: "bg-emerald-100 text-emerald-700" },
+  SHIFT_VARIANCE_APPROVED: { label: "اعتماد فرق الصندوق", icon: ShieldCheck, badge: "bg-green-50 text-green-700", iconCls: "bg-green-100 text-green-700" },
   SHIFT_STALE_RESOLVED: { label: "تسوية وردية معلقة", icon: ShieldCheck, badge: "bg-amber-50 text-amber-700", iconCls: "bg-amber-100 text-amber-700" },
   REVIEW_RISK_EVENT: { label: "مراجعة إشارة مخاطر", icon: ShieldCheck, badge: "bg-slate-100 text-slate-700", iconCls: "bg-slate-200 text-slate-700" },
 };
@@ -64,19 +63,8 @@ function formatValue(key: string, value: unknown): string {
   return String(value);
 }
 
-async function fetchAuditEntries(email?: string | null, storeId?: string | null): Promise<AuditEntry[]> {
-  if (!email) return [];
-  const headers = new Headers({ "x-pos-admin-email": email });
-  if (storeId) headers.set(STORE_HEADER, storeId);
-  const res = await posFetch("/api/admin/audit", {
-    headers,
-  });
-  if (!res.ok) {
-    const data = (await res.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(data?.error ?? `audit ${res.status}`);
-  }
-  const data = (await res.json()) as { entries: AuditEntry[] };
-  return data.entries ?? [];
+async function fetchAuditEntries(): Promise<AuditEntry[]> {
+  return (await fetchAuditLogs()) as AuditEntry[];
 }
 
 /**
@@ -84,26 +72,21 @@ async function fetchAuditEntries(email?: string | null, storeId?: string | null)
  *
  * Read-only chronological record of every sensitive intervention executed
  * from Admin Mode: price overrides, invoice cancellations, manual drawer
- * opens and cashier roster changes. Pulls the append-only server ledger
- * (newest first) through /api/admin/audit; the acting admin is resolved
- * server-side so the timeline can never be forged with a fake identity.
+ * opens and cashier roster changes. Pulls the append-only audit ledger
+ * (newest first) straight from Supabase (RLS-enforced) — the former
+ * /api/admin/audit proxy round-trip is gone.
  */
 export default function AuditLogTimeline() {
   const isOpen = usePosStore((s) => s.isAuditLogOpen);
   const close = usePosStore((s) => s.closeAuditLogModal);
-  const adminSession = usePosStore((s) => s.adminSession);
-  const currentStore = usePosStore((s) => s.currentStore);
-
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const storeId = adminSession?.storeId ?? currentStore?.id ?? null;
-
   const refresh = () => {
     setLoading(true);
     setError("");
-    fetchAuditEntries(adminSession?.email, storeId)
+    fetchAuditEntries()
       .then((resolved) => {
         setEntries(resolved);
         setError("");
@@ -121,7 +104,7 @@ export default function AuditLogTimeline() {
     const timer = window.setTimeout(() => {
       setLoading(true);
       setError("");
-      fetchAuditEntries(adminSession?.email, storeId)
+      fetchAuditEntries()
         .then((resolved) => {
           if (!cancelled) {
             setEntries(resolved);
@@ -142,7 +125,7 @@ export default function AuditLogTimeline() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [isOpen, adminSession?.email, storeId]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 

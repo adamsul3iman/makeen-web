@@ -54,7 +54,7 @@ const QuickKeyButton = memo(function QuickKeyButton({
           {formatMoney(item.price ?? 0)}
         </p>
       </div>
-      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-emerald-500 text-white shadow-sm transition hover:bg-emerald-600">
+      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-green-500 text-white shadow-sm transition hover:bg-green-600">
         <Plus className="h-4 w-4" />
       </span>
     </button>

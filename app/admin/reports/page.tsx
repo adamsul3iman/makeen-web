@@ -28,7 +28,8 @@ import {
   YAxis,
 } from "recharts";
 import { formatMoney } from "@/lib/format";
-import { posFetch } from "@/lib/tenantClient";
+import { fetchReportsOverview } from "@/lib/reportsClient";
+import { getTenantStoreId } from "@/lib/tenantClient";
 import type { ReportsOverview } from "@/types/reports.types";
 
 function isoDate(date: Date): string {
@@ -59,7 +60,7 @@ function StatTile({
 }) {
   const toneClass =
     tone === "good"
-      ? "text-emerald-700 bg-emerald-50 border-emerald-100"
+      ? "text-green-700 bg-green-50 border-green-100"
       : tone === "bad"
         ? "text-red-700 bg-red-50 border-red-100"
         : tone === "info"
@@ -93,16 +94,9 @@ export default function AdminReportsPage() {
       setLoading(true);
       setError(null);
     }, 0);
-    posFetch(`/api/reports/overview?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, {
-      cache: "no-store",
-    })
-      .then(async (res) => {
-        const data = await res.json().catch(() => null);
-        if (!res.ok) throw new Error(data?.error ?? "تعذر تحميل التقرير");
-        return data as { overview?: ReportsOverview };
-      })
-      .then((data) => {
-        if (alive) setOverview(data.overview ?? null);
+    fetchReportsOverview(getTenantStoreId() ?? "", { from, to })
+      .then((overview) => {
+        if (alive) setOverview(overview ?? null);
       })
       .catch((err) => {
         if (alive) setError(err instanceof Error ? err.message : "تعذر تحميل التقرير");
@@ -161,7 +155,7 @@ export default function AdminReportsPage() {
         <div className="flex flex-wrap items-end gap-2">
           <Link
             href="/admin/reports/profitability"
-            className="inline-flex h-10 items-center gap-2 rounded-lg bg-emerald-600 px-3 text-sm font-black text-white transition hover:bg-emerald-700"
+            className="inline-flex h-10 items-center gap-2 rounded-lg bg-green-600 px-3 text-sm font-black text-white transition hover:bg-green-700"
           >
             <Calculator className="h-4 w-4" />
             قائمة الدخل
@@ -308,7 +302,7 @@ export default function AdminReportsPage() {
                     </td>
                     <td className="px-4 py-3 font-bold tabular-nums text-muted">{qty(product.quantity)}</td>
                     <td className="px-4 py-3 font-black tabular-nums text-foreground">{formatMoney(product.sales)}</td>
-                    <td className={product.profit != null && product.profit < 0 ? "px-4 py-3 font-black tabular-nums text-red-700" : product.profit == null ? "px-4 py-3 font-black tabular-nums text-amber-700" : "px-4 py-3 font-black tabular-nums text-emerald-700"}>
+                    <td className={product.profit != null && product.profit < 0 ? "px-4 py-3 font-black tabular-nums text-red-700" : product.profit == null ? "px-4 py-3 font-black tabular-nums text-amber-700" : "px-4 py-3 font-black tabular-nums text-green-700"}>
                       {product.profit == null ? "غير محسوم" : formatMoney(product.profit)}
                     </td>
                     <td className={product.stock != null && product.stock <= 0 ? "px-4 py-3 font-black tabular-nums text-red-700" : "px-4 py-3 font-bold tabular-nums text-muted"}>
@@ -333,7 +327,7 @@ export default function AdminReportsPage() {
                   ? "rounded-full bg-red-50 px-2 py-1 text-xs font-black text-red-700"
                   : qualityTone === "warn"
                     ? "rounded-full bg-amber-50 px-2 py-1 text-xs font-black text-amber-700"
-                    : "rounded-full bg-emerald-50 px-2 py-1 text-xs font-black text-emerald-700"
+                    : "rounded-full bg-green-50 px-2 py-1 text-xs font-black text-green-700"
               }
             >
               {qualityTone === "bad" ? "تحتاج متابعة" : qualityTone === "warn" ? "متوسطة" : "سليمة"}
@@ -380,7 +374,7 @@ export default function AdminReportsPage() {
                 </div>
               ))}
               {!loading && overview?.dataQuality.length === 0 ? (
-                <p className="rounded-lg bg-emerald-50 px-3 py-6 text-center text-sm font-bold text-emerald-700">لا توجد مشاكل جودة واضحة.</p>
+                <p className="rounded-lg bg-green-50 px-3 py-6 text-center text-sm font-bold text-green-700">لا توجد مشاكل جودة واضحة.</p>
               ) : null}
             </div>
           </div>

@@ -173,11 +173,24 @@ export default function PosLayout() {
   // renew it on an interval. Any second tab on the same register goes
   // read-only ("هذا الكاشير مفتوح في نافذة أخرى"). A lease storage event
   // lets the loser take over the moment the winner releases or crashes.
+  //
+  // Transient-flip guard: right after a successful claim we hold a short
+  // grace window during which a lost-lease signal cannot blank the POS.
+  // This prevents the whole UI from swapping to the "open in another window"
+  // screen on spurious storage events or mid-renewal races.
+  const leaseGuardUntil = useRef(0);
   useEffect(() => {
     if (!currentStoreId || !activeTerminalId) return;
     const claim = () => {
-      const held = !acquireRegisterLease(currentStoreId, activeTerminalId);
-      usePosStore.setState({ registerLeaseHeld: held });
+      const acquired = acquireRegisterLease(currentStoreId, activeTerminalId);
+      if (!acquired) {
+        // Respect the grace window: ignore losses that land within it.
+        if (Date.now() < leaseGuardUntil.current) return;
+        usePosStore.setState({ registerLeaseHeld: true });
+      } else {
+        leaseGuardUntil.current = Date.now() + 30_000;
+        usePosStore.setState({ registerLeaseHeld: false });
+      }
     };
     claim();
     const renewal = setInterval(

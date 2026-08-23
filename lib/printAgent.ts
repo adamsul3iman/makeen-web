@@ -1,16 +1,96 @@
 /**
  * Client-side print agent utilities.
  *
- * Checks if a local print agent is reachable, submits print jobs via
- * POST /api/print, and falls back to window.print() when the agent is
- * unavailable.
+ * 1. In Electron → tries silent IPC print (no dialog, direct to thermal printer).
+ * 2. If a standalone print agent is reachable → queues into print_jobs table.
+ * 3. Otherwise → falls back to window.print().
  */
 
-import { posFetch } from "./tenantClient";
+import { getSupabaseBrowser } from "./supabaseBrowser";
+import { getTenantStoreId } from "./tenantClient";
 import type { ShiftAudit } from "@/types/shifts.types";
 
 export type PrintJobKind = "Z_REPORT" | "X_REPORT" | "RECEIPT" | "INVOICE";
 export type PrinterKind = "THERMAL" | "A4" | "LABEL";
+
+// ── Electron silent-print bridge ────────────────────────────────────
+
+interface ElectronPrintAPI {
+  printSilent(payload: { html: string; printerName?: string }): Promise<{ success: boolean; error?: string }>;
+  getPrinters(): Promise<Array<{ name: string }>>;
+}
+
+declare global {
+  interface Window {
+    electronAPI?: ElectronPrintAPI;
+  }
+}
+
+/**
+ * True when running inside Electron (preload exposes window.electronAPI).
+ */
+function isElectron(): boolean {
+  return typeof window !== "undefined" && !!window.electronAPI;
+}
+
+/**
+ * Render HTML for the print job (receipt or shift report) and send it
+ * to the Electron main process for silent printing — no native dialog.
+ */
+async function printViaElectron(
+  html: string | undefined,
+  shift: ShiftAudit | undefined,
+  jobType: PrintJobKind,
+  printerKind?: PrinterKind,
+): Promise<boolean> {
+  if (!isElectron() || !window.electronAPI) return false;
+
+  let renderedHtml = html;
+  if (!renderedHtml && shift) {
+    const { renderShiftPrintHtml } = await import("./printRenderer");
+    renderedHtml = renderShiftPrintHtml(shift, jobType);
+  }
+  if (!renderedHtml) return false;
+
+  // Wrap the fragment in a full HTML document for the hidden BrowserWindow
+  const fullHtml = renderedHtml.includes("<!DOCTYPE") || renderedHtml.includes("<html")
+    ? renderedHtml
+    : [
+        "<!DOCTYPE html>",
+        '<html lang="ar" dir="rtl">',
+        "<head>",
+        '<meta charset="utf-8" />',
+        "<style>",
+        "*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}",
+        "html,body{width:100%;background:#fff;color:#000}",
+        "body{font-family:'Courier New',Consolas,monospace;font-size:10px;line-height:1.4;direction:rtl}",
+        "#thermal-receipt{display:block!important;width:100%;max-width:80mm}",
+        "#thermal-shift-print{display:block!important;width:100%;max-width:80mm}",
+        "#thermal-receipt *,#thermal-shift-print *{visibility:visible;color:#000;background:transparent}",
+        "table{width:100%;border-collapse:collapse}",
+        "th,td{padding:1px 2px;font-size:10px;text-align:right}",
+        "</style>",
+        "</head>",
+        "<body>",
+        renderedHtml,
+        "</body>",
+        "</html>",
+      ].join("\n");
+
+  const deviceName =
+    printerKind === "A4" ? undefined : undefined; // let Electron default to the system thermal printer
+
+  try {
+    const result = await window.electronAPI.printSilent({
+      html: fullHtml,
+      printerName: deviceName,
+    });
+    return result.success;
+  } catch (err) {
+    console.warn("[printAgent] Electron IPC print failed:", err);
+    return false;
+  }
+}
 
 // ── Health check (cached) ──────────────────────────────────────────
 
@@ -116,23 +196,51 @@ export interface PrintJobResponse {
 }
 
 /**
- * Submit a print job to the local print agent via POST /api/print.
- * The server renders the HTML, inserts a QUEUED row into print_jobs,
- * and the agent picks it up via Supabase Realtime.
+ * Queue a print job for the local print agent by inserting a QUEUED row
+ * directly into print_jobs. The agent picks it up via Supabase Realtime /
+ * the claim_print_job RPC.
  */
 export async function submitPrintJob(req: PrintJobRequest): Promise<PrintJobResponse> {
-  const res = await posFetch("/api/print", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(req),
-  });
-
-  if (!res.ok) {
-    const body = await res.json().catch(() => null) as { error?: string } | null;
-    return { success: false, error: body?.error ?? `HTTP ${res.status}` };
+  const sb = getSupabaseBrowser();
+  const storeId = getTenantStoreId();
+  if (!sb || !storeId) {
+    console.warn("[printAgent] Supabase غير مهيأة — تعذر إدراج مهمة الطباعة");
+    return { success: false, error: "supabase_not_configured" };
   }
 
-  return (await res.json()) as PrintJobResponse;
+  let renderedHtml = req.rendered_html;
+  if (!renderedHtml && req.shift) {
+    const { renderShiftPrintHtml } = await import("./printRenderer");
+    renderedHtml = renderShiftPrintHtml(req.shift, req.job_type);
+  }
+  if (!renderedHtml) {
+    return { success: false, error: "rendered_html_required_for_receipt" };
+  }
+
+  const printerKind =
+    req.printer_kind ??
+    (req.job_type === "Z_REPORT" || req.job_type === "X_REPORT" ? "THERMAL" : "A4");
+
+  const { data: job, error } = await sb
+    .from("print_jobs")
+    .insert({
+      store_id: storeId,
+      kind: req.job_type,
+      status: "QUEUED",
+      printer_kind: printerKind,
+      rendered_html: renderedHtml,
+      terminal_id: req.terminal_id,
+      payload: { shift: req.shift ?? null, job_type: req.job_type },
+    })
+    .select("id")
+    .maybeSingle();
+
+  if (error) {
+    console.warn("[printAgent] فشل إدراج مهمة الطباعة:", error.message);
+    return { success: false, error: error.message };
+  }
+
+  return { success: true, job_id: job?.id ?? null };
 }
 
 // ── Combined: try agent, fall back ─────────────────────────────────
@@ -155,12 +263,29 @@ export interface PrintOptions {
 }
 
 /**
- * Smart print: tries the silent agent first; if unavailable, falls back
- * to the traditional window.print() path.
+ * Smart print — three-tier strategy:
+ *   1. Electron IPC silent print (no dialog, direct to thermal printer)
+ *   2. Standalone print agent via Supabase print_jobs table
+ *   3. Fallback: window.print() (shows native dialog)
  *
- * Returns true if the agent handled it, false if window.print() was used.
+ * Returns true if a silent path handled it (caller should NOT call window.print()).
  */
 export async function smartPrint(options: PrintOptions): Promise<boolean> {
+  // ── Tier 1: Electron silent print ────────────────────────────────
+  if (isElectron()) {
+    const ok = await printViaElectron(
+      options.renderedHtml,
+      options.shift,
+      options.jobType,
+      options.printerKind,
+    ).catch(() => false);
+    if (ok) {
+      options.onAgentSuccess?.();
+      return true;
+    }
+  }
+
+  // ── Tier 2: Supabase print agent ────────────────────────────────
   const available = await isPrintAgentAvailable();
 
   if (available) {
@@ -177,14 +302,12 @@ export async function smartPrint(options: PrintOptions): Promise<boolean> {
         options.onAgentSuccess?.();
         return true;
       }
-      // Agent rejected — fall through to window.print()
     } catch {
-      // Network error talking to /api/print — fall through
       invalidateHealthCache();
     }
   }
 
-  // Fallback: caller triggers window.print() via their existing mechanism
+  // ── Tier 3: window.print() fallback ─────────────────────────────
   options.onFallback?.();
   return false;
 }

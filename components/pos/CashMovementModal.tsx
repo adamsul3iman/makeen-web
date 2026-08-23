@@ -38,9 +38,9 @@ export default function CashMovementModal() {
 
   const isCashIn = modalType === "CASH_IN";
   const reasons = isCashIn ? CASH_IN_REASONS : CASH_OUT_REASONS;
-  const accentColor = isCashIn ? "text-emerald-600" : "text-rose-600";
-  const bgColor = isCashIn ? "bg-emerald-600" : "bg-rose-600";
-  const hoverBg = isCashIn ? "hover:bg-emerald-700" : "hover:bg-rose-700";
+  const accentColor = isCashIn ? "text-green-600" : "text-rose-600";
+  const bgColor = isCashIn ? "bg-green-600" : "bg-rose-600";
+  const hoverBg = isCashIn ? "hover:bg-green-700" : "hover:bg-rose-700";
   const Icon = isCashIn ? ArrowDownCircle : ArrowUpCircle;
 
   const amountValue = parseFloat(amount) || 0;

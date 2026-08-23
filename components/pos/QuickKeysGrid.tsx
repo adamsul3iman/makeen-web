@@ -13,6 +13,7 @@ import {
   ChevronRight,
   FolderOpen,
   LayoutGrid,
+  Loader2,
   PackageSearch,
   Search,
   Building2,
@@ -39,7 +40,7 @@ const QuickKeyCard = memo(function QuickKeyCard({
     <button
       type="button"
       onClick={() => onAdd(item)}
-      className="group flex h-full min-h-[84px] w-full flex-col justify-between gap-1.5 overflow-hidden rounded-lg border border-slate-200 bg-white p-2.5 text-start shadow-sm transition hover:border-emerald-300 hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary active:scale-[0.98]"
+      className="group flex h-full min-h-[84px] w-full flex-col justify-between gap-1.5 overflow-hidden rounded-lg border border-slate-200 bg-white p-2.5 text-start shadow-sm transition hover:border-green-300 hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary active:scale-[0.98]"
     >
       <div className="min-h-0">
         {item.variantLabel && (
@@ -55,7 +56,7 @@ const QuickKeyCard = memo(function QuickKeyCard({
         <span className="max-w-16 truncate text-xs font-semibold text-slate-400">
           {item.unitName ?? ""}
         </span>
-        <span className="shrink-0 rounded bg-emerald-50 px-1.5 py-0.5 text-sm font-black tabular-nums text-emerald-600">
+        <span className="shrink-0 rounded bg-green-50 px-1.5 py-0.5 text-sm font-black tabular-nums text-green-600">
           {formatMoney(item.price ?? 0)}
         </span>
       </div>
@@ -74,7 +75,7 @@ const CategoryTile = memo(function CategoryTile({
     <button
       type="button"
       onClick={() => onOpen(category.id)}
-      className="flex min-h-12 min-w-0 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-start shadow-sm transition hover:border-emerald-300 hover:bg-emerald-50/40 active:scale-[0.98]"
+      className="flex min-h-12 min-w-0 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-start shadow-sm transition hover:border-green-300 hover:bg-green-50/40 active:scale-[0.98]"
     >
       <span
         aria-hidden
@@ -162,6 +163,7 @@ function useProductGridMetrics(parentRef: React.RefObject<HTMLDivElement | null>
 export default memo(function QuickKeysGrid() {
   const quickKeys = usePosStore((state) => state.quickKeys);
   const categories = usePosStore((state) => state.categories);
+  const catalogReady = usePosStore((state) => state.ready);
   const activeCategoryId = usePosStore((state) => state.activeCategoryId);
   const setActiveCategoryId = usePosStore((state) => state.setActiveCategoryId);
   const addQuickKeyItem = usePosStore((state) => state.addQuickKeyItem);
@@ -468,7 +470,7 @@ export default memo(function QuickKeysGrid() {
         </div>
 
         <div ref={categorySearchRef} className="relative w-36 shrink-0 xl:w-44">
-          <div className="flex h-11 items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2 transition focus-within:border-emerald-400 focus-within:bg-white focus-within:ring-2 focus-within:ring-emerald-100">
+          <div className="flex h-11 items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2 transition focus-within:border-green-400 focus-within:bg-white focus-within:ring-2 focus-within:ring-green-100">
             <Search className="h-3.5 w-3.5 shrink-0 text-slate-400" />
             <input
               ref={categorySearchInputRef}
@@ -515,7 +517,7 @@ export default memo(function QuickKeysGrid() {
                         onClick={() => finishCategorySearch(result.item.id)}
                         className={`flex min-h-12 w-full items-center gap-2 rounded-md px-3 py-2 text-start transition ${
                           index === selectedCategoryResult
-                            ? "bg-emerald-50 text-emerald-900"
+                            ? "bg-green-50 text-green-900"
                             : "text-slate-700 hover:bg-slate-50"
                         }`}
                       >
@@ -583,7 +585,14 @@ export default memo(function QuickKeysGrid() {
 
       {!focusedCategory && !showPopular && <PinnedCategories />}
 
-      {deferredQuickKeys.length === 0 ? (
+      {!catalogReady ? (
+        <div className="grid min-h-0 flex-1 place-items-center overflow-hidden rounded-b-xl p-4 text-center">
+          <div>
+            <Loader2 className="mx-auto h-9 w-9 animate-spin text-slate-300" />
+            <p className="mt-2 text-sm font-black text-slate-500">جارٍ تحميل الكتالوج…</p>
+          </div>
+        </div>
+      ) : deferredQuickKeys.length === 0 ? (
         <div className="grid min-h-0 flex-1 place-items-center overflow-hidden rounded-b-xl p-4 text-center">
           <div>
             <PackageSearch className="mx-auto h-9 w-9 text-slate-300" />

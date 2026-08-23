@@ -38,17 +38,18 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
         ? { role: "cashier" as const, staffRoleCode: currentCashier.roleCode ?? currentCashier.role }
         : null;
 
-    // Authenticated user on /login → bounce to role home.
-    if (pathname === "/login" && actor) {
-      router.replace(homePathForDevice(actor));
-      return;
-    }
+    // Authenticated user on /login — skip; the login handler manages its own navigation.
 
     // Public pages are always allowed.
     if (isPublic) return;
 
-    // "/" is handled by app/page.tsx (its own client-side redirect).
-    if (pathname === "/") return;
+    // "/" is the marketing landing page — redirect authenticated users to their role home.
+    if (pathname === "/") {
+      if (actor) {
+        router.replace(homePathForDevice(actor));
+      }
+      return;
+    }
 
     // API routes and static assets — let them through.
     if (pathname.startsWith("/api/") || pathname.startsWith("/_next/")) return;

@@ -23,7 +23,7 @@ import SecondaryAuthModal from "@/components/auth/SecondaryAuthModal";
 import { SearchInput } from "@/components/admin/SearchInput";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { normalizeArabicText } from "@/lib/arabic";
-import { posFetch } from "@/lib/tenantClient";
+import { fetchCashiers, fetchRoles } from "@/lib/staffClient";
 
 interface CashierRow {
   id: string;
@@ -74,19 +74,22 @@ export default function AdminStaffPage() {
     serverError?: string;
   }> => {
     try {
-      const res = await posFetch("/api/admin/cashiers", { cache: "no-store" });
-      if (!res.ok) {
-        let serverError = "";
-        try {
-          const data = (await res.json()) as { error?: unknown };
-          if (typeof data.error === "string") serverError = data.error;
-        } catch {}
-        return { rows: null, status: res.status, serverError };
-      }
-      const data = (await res.json()) as { cashiers?: CashierRow[] };
-      return { rows: data.cashiers ?? [] };
-    } catch {
-      return { rows: null };
+      const data = await fetchCashiers();
+      return {
+        rows: data.map((c) => ({
+          id: c.id,
+          name: c.name,
+          username: c.username ?? undefined,
+          role: c.role ?? "",
+          roleId: c.roleId ?? undefined,
+          isActive: c.isActive,
+        })),
+      };
+    } catch (err) {
+      return {
+        rows: null,
+        serverError: err instanceof Error && err.message ? err.message : undefined,
+      };
     }
   }, []);
 
@@ -124,13 +127,19 @@ export default function AdminStaffPage() {
 
   useEffect(() => {
     let cancelled = false;
-    void posFetch("/api/admin/roles", { cache: "no-store" })
-      .then(async (response) => {
-        if (!response.ok) throw new Error("roles_load_failed");
-        return response.json() as Promise<{ roles?: StaffRoleOption[] }>;
-      })
+    void fetchRoles()
       .then((data) => {
-        if (!cancelled) setRoles(data.roles ?? []);
+        if (!cancelled)
+          setRoles(
+            data.map((r) => ({
+              id: r.id,
+              code: r.code,
+              name: r.name,
+              description: r.description ?? "",
+              capabilities: r.capabilities ?? [],
+              limits: (r.limits ?? {}) as StaffRoleOption["limits"],
+            })),
+          );
       })
       .catch(() => {
         if (!cancelled) setLoadError("تعذر تحميل الأدوار والصلاحيات — أعد المحاولة.");

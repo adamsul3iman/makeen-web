@@ -1,12 +1,25 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentPropsWithRef,
+  type CSSProperties,
+  type FormEvent,
+} from "react";
+import { DndContext, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
+import { SortableContext, arrayMove, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import {
   Building2,
   Eye,
   EyeOff,
   FolderTree,
+  GripVertical,
   Loader2,
   Package,
   Pencil,
@@ -23,7 +36,15 @@ import {
   flattenHierarchy,
 } from "@/lib/categoryTree";
 import { normalizeArabicText } from "@/lib/arabic";
-import { posFetch } from "@/lib/tenantClient";
+import {
+  fetchTaxonomy,
+  saveCategory,
+  deleteCategory,
+  toggleCategoryVisibility,
+  reorderCategories,
+  saveBrand,
+  deleteBrand,
+} from "@/lib/categoriesClient";
 
 interface CategoryReferenceItem {
   id: string;
@@ -48,33 +69,6 @@ type ModalState =
   | { kind: "category-edit"; categoryId: string }
   | { kind: "brand-create" }
   | { kind: "brand-edit"; brandId: string };
-
-async function fetchReferenceItems<T extends CategoryReferenceItem | BrandReferenceItem>(
-  type: "category" | "brand",
-): Promise<T[]> {
-  const response = await posFetch(`/api/catalog/references?type=${type}`, { cache: "no-store" });
-  const data = (await response.json().catch(() => null)) as { items?: T[]; error?: string } | null;
-  if (!response.ok || !Array.isArray(data?.items)) {
-    const fallback = type === "category" ? "تعذر تحميل التصنيفات" : "تعذر تحميل العلامات التجارية";
-    const message =
-      data?.error === "admin_session_required"
-        ? "انتهت جلسة المدير على هذا الجهاز - سجّل الدخول مجددًا"
-        : data?.error ?? fallback;
-    throw new Error(message);
-  }
-  return data.items;
-}
-
-async function fetchTaxonomy(): Promise<{
-  categories: CategoryReferenceItem[];
-  brands: BrandReferenceItem[];
-}> {
-  const [categories, brands] = await Promise.all([
-    fetchReferenceItems<CategoryReferenceItem>("category"),
-    fetchReferenceItems<BrandReferenceItem>("brand"),
-  ]);
-  return { categories, brands };
-}
 
 function CategoryModal({
   categories,
@@ -333,35 +327,62 @@ function BrandModal({
   );
 }
 
-function CategoryColumnItem({
-  category,
-  active,
-  childCount,
-  saving,
-  onSelect,
-  onCreateChild,
-  onEdit,
-  onDelete,
-  onToggleVisibility,
-}: {
+interface CategoryColumnItemProps {
   category: CategoryReferenceItem;
   active: boolean;
   childCount: number;
   saving: boolean;
+  dragDisabled?: boolean;
+  isDragging?: boolean;
+  rowRef?: (element: HTMLElement | null) => void;
+  rowStyle?: CSSProperties;
+  handleProps?: ComponentPropsWithRef<"button">;
   onSelect: (categoryId: string) => void;
   onCreateChild: (parentId: string) => void;
   onEdit: (category: CategoryReferenceItem) => void;
   onDelete: (category: CategoryReferenceItem) => void;
   onToggleVisibility: (category: CategoryReferenceItem) => void;
-}) {
+}
+
+function CategoryColumnItem({
+  category,
+  active,
+  childCount,
+  saving,
+  dragDisabled = false,
+  isDragging = false,
+  rowRef,
+  rowStyle,
+  handleProps,
+  onSelect,
+  onCreateChild,
+  onEdit,
+  onDelete,
+  onToggleVisibility,
+}: CategoryColumnItemProps) {
   return (
     <article
-      className={`group flex items-center gap-2 rounded-lg border p-2 transition ${
+      ref={rowRef}
+      style={rowStyle}
+      className={`group flex items-center gap-1.5 rounded-lg border p-2 transition ${
         active
           ? "border-primary bg-primary/5 ring-1 ring-primary/20"
           : "border-slate-200 bg-white hover:border-slate-300"
-      } ${!category.showInPos ? "opacity-50" : ""}`}
+      } ${!category.showInPos ? "opacity-50" : ""} ${
+        isDragging ? "relative z-10 border-primary/60 shadow-lg" : ""
+      }`}
     >
+      {!dragDisabled && handleProps && (
+        <button
+          type="button"
+          aria-label={`إعادة ترتيب ${category.name}`}
+          title="اسحب للترتيب"
+          className="grid h-8 w-5 shrink-0 cursor-grab touch-none place-items-center rounded-md text-slate-300 hover:bg-slate-100 hover:text-slate-500 active:cursor-grabbing"
+          {...handleProps}
+        >
+          <GripVertical className="h-4 w-4" />
+        </button>
+      )}
       <button
         type="button"
         onClick={() => onSelect(category.id)}
@@ -425,6 +446,36 @@ function CategoryColumnItem({
   );
 }
 
+function SortableCategoryColumnItem(
+  props: Omit<CategoryColumnItemProps, "isDragging" | "rowRef" | "rowStyle" | "handleProps">,
+) {
+  const {
+    attributes,
+    isDragging,
+    listeners,
+    setNodeRef,
+    setActivatorNodeRef,
+    transform,
+    transition,
+  } = useSortable({ id: props.category.id, disabled: props.dragDisabled });
+
+  const handleProps: ComponentPropsWithRef<"button"> = {
+    ref: setActivatorNodeRef,
+    ...attributes,
+    ...(listeners ?? {}),
+  };
+
+  return (
+    <CategoryColumnItem
+      {...props}
+      isDragging={isDragging}
+      rowRef={setNodeRef}
+      rowStyle={{ transform: CSS.Translate.toString(transform), transition }}
+      handleProps={handleProps}
+    />
+  );
+}
+
 export default function AdminCategoriesPage() {
   const [categories, setCategories] = useState<CategoryReferenceItem[]>([]);
   const [brands, setBrands] = useState<BrandReferenceItem[]>([]);
@@ -440,6 +491,8 @@ export default function AdminCategoriesPage() {
   const [notice, setNotice] = useState("");
   const [modalState, setModalState] = useState<ModalState>(null);
   const columnsScrollRef = useRef<HTMLDivElement>(null);
+
+  const dndSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -592,6 +645,49 @@ export default function AdminCategoriesPage() {
     return columns;
   }, [childrenByParent, focusedPathItems, shouldShowNode, visibleRootCategories]);
 
+  const handleCategoryDragEnd = useCallback(
+    async (event: DragEndEvent) => {
+      const { active, over } = event;
+      if (!over || active.id === over.id) return;
+      const activeId = String(active.id);
+      const overId = String(over.id);
+
+      const column = categoryColumns.find(
+        (col) => col.items.some((item) => item.id === activeId) && col.items.some((item) => item.id === overId),
+      );
+      if (!column) return;
+
+      const ids = column.items.map((item) => item.id);
+      const fromIndex = ids.indexOf(activeId);
+      const toIndex = ids.indexOf(overId);
+      if (fromIndex < 0 || toIndex < 0) return;
+
+      const reordered = arrayMove(column.items, fromIndex, toIndex);
+      const updates = reordered
+        .map((item, index) => ({ id: item.id, sortOrder: index }))
+        .filter((update, index) => update.sortOrder !== reordered[index].sortOrder);
+      if (updates.length === 0) return;
+
+      const snapshot = categories;
+      setCategories((prev) =>
+        prev.map((category) => {
+          const index = reordered.findIndex((item) => item.id === category.id);
+          return index >= 0 ? { ...category, sortOrder: index } : category;
+        }),
+      );
+      try {
+        await reorderCategories(updates);
+        setPageError("");
+        setNotice("تم تحديث ترتيب التصنيفات");
+      } catch (reason) {
+        setCategories(snapshot);
+        setNotice("");
+        setPageError(reason instanceof Error ? reason.message : "تعذر حفظ ترتيب التصنيفات");
+      }
+    },
+    [categories, categoryColumns],
+  );
+
   useEffect(() => {
     const container = columnsScrollRef.current;
     if (!container || !focusedCategory) return;
@@ -658,26 +754,17 @@ export default function AdminCategoriesPage() {
     setModalState({ kind: "brand-edit", brandId: brand.id });
   };
 
-  const saveCategory = async (payload: { name: string; parentId: string | null; showInPos: boolean }) => {
+  const saveCategoryHandler = async (payload: { name: string; parentId: string | null; showInPos: boolean }) => {
     const editing =
       modalState?.kind === "category-edit"
         ? categories.find((item) => item.id === modalState.categoryId) ?? null
         : null;
-    const query = new URLSearchParams({ type: "category" });
-    if (editing) query.set("id", editing.id);
-
     setSaving(true);
     setModalError("");
     setPageError("");
     setNotice("");
     try {
-      const response = await posFetch(`/api/catalog/references?${query}`, {
-        method: editing ? "PUT" : "POST",
-        headers: { "Content-Type": "application/json", "x-pos-role": "admin" },
-        body: JSON.stringify(payload),
-      });
-      const data = (await response.json().catch(() => null)) as { error?: string } | null;
-      if (!response.ok) throw new Error(data?.error ?? "تعذر حفظ التصنيف");
+      await saveCategory(payload, editing?.id);
       setModalState(null);
       setNotice(editing ? "تم تحديث التصنيف بنجاح" : "تم إنشاء التصنيف بنجاح");
       await load();
@@ -688,26 +775,17 @@ export default function AdminCategoriesPage() {
     }
   };
 
-  const saveBrand = async (payload: { name: string }) => {
+  const saveBrandHandler = async (payload: { name: string }) => {
     const editing =
       modalState?.kind === "brand-edit"
         ? brands.find((item) => item.id === modalState.brandId) ?? null
         : null;
-    const query = new URLSearchParams({ type: "brand" });
-    if (editing) query.set("id", editing.id);
-
     setSaving(true);
     setModalError("");
     setPageError("");
     setNotice("");
     try {
-      const response = await posFetch(`/api/catalog/references?${query}`, {
-        method: editing ? "PUT" : "POST",
-        headers: { "Content-Type": "application/json", "x-pos-role": "admin" },
-        body: JSON.stringify(payload),
-      });
-      const data = (await response.json().catch(() => null)) as { error?: string } | null;
-      if (!response.ok) throw new Error(data?.error ?? "تعذر حفظ العلامة التجارية");
+      await saveBrand(payload, editing?.id);
       setModalState(null);
       setNotice(editing ? "تم تحديث العلامة التجارية" : "تمت إضافة العلامة التجارية");
       await load();
@@ -733,13 +811,7 @@ export default function AdminCategoriesPage() {
     setPageError("");
     setNotice("");
     try {
-      const query = new URLSearchParams({ type: "category", id: item.id });
-      const response = await posFetch(`/api/catalog/references?${query}`, {
-        method: "DELETE",
-        headers: { "x-pos-role": "admin" },
-      });
-      const data = (await response.json().catch(() => null)) as { error?: string } | null;
-      if (!response.ok) throw new Error(data?.error ?? "تعذر حذف التصنيف");
+      await deleteCategory(item.id);
       if (modalState?.kind === "category-edit" && modalState.categoryId === item.id) {
         setModalState(null);
       }
@@ -752,20 +824,13 @@ export default function AdminCategoriesPage() {
     }
   };
 
-  const toggleCategoryVisibility = async (item: CategoryReferenceItem) => {
+  const toggleCategoryVisibilityHandler = async (item: CategoryReferenceItem) => {
     const newShowInPos = !item.showInPos;
     setSaving(true);
     setPageError("");
     setNotice("");
     try {
-      const query = new URLSearchParams({ type: "category", id: item.id });
-      const response = await posFetch(`/api/catalog/references?${query}`, {
-        method: "PUT",
-        headers: { "x-pos-role": "admin" },
-        body: JSON.stringify({ name: item.name, parentId: item.parentId ?? null, showInPos: newShowInPos }),
-      });
-      const data = (await response.json().catch(() => null)) as { item?: CategoryReferenceItem; error?: string } | null;
-      if (!response.ok) throw new Error(data?.error ?? "تعذر تحديث ظهور التصنيف");
+      await toggleCategoryVisibility(item);
       setCategories((prev) =>
         prev.map((c) => (c.id === item.id ? { ...c, showInPos: newShowInPos } : c)),
       );
@@ -786,13 +851,7 @@ export default function AdminCategoriesPage() {
     setPageError("");
     setNotice("");
     try {
-      const query = new URLSearchParams({ type: "brand", id: item.id });
-      const response = await posFetch(`/api/catalog/references?${query}`, {
-        method: "DELETE",
-        headers: { "x-pos-role": "admin" },
-      });
-      const data = (await response.json().catch(() => null)) as { error?: string } | null;
-      if (!response.ok) throw new Error(data?.error ?? "تعذر حذف العلامة التجارية");
+      await deleteBrand(item.id);
       if (modalState?.kind === "brand-edit" && modalState.brandId === item.id) {
         setModalState(null);
       }
@@ -811,7 +870,7 @@ export default function AdminCategoriesPage() {
         <div className="min-w-0">
           <h1 className="truncate text-xl font-black text-foreground">التصنيفات والعلامات</h1>
           <p className="mt-0.5 text-xs font-semibold text-muted">
-            كل عمود هو مستوى. اختر قسمًا لتظهر محتوياته في العمود التالي.
+            كل عمود هو مستوى. اختر قسمًا لتظهر محتوياته في العمود التالي، واسحب مقبض القسم لإعادة ترتيبه.
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -969,6 +1028,11 @@ export default function AdminCategoriesPage() {
                 )}
               </div>
 
+              <DndContext
+                sensors={dndSensors}
+                collisionDetection={closestCenter}
+                onDragEnd={(event) => void handleCategoryDragEnd(event)}
+              >
               <div
                 ref={columnsScrollRef}
                 className="flex min-h-0 flex-1 gap-2 overflow-x-auto bg-surface-muted/60 p-2 scrollbar-hidden"
@@ -983,6 +1047,7 @@ export default function AdminCategoriesPage() {
                         <h2 className="truncate text-xs font-black text-foreground">{column.title}</h2>
                         <p className="text-[10px] font-bold text-muted">
                           {column.items.length.toLocaleString("ar-JO")} قسم
+                          {!normalizedCategorySearch && " • اسحب المقبض للترتيب"}
                         </p>
                       </div>
                       <button
@@ -998,20 +1063,26 @@ export default function AdminCategoriesPage() {
 
                     <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto p-2">
                       {column.items.length > 0 ? (
-                        column.items.map((category) => (
-                          <CategoryColumnItem
-                            key={category.id}
-                            category={category}
-                            active={column.activeId === category.id}
-                            childCount={(childrenByParent.get(category.id) ?? []).length}
-                            saving={saving}
-                            onSelect={() => selectCategory(category)}
-                            onCreateChild={openCategoryCreate}
-                            onEdit={openCategoryEdit}
-                            onDelete={(item) => void removeCategory(item)}
-                            onToggleVisibility={(item) => void toggleCategoryVisibility(item)}
-                          />
-                        ))
+                        <SortableContext
+                          items={column.items.map((item) => item.id)}
+                          strategy={verticalListSortingStrategy}
+                        >
+                          {column.items.map((category) => (
+                            <SortableCategoryColumnItem
+                              key={category.id}
+                              category={category}
+                              active={column.activeId === category.id}
+                              childCount={(childrenByParent.get(category.id) ?? []).length}
+                              saving={saving}
+                              dragDisabled={Boolean(normalizedCategorySearch)}
+                              onSelect={() => selectCategory(category)}
+                              onCreateChild={openCategoryCreate}
+                              onEdit={openCategoryEdit}
+                              onDelete={(item) => void removeCategory(item)}
+                              onToggleVisibility={(item) => void toggleCategoryVisibilityHandler(item)}
+                            />
+                          ))}
+                        </SortableContext>
                       ) : (
                         <div className="grid h-full place-items-center px-4 text-center">
                           <button
@@ -1033,6 +1104,7 @@ export default function AdminCategoriesPage() {
                   </section>
                 ))}
               </div>
+              </DndContext>
             </>
           )
         ) : loading ? (
@@ -1107,7 +1179,7 @@ export default function AdminCategoriesPage() {
           saving={saving}
           error={modalError}
           onClose={closeModal}
-          onSubmit={saveCategory}
+          onSubmit={saveCategoryHandler}
         />
       )}
 
@@ -1117,7 +1189,7 @@ export default function AdminCategoriesPage() {
           saving={saving}
           error={modalError}
           onClose={closeModal}
-          onSubmit={saveBrand}
+          onSubmit={saveBrandHandler}
         />
       )}
     </div>

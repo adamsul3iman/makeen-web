@@ -14,7 +14,7 @@ import { PageHeader } from "@/components/ui/Card";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { normalizeArabicText } from "@/lib/arabic";
 import { formatMoney } from "@/lib/format";
-import { posFetch } from "@/lib/tenantClient";
+import { createSupplier, fetchSuppliers, updateSupplier } from "@/lib/suppliersClient";
 import type { SupplierLedger } from "@/lib/mock-admin-data";
 
 interface SupplierForm {
@@ -41,31 +41,22 @@ export default function AdminSuppliersPage() {
   const [pageSize, setPageSize] = useState(10);
 
   useEffect(() => {
-    posFetch("/api/suppliers", { cache: "no-store" })
-      .then(async (res) => {
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({})) as { error?: string };
-          throw new Error(err.error ?? "تعذر تحميل الموردين");
-        }
-        return res.json();
-      })
+    fetchSuppliers()
       .then((data) => {
-        if (Array.isArray(data?.suppliers)) {
-          setSuppliers(
-            data.suppliers.map((s: { id: string; name: string; phone: string; email: string; address: string | null; balance: number }) => ({
-              id: s.id,
-              name: s.name,
-              phone: s.phone ?? "",
-              email: s.email ?? "",
-              balance: s.balance ?? 0,
-            })),
-          );
-          const addrMap: Record<string, string> = {};
-          for (const s of data.suppliers) {
-            if (s.address) addrMap[s.id] = s.address;
-          }
-          setSupplierAddresses(addrMap);
+        setSuppliers(
+          data.map((s) => ({
+            id: s.id,
+            name: s.name,
+            phone: s.phone ?? "",
+            email: s.email ?? "",
+            balance: s.balance ?? 0,
+          })),
+        );
+        const addrMap: Record<string, string> = {};
+        for (const s of data) {
+          if (s.address) addrMap[s.id] = s.address;
         }
+        setSupplierAddresses(addrMap);
       })
       .catch((err) => {
         setError(err instanceof Error ? err.message : "تعذر تحميل الموردين — تحقق من الاتصال");
@@ -109,21 +100,15 @@ export default function AdminSuppliersPage() {
     setError("");
     setSaving(true);
     try {
-      const url = editingId ? `/api/suppliers?id=${encodeURIComponent(editingId)}` : "/api/suppliers";
-      const res = await posFetch(url, {
-        method: editingId ? "PUT" : "POST",
-        headers: { "Content-Type": "application/json", "x-pos-role": "admin" },
-        body: JSON.stringify(form),
-      });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setError(data.error ?? "تعذر حفظ المورد");
-        return;
+      if (editingId) {
+        await updateSupplier(editingId, { name: form.name, phone: form.phone, email: form.email, address: form.address });
+      } else {
+        await createSupplier({ name: form.name, phone: form.phone, email: form.email, address: form.address });
       }
       cancelEdit();
       refresh();
-    } catch {
-      setError("تعذر حفظ المورد — تحقق من الاتصال");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "تعذر حفظ المورد — تحقق من الاتصال");
     } finally {
       setSaving(false);
     }

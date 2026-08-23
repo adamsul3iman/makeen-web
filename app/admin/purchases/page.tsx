@@ -7,8 +7,18 @@ import { SearchInput } from "@/components/admin/SearchInput";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { normalizeArabicText } from "@/lib/arabic";
 import { formatMoney } from "@/lib/format";
-import { posFetch } from "@/lib/tenantClient";
-import type { PosSnapshot } from "@/types/pos.types";
+import {
+  createPurchaseOrder,
+  fetchPurchaseOrders,
+  receivePurchaseOrder,
+} from "@/lib/purchasesClient";
+import { getSupabaseBrowser } from "@/lib/supabaseBrowser";
+import {
+  createSupplier as createSupplierApi,
+  fetchSupplierInvoices,
+  fetchSuppliers,
+} from "@/lib/suppliersClient";
+import { getTenantStoreId } from "@/lib/tenantClient";
 import EntityCombobox from "@/components/shared/EntityCombobox";
 import QuickCreateEntityModal from "@/components/shared/QuickCreateEntityModal";
 import { usePosStore } from "@/store/usePosStore";
@@ -44,6 +54,25 @@ interface PurchasesRow {
 
 const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
 
+const RECEIVED_PO_STATUSES = new Set(["received", "RECEIVED"]);
+
+/** Item counts for the listed purchase orders (lightweight lookup instead of an embed). */
+async function fetchPoItemCounts(orderIds: string[]): Promise<Map<string, number>> {
+  const sb = getSupabaseBrowser();
+  const storeId = getTenantStoreId();
+  const counts = new Map<string, number>();
+  if (!sb || !storeId || orderIds.length === 0) return counts;
+  const { data } = await sb
+    .from("purchase_order_items")
+    .select("purchase_order_id")
+    .eq("store_id", storeId)
+    .in("purchase_order_id", orderIds);
+  for (const row of (data ?? []) as Array<{ purchase_order_id: string }>) {
+    counts.set(row.purchase_order_id, (counts.get(row.purchase_order_id) ?? 0) + 1);
+  }
+  return counts;
+}
+
 export default function AdminPurchasesPage() {
   const adminEmail = usePosStore((state) => state.adminSession?.email ?? "");
   const [orders, setOrders] = useState<PurchasesRow[]>([]);
@@ -65,54 +94,35 @@ export default function AdminPurchasesPage() {
   useEffect(() => {
     let alive = true;
     Promise.all([
-      posFetch("/api/purchase-orders", { cache: "no-store" })
-        .then((res) => (res.ok ? res.json() : null))
-        .then((data) =>
-          Array.isArray(data?.orders)
-            ? (data.orders as Array<{
-                id: string;
-                supplier_name?: string;
-                total_amount: number;
-                status: string;
-                created_at: string;
-                items?: unknown[];
-              }>).map(
-                (o): PurchasesRow => ({
-                  id: o.id,
-                  source: "po",
-                  supplierName: o.supplier_name ?? "—",
-                  totalAmount: o.total_amount,
-                  status: o.status === "received" ? "received" : "pending",
-                  itemCount: Array.isArray(o.items) ? o.items.length : 0,
-                  createdAt: o.created_at,
-                }),
-              )
-            : [],
-        )
+      fetchPurchaseOrders()
+        .then(async ({ orders }) => {
+          const itemCounts = await fetchPoItemCounts(orders.map((o) => o.id));
+          return orders.map(
+            (o): PurchasesRow => ({
+              id: o.id,
+              source: "po",
+              supplierName: o.supplier_name,
+              totalAmount: o.total_amount,
+              status: RECEIVED_PO_STATUSES.has(o.status) ? "received" : "pending",
+              itemCount: itemCounts.get(o.id) ?? 0,
+              createdAt: o.created_at,
+            }),
+          );
+        })
         .catch(() => []),
-      posFetch("/api/supplier-accounts", { cache: "no-store" })
-        .then((res) => (res.ok ? res.json() : null))
-        .then((data) =>
-          Array.isArray(data?.invoices)
-            ? (data.invoices as Array<{
-                id: string;
-                supplierName?: string;
-                totalAmount?: number;
-                itemCount?: number;
-                createdAt?: string;
-                status?: string;
-              }>).map(
-                (inv): PurchasesRow => ({
-                  id: inv.id,
-                  source: "invoice",
-                  supplierName: inv.supplierName ?? "—",
-                  totalAmount: inv.totalAmount ?? 0,
-                  status: "received",
-                  itemCount: inv.itemCount ?? 0,
-                  createdAt: inv.createdAt ?? new Date().toISOString(),
-                }),
-              )
-            : [],
+      fetchSupplierInvoices({})
+        .then(({ invoices }) =>
+          invoices.map(
+            (inv): PurchasesRow => ({
+              id: inv.id,
+              source: "invoice",
+              supplierName: inv.supplierName || "—",
+              totalAmount: inv.totalAmount,
+              status: "received",
+              itemCount: 0,
+              createdAt: inv.createdAt ?? new Date().toISOString(),
+            }),
+          ),
         )
         .catch(() => []),
     ])
@@ -135,30 +145,28 @@ export default function AdminPurchasesPage() {
   const refresh = () => setRefreshKey((k) => k + 1);
 
   useEffect(() => {
-    posFetch("/api/catalog", { cache: "no-store" })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        const snapshot = data as PosSnapshot | null;
-        if (snapshot?.products) {
-          setProducts(
-            Object.values(snapshot.products).map((p) => ({
-              id: p.id,
-              name: p.name,
-              costPrice: p.costPrice ?? 0,
-            })),
-          );
-        }
-      })
-      .catch(() => {
-        /* keep empty product picker */
-      });
-    posFetch("/api/suppliers", { cache: "no-store" })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (Array.isArray(data?.suppliers)) {
-          setSuppliers(data.suppliers.map((s: { id: string; name: string }) => ({ id: s.id, name: s.name })));
-        }
-      })
+    const loadCatalogProducts = async () => {
+      const sb = getSupabaseBrowser();
+      const storeId = getTenantStoreId();
+      if (!sb || !storeId) return;
+      const { data } = await sb
+        .from("products")
+        .select("id,name,cost_price")
+        .eq("store_id", storeId)
+        .order("name", { ascending: true });
+      setProducts(
+        ((data ?? []) as Array<{ id: string; name: string; cost_price: number | string | null }>).map((p) => ({
+          id: p.id,
+          name: p.name,
+          costPrice: Number(p.cost_price) || 0,
+        })),
+      );
+    };
+    loadCatalogProducts().catch(() => {
+      /* keep empty product picker */
+    });
+    fetchSuppliers()
+      .then((rows) => setSuppliers(rows.map((s) => ({ id: s.id, name: s.name }))))
       .catch(() => {
         setError("تعذر تحميل الموردين");
       });
@@ -190,18 +198,11 @@ export default function AdminPurchasesPage() {
   const canCreate = supplierId.trim() !== "" && lines.length > 0 && !saving;
 
   const createSupplier = async (data: { name: string; phone: string }) => {
-    const response = await posFetch("/api/suppliers", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-pos-role": "admin" },
-      body: JSON.stringify(data),
-    });
-    const body = (await response.json().catch(() => null)) as {
-      supplier?: { id: string; name: string };
-      error?: string;
-    } | null;
-    if (!response.ok || !body?.supplier) throw new Error(body?.error ?? "تعذر إضافة المورد");
-    setSuppliers((current) => [...current, body.supplier!].sort((a, b) => a.name.localeCompare(b.name, "ar")));
-    setSupplierId(body.supplier.id);
+    const supplier = await createSupplierApi({ name: data.name, phone: data.phone });
+    setSuppliers((current) =>
+      [...current, { id: supplier.id, name: supplier.name }].sort((a, b) => a.name.localeCompare(b.name, "ar")),
+    );
+    setSupplierId(supplier.id);
     setAddingSupplier(false);
   };
 
@@ -221,21 +222,12 @@ export default function AdminPurchasesPage() {
         setError("أضف بنوداً صالحة بأصناف وكماًيات ومبالغ");
         return;
       }
-      const res = await posFetch("/api/purchase-orders", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-pos-role": "admin", "x-pos-admin-email": adminEmail },
-        body: JSON.stringify({ supplier_id: supplierId, items }),
-      });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setError(data.error ?? "تعذر إنشاء أمر الشراء");
-        return;
-      }
+      await createPurchaseOrder({ supplier_id: supplierId, items });
       setSupplierId("");
       setLines([]);
       refresh();
-    } catch {
-      setError("تعذر إنشاء أمر الشراء — تحقق من الاتصال");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "تعذر إنشاء أمر الشراء — تحقق من الاتصال");
     } finally {
       setSaving(false);
     }
@@ -245,19 +237,10 @@ export default function AdminPurchasesPage() {
     setReceivingId(id);
     setError("");
     try {
-      const res = await posFetch("/api/purchase-orders", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json", "x-pos-role": "admin", "x-pos-admin-email": adminEmail },
-        body: JSON.stringify({ id }),
-      });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setError(data.error ?? "تعذر استلام الأمر");
-        return;
-      }
+      await receivePurchaseOrder(id, { actorName: adminEmail });
       refresh();
-    } catch {
-      setError("تعذر استلام الأمر — تحقق من الاتصال");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "تعذر استلام الأمر — تحقق من الاتصال");
     } finally {
       setReceivingId(null);
     }

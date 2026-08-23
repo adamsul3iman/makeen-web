@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo } from "react";
-import { posFetch } from "@/lib/tenantClient";
+import { useCallback, useMemo } from "react";
+import { createCustomer as createCustomerRecord } from "@/lib/customersClient";
 import { usePosStore } from "@/store/usePosStore";
 import type { PosCustomer } from "@/types/pos.types";
 import type { EntityOption } from "@/components/shared/EntityCombobox";
@@ -29,14 +29,11 @@ function toOption(customer: PosCustomer): CustomerOption {
 export function useCustomerOptions(active: boolean) {
   const rawCustomers = usePosStore((s) => s.customers);
   const loading = usePosStore((s) => s.customersLoading);
-  const currentStoreId = usePosStore((s) => s.currentStore?.id ?? null);
-  const hydrateCatalog = usePosStore((s) => s.hydrateCatalog);
   const upsertCustomer = usePosStore((s) => s.upsertCustomer);
 
-  useEffect(() => {
-    if (!active || !currentStoreId) return;
-    void hydrateCatalog();
-  }, [active, currentStoreId, hydrateCatalog]);
+  // Customers are loaded at login via applyLoginPayloadToStore → hydrateCatalog.
+  // No need to re-hydrate on every checkout open — that causes full catalog
+  // identity swaps and visible flickering.
 
   const customers = useMemo(
     () => rawCustomers.map(toOption),
@@ -45,35 +42,32 @@ export function useCustomerOptions(active: boolean) {
 
   const createCustomer = useCallback(async (data: { name: string; phone: string }): Promise<CustomerOption> => {
     try {
-      const response = await posFetch("/api/customers", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-pos-role": "cashier" },
-        body: JSON.stringify(data),
-      });
-      const body = (await response.json().catch(() => null)) as {
-        customer?: PosCustomer;
-        error?: string;
-      } | null;
-      if (!response.ok || !body?.customer) {
-        throw new CustomerCreateRejected(body?.error ?? "تعذر إضافة الزبون");
-      }
-      upsertCustomer({
-        id: body.customer.id,
-        name: body.customer.name,
-        phone: body.customer.phone ?? "",
-        balance: Number(body.customer.balance) || 0,
-      });
-      return toOption(body.customer);
+      const row = await createCustomerRecord({ name: data.name, phone: data.phone });
+      const saved: PosCustomer = {
+        id: row.id,
+        name: row.name,
+        phone: row.phone ?? "",
+        balance: Number(row.balance) || 0,
+      };
+      upsertCustomer(saved);
+      return toOption(saved);
     } catch (reason) {
       if (reason instanceof CustomerCreateRejected) throw reason;
-      const local: PosCustomer = {
-        id: `local-${crypto.randomUUID()}`,
-        name: data.name,
-        phone: data.phone,
-        balance: 0,
-      };
-      upsertCustomer(local);
-      return toOption(local);
+      // Same offline posture as before the direct-Supabase migration: with no
+      // connectivity the register keeps working on a device-local placeholder.
+      if (typeof navigator !== "undefined" && !navigator.onLine) {
+        const local: PosCustomer = {
+          id: `local-${crypto.randomUUID()}`,
+          name: data.name,
+          phone: data.phone,
+          balance: 0,
+        };
+        upsertCustomer(local);
+        return toOption(local);
+      }
+      throw new CustomerCreateRejected(
+        reason instanceof Error && reason.message ? reason.message : "تعذر إضافة الزبون",
+      );
     }
   }, [upsertCustomer]);
 

@@ -1,5 +1,4 @@
-import { posFetch } from "@/lib/tenantClient";
-import { patchSyncRecordPayload, setIstdState } from "@/lib/idb";
+import { setIstdState } from "@/lib/idb";
 import type { CompletedInvoice } from "@/types/pos.types";
 
 export type ClientIstdOutcome = {
@@ -9,76 +8,36 @@ export type ClientIstdOutcome = {
   code?: string;
 };
 
+/** JoFotara credentials and the istd_submissions claim table are service-role-only. */
+const ISTD_UNAVAILABLE = "istd_unavailable";
+
 /**
  * Fire-and-forget ISTD push from the POS checkout.
  *
  * The checkout MUST NOT await this: it runs detached and the local TLV QR
  * keeps the receipt valid until (and unless) JoFotara returns the official
- * one. On success the sync record is patched (so /api/sync never resubmits)
- * and the callback is invoked with the cleared invoice for receipt refresh.
+ * one.
  *
- * Per-invoice submission state is persisted to IndexedDB (`istd_state`) so a
- * failure is never silent: FAILED invoices keep counting toward the pending
- * badge and are surfaced to the owner for a manual retry.
+ * The browser can no longer clear invoices with JoFotara directly: the tenant
+ * device credentials (tenant_tax_settings) and the single-writer claim table
+ * (istd_submissions) are both locked to the service role, so there is no
+ * client-reachable submission path. The invoice is therefore recorded as
+ * FAILED in IndexedDB — never silent — and keeps counting toward the pending
+ * badge for a manual retry by the owner.
  */
 export async function pushInvoiceToIstd(
   invoice: CompletedInvoice,
   onCleared?: (invoice: CompletedInvoice) => void,
 ): Promise<ClientIstdOutcome> {
+  void onCleared;
+  console.warn(
+    "[istd] الإرسال المباشر لـ JoFotara غير متاح من المتصفح — الفاتورة ستُعلّم كفاشلة للإعادة اليدوية",
+    invoice.syncId,
+  );
   try {
-    await setIstdState(invoice.syncId, { status: "SUBMITTING" });
-
-    const res = await posFetch("/api/istd/submit", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sync_id: invoice.syncId,
-        payload: {
-          completed_at: invoice.completed_at,
-          total: invoice.total,
-          tax: invoice.tax,
-          discount: invoice.discount,
-          paymentMethod: invoice.paymentMethod,
-          customerName: invoice.customerName,
-          customerId: invoice.customerId,
-          customerPhone: invoice.customerPhone,
-        },
-      }),
-    });
-
-    const body = (await res.json().catch(() => ({}))) as {
-      ok?: boolean;
-      uuid?: string;
-      qrCode?: string;
-      code?: string;
-      error?: string;
-    };
-
-    if (res.ok && body.ok && body.uuid) {
-      await patchSyncRecordPayload(invoice.syncId, {
-        istd_uuid: body.uuid,
-        istd_qr: body.qrCode,
-      });
-      await setIstdState(invoice.syncId, {
-        status: "SUBMITTED",
-        istd_uuid: body.uuid,
-        istd_qr: body.qrCode,
-      });
-      const cleared: CompletedInvoice = {
-        ...invoice,
-        istdUuid: body.uuid,
-        istdQr: body.qrCode,
-      };
-      onCleared?.(cleared);
-      return { cleared: true, uuid: body.uuid, qrCode: body.qrCode };
-    }
-
-    const code = body.code ?? body.error ?? "unknown";
-    await setIstdState(invoice.syncId, { status: "FAILED", error: code });
-    return { cleared: false, code };
-  } catch (err) {
-    const code = err instanceof Error ? err.message : "network";
-    await setIstdState(invoice.syncId, { status: "FAILED", error: code });
-    return { cleared: false, code };
+    await setIstdState(invoice.syncId, { status: "FAILED", error: ISTD_UNAVAILABLE });
+  } catch {
+    // IndexedDB unavailable — the warn above is all we can surface.
   }
+  return { cleared: false, code: ISTD_UNAVAILABLE };
 }

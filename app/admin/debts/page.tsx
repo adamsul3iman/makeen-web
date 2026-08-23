@@ -16,7 +16,13 @@ import { SearchInput } from "@/components/admin/SearchInput";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { normalizeArabicText } from "@/lib/arabic";
 import { formatMoney } from "@/lib/format";
-import { posFetch } from "@/lib/tenantClient";
+import {
+  createCustomer,
+  createCustomerTransaction,
+  fetchCustomerTransactions,
+  fetchCustomers,
+  type CustomerTransaction,
+} from "@/lib/customersClient";
 import {
   type CustomerLedger,
   type CustomerLedgerEntry,
@@ -46,25 +52,16 @@ export default function AdminDebtsPage() {
   const [pageSize, setPageSize] = useState(10);
 
   useEffect(() => {
-    posFetch("/api/customers", { cache: "no-store" })
-      .then(async (res) => {
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({})) as { error?: string };
-          throw new Error(err.error ?? "تعذر تحميل العملاء");
-        }
-        return res.json();
-      })
+    fetchCustomers()
       .then((data) => {
-        if (Array.isArray(data?.customers)) {
-          setCustomers(
-            data.customers.map((c: Partial<CustomerLedger>) => ({
-              id: c.id ?? "",
-              name: c.name ?? "",
-              phone: c.phone ?? "",
-              balance: typeof c.balance === "number" ? c.balance : 0,
-            })),
-          );
-        }
+        setCustomers(
+          data.map((c) => ({
+            id: c.id,
+            name: c.name,
+            phone: c.phone ?? "",
+            balance: typeof c.balance === "number" ? c.balance : 0,
+          })),
+        );
       })
       .catch((err) => {
         setStatus({ tone: "error", message: err instanceof Error ? err.message : "تعذر تحميل العملاء — تحقق من الاتصال" });
@@ -93,28 +90,20 @@ export default function AdminDebtsPage() {
     setExpandedId(customer.id);
     if (entries[customer.id]) return;
     try {
-      const res = await posFetch(`/api/customers/${customer.id}/transactions`, { cache: "no-store" });
-      if (!res.ok) throw new Error("no data");
-      const data = await res.json();
-      if (Array.isArray(data.transactions)) {
-        // Live rows use snake_case (balance_after, created_at); the UI reads
-        // camelCase — normalize here so live mode renders correctly.
-        setEntries((prev) => ({
-          ...prev,
-          [customer.id]: data.transactions.map(
-            (t: CustomerLedgerEntry & { balance_after?: number; created_at?: string }) => ({
-              id: t.id,
-              type: t.type,
-              amount: typeof t.amount === "number" ? t.amount : 0,
-              balanceAfter: t.balance_after ?? t.balanceAfter ?? 0,
-              description: t.description ?? "",
-              createdAt: t.created_at ?? t.createdAt,
-            }),
-          ),
-        }));
-        return;
-      }
-      throw new Error("no data");
+      const data = await fetchCustomerTransactions(customer.id);
+      // Live rows use snake_case (balance_after, created_at); the UI reads
+      // camelCase — normalize here so live mode renders correctly.
+      setEntries((prev) => ({
+        ...prev,
+        [customer.id]: data.map((t) => ({
+          id: t.id,
+          type: t.type as CustomerLedgerEntry["type"],
+          amount: typeof t.amount === "number" ? t.amount : 0,
+          balanceAfter: t.balance_after ?? 0,
+          description: t.description ?? "",
+          createdAt: t.created_at,
+        })),
+      }));
     } catch {
       setEntries((prev) => ({ ...prev, [customer.id]: [] }));
       setStatus({ tone: "error", message: "تعذر تحميل كشف حركات الزبون" });
@@ -126,29 +115,24 @@ export default function AdminDebtsPage() {
     if (amount <= 0) return;
     setBusy(customer.id);
     setStatus(null);
-    let data: { balanceAfter?: number; transaction?: { id?: string; created_at?: string } } = {};
+    let data: CustomerTransaction;
     try {
-      const res = await posFetch(`/api/customers/${customer.id}/transactions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-pos-role": "admin" },
-        body: JSON.stringify({ type: "SETTLEMENT", amount, description: "دفعة نقدية" }),
+      data = await createCustomerTransaction(customer.id, {
+        type: "SETTLEMENT",
+        amount,
+        description: "دفعة نقدية",
       });
-      if (!res.ok) {
-        const err = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(err.error ?? "فشل تسجيل الدفعة");
-      }
-      data = await res.json();
     } catch (err) {
       setStatus({ tone: "error", message: err instanceof Error ? err.message : "فشل تسجيل الدفعة" });
       setBusy(null);
       return;
     }
 
-    const serverBalanceAfter = typeof data.balanceAfter === "number"
-      ? data.balanceAfter
+    const serverBalanceAfter = typeof data.balance_after === "number"
+      ? data.balance_after
       : round2(customer.balance - amount);
-    const txId = data.transaction?.id ?? `tx-${Date.now()}`;
-    const txCreatedAt = data.transaction?.created_at ?? new Date().toISOString();
+    const txId = data.id ?? `tx-${Date.now()}`;
+    const txCreatedAt = data.created_at ?? new Date().toISOString();
 
     setCustomers((prev) =>
       prev.map((c) => (c.id === customer.id ? { ...c, balance: serverBalanceAfter } : c)),
@@ -176,17 +160,16 @@ export default function AdminDebtsPage() {
     const name = newName.trim();
     if (!name) return;
     try {
-      const res = await posFetch("/api/customers", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-pos-role": "admin" },
-        body: JSON.stringify({ name, phone: newPhone.trim() }),
-      });
-      if (!res.ok) {
-        const err = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(err.error ?? "فشل إضافة الزبون");
-      }
-      const data = await res.json();
-      setCustomers((prev) => [...prev, data.customer]);
+      const data = await createCustomer({ name, phone: newPhone.trim() });
+      setCustomers((prev) => [
+        ...prev,
+        {
+          id: data.id,
+          name: data.name,
+          phone: data.phone ?? "",
+          balance: typeof data.balance === "number" ? data.balance : 0,
+        },
+      ]);
     } catch (err) {
       setStatus({ tone: "error", message: err instanceof Error ? err.message : "فشل إضافة الزبون" });
       return;

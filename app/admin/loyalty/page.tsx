@@ -3,31 +3,7 @@
 import { useEffect, useState } from "react";
 import { Gem, Loader2, Minus, Phone, Plus, Search, User } from "lucide-react";
 import { formatMoney } from "@/lib/format";
-import { posFetch } from "@/lib/tenantClient";
-
-interface LoyaltyCustomer {
-  id: string;
-  name: string;
-  phone?: string;
-  balance?: number;
-  loyalty_points?: number;
-}
-
-interface LoyaltyEvent {
-  id: string;
-  type: string;
-  points: number;
-  balance_after: number;
-  reference: string;
-  description?: string;
-  created_at: string;
-}
-
-interface LoyaltyConfig {
-  enabled: boolean;
-  pointsPerSpend: number;
-  pointValue: number;
-}
+import { fetchLoyaltyCustomers, fetchLoyaltyEvents, earnLoyaltyPoints, redeemLoyaltyPoints, adjustLoyaltyPoints, type LoyaltyCustomer, type LoyaltyEvent, type LoyaltyConfig } from "@/lib/loyaltyClient";
 
 const EVENT_LABEL: Record<string, string> = {
   EARN: "كسب",
@@ -56,13 +32,8 @@ export default function AdminLoyaltyPage() {
 
   const load = async (search = "") => {
     try {
-      const res = await posFetch(`/api/loyalty${search ? `?q=${encodeURIComponent(search)}` : ""}`, {
-        cache: "no-store",
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "تعذر التحميل");
-      setCustomers(data.customers ?? []);
-      setConfig(data.config ?? null);
+      const list = await fetchLoyaltyCustomers(search || undefined);
+      setCustomers(list);
     } catch (err) {
       setCustomers([]);
       setStatus({ tone: "error", message: err instanceof Error ? err.message : "تعذر التحميل" });
@@ -73,14 +44,9 @@ export default function AdminLoyaltyPage() {
 
   useEffect(() => {
     let cancelled = false;
-    posFetch("/api/loyalty", { cache: "no-store" })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (cancelled) return;
-        if (data) {
-          setCustomers(data.customers ?? []);
-          setConfig(data.config ?? null);
-        }
+    fetchLoyaltyCustomers()
+      .then((list) => {
+        if (!cancelled) setCustomers(list);
       })
       .catch(() => {
         if (!cancelled) setStatus({ tone: "error", message: "تعذر التحميل" });
@@ -103,13 +69,8 @@ export default function AdminLoyaltyPage() {
     setEvents([]);
     setStatus(null);
     try {
-      const res = await posFetch(`/api/loyalty?customer_id=${customer.id}`, { cache: "no-store" });
-      const data = await res.json();
-      if (res.ok && Array.isArray(data.events)) {
-        setEvents(data.events);
-        if (data.customer) setSelected(data.customer);
-        if (data.config) setConfig(data.config);
-      }
+      const evts = await fetchLoyaltyEvents(customer.id);
+      setEvents(evts);
     } catch {
       /* keep the selected row; events stay empty */
     }
@@ -119,15 +80,17 @@ export default function AdminLoyaltyPage() {
     setBusy(true);
     setStatus(null);
     try {
-      const res = await posFetch("/api/loyalty", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-pos-role": "admin" },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "فشل الإجراء");
+      const action = body.action as string;
+      const customerId = body.customer_id as string;
+      if (action === "earn") {
+        await earnLoyaltyPoints(customerId, { amount: body.amount as number, reference: body.reference as string, note: (body.note as string) || undefined });
+      } else if (action === "redeem") {
+        await redeemLoyaltyPoints(customerId, { points: body.points as number, note: (body.note as string) || undefined });
+      } else if (action === "adjust") {
+        await adjustLoyaltyPoints(customerId, { points: body.points as number, note: (body.note as string) || undefined });
+      }
       await load(q);
-      if (selected) await selectCustomer({ ...selected, ...data.customer });
+      if (selected) await selectCustomer(selected);
       setAmount("");
       setPointsInput("");
       setNote("");

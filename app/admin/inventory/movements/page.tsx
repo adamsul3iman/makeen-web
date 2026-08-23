@@ -16,7 +16,7 @@ import {
 import { ListPagination } from "@/components/admin/ListPagination";
 import AsyncProductCombobox from "@/components/admin/AsyncProductCombobox";
 import type { AsyncProductOption } from "@/components/admin/AsyncProductCombobox";
-import { posFetch } from "@/lib/tenantClient";
+import { fetchMovements, createMovement } from "@/lib/movementsClient";
 import { usePosStore } from "@/store/usePosStore";
 
 type AdjustmentMode = "IN" | "OUT" | "COUNT" | "DAMAGE";
@@ -60,7 +60,7 @@ function quantity(value: number): string {
 }
 
 function movementTone(delta: number): string {
-  return delta > 0 ? "text-emerald-700 bg-emerald-50" : "text-red-700 bg-red-50";
+  return delta > 0 ? "text-green-700 bg-green-50" : "text-red-700 bg-red-50";
 }
 
 export default function InventoryMovementsPage() {
@@ -88,16 +88,14 @@ export default function InventoryMovementsPage() {
     setLoading(true);
     setError("");
     try {
-      const movementParams = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
-      if (filterProductId) movementParams.set("productId", filterProductId);
-      if (filterType) movementParams.set("type", filterType);
-      const movementsResponse = await posFetch(`/api/inventory/movements?${movementParams}`, { cache: "no-store" });
-      const movementData = (await movementsResponse.json().catch(() => null)) as { movements?: InventoryMovement[]; total?: number; page?: number; pageSize?: number; error?: string } | null;
-      if (!movementsResponse.ok || !Array.isArray(movementData?.movements)) {
-        throw new Error(movementData?.error ?? "تعذر تحميل حركات المخزون");
-      }
+      const movementData = await fetchMovements({
+        productId: filterProductId || undefined,
+        type: filterType || undefined,
+        page,
+        pageSize,
+      });
       setMovements(movementData.movements);
-      setTotal(movementData.total ?? movementData.movements.length);
+      setTotal(movementData.total);
     } catch (reasonValue) {
       setError(reasonValue instanceof Error ? reasonValue.message : "تعذر تحميل دفتر المخزون");
     } finally {
@@ -132,24 +130,15 @@ export default function InventoryMovementsPage() {
     setError("");
     setNotice("");
     try {
-      const response = await posFetch("/api/inventory/movements", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-pos-role": "admin",
-          "x-pos-admin-email": adminEmail,
-        },
-        body: JSON.stringify({
-          productId,
-          barcode: mode === "COUNT" ? "" : barcode,
-          mode,
-          quantity: Number(amount),
-          reason: reason.trim(),
-          idempotencyKey: requestKey.current,
-        }),
+      await createMovement({
+        productId,
+        barcode: mode === "COUNT" ? "" : barcode,
+        mode,
+        quantity: Number(amount),
+        reason: reason.trim(),
+        idempotencyKey: requestKey.current,
+        actorName: adminEmail,
       });
-      const data = (await response.json().catch(() => null)) as { movement?: InventoryMovement; error?: string } | null;
-      if (!response.ok || !data?.movement) throw new Error(data?.error ?? "تعذر تسجيل حركة المخزون");
       requestKey.current = "";
       setAmount("");
       setReason("");
@@ -181,7 +170,7 @@ export default function InventoryMovementsPage() {
 
       <section className="grid grid-cols-3 gap-3">
         <div className="rounded-lg border border-border bg-white p-4"><p className="text-xs font-bold text-muted">إجمالي الحركات</p><p className="mt-1 text-2xl font-black tabular-nums">{total.toLocaleString("ar-JO")}</p></div>
-        <div className="rounded-lg border border-emerald-100 bg-emerald-50 p-4"><p className="text-xs font-bold text-emerald-700">واردة (صفحة الحالية)</p><p className="mt-1 text-2xl font-black tabular-nums text-emerald-700">{increases.toLocaleString("ar-JO")}</p></div>
+        <div className="rounded-lg border border-green-100 bg-green-50 p-4"><p className="text-xs font-bold text-green-700">واردة (صفحة الحالية)</p><p className="mt-1 text-2xl font-black tabular-nums text-green-700">{increases.toLocaleString("ar-JO")}</p></div>
         <div className="rounded-lg border border-red-100 bg-red-50 p-4"><p className="text-xs font-bold text-red-700">صادرة (صفحة الحالية)</p><p className="mt-1 text-2xl font-black tabular-nums text-red-700">{decreases.toLocaleString("ar-JO")}</p></div>
       </section>
 

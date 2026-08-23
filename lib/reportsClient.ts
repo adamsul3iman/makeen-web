@@ -1,4 +1,29 @@
 import { getSupabaseBrowser } from "./supabaseBrowser";
+import { getTenantStoreId } from "./tenantClient";
+import {
+  buildTaxBreakdown,
+  invoiceReference,
+  ledgerNumber,
+  ledgerText,
+  mapSalesInvoiceItem,
+  mapSalesLedgerInvoice,
+} from "./salesLedger";
+import { attachInputTax, profitabilityDelta } from "./profitability";
+import type {
+  ProfitabilityPeriod,
+  ProfitabilityPurchases,
+  ProfitabilityResponse,
+  ProfitabilitySnapshot,
+  ProfitabilityStatementValues,
+} from "@/types/profitability.types";
+import type {
+  SalesInvoiceDetail,
+  SalesInvoicePaymentDetail,
+  SalesLedgerOption,
+  SalesLedgerResponse,
+  SalesLedgerSummary,
+  SalesTaxBreakdown,
+} from "@/types/salesLedger.types";
 import type {
   ReportsDataQualityIssue,
   ReportsNegativeStock,
@@ -80,6 +105,139 @@ interface ProductAccumulator {
   profitCandidate: number;
   profitReliable: boolean;
   stock: number | null;
+}
+
+interface LedgerInvoiceRow {
+  id: string;
+  sync_id: string;
+  branch_id: string | null;
+  terminal_id: string | null;
+  shift_id: string | null;
+  cashier_id: string | null;
+  cashier_name: string | null;
+  customer_id: string | null;
+  customer_name: string | null;
+  customer_phone: string | null;
+  payment_method: string;
+  subtotal: number | string;
+  tax: number | string;
+  discount: number | string;
+  delivery_fee: number | string;
+  total: number | string;
+  cash_amount: number | string;
+  visa_amount: number | string;
+  cliq_amount: number | string;
+  debt_amount: number | string;
+  item_count: number | string;
+  gross_profit: number | string;
+  is_return: boolean | null;
+  is_cancellation: boolean | null;
+  original_invoice_sync_id: string | null;
+  completed_at: string;
+  istd_uuid?: string | null;
+  istd_qr?: string | null;
+}
+
+interface LedgerDetailInvoiceRow extends LedgerInvoiceRow {
+  amount_paid: number | string | null;
+  change_amount: number | string | null;
+}
+
+interface LedgerItemRow {
+  id: string;
+  invoice_id: string;
+  line_no: number | string | null;
+  product_id: string | null;
+  product_name: string;
+  barcode: string;
+  variant_label: string;
+  unit_name: string;
+  qty: number | string;
+  multiplier: number | string | null;
+  unit_price: number | string;
+  line_subtotal: number | string;
+  line_discount: number | string;
+  net_total: number | string;
+  tax_percent: number | string;
+  tax_included: boolean | null;
+  tax_amount: number | string;
+  line_total: number | string;
+  cost_price: number | string;
+  cost_total: number | string;
+  gross_profit: number | string;
+}
+
+interface ProfitInvoiceRow {
+  id: string;
+  subtotal: number | string;
+  tax: number | string;
+  discount: number | string;
+  delivery_fee: number | string;
+  total: number | string;
+  is_return: boolean | null;
+  is_cancellation: boolean | null;
+  completed_at: string;
+}
+
+interface ProfitItemRow {
+  invoice_id: string;
+  qty: number | string;
+  net_total: number | string;
+  barcode: string;
+  product_id: string | null;
+  cost_price: number | string;
+  cost_total: number | string;
+}
+
+interface ProfitExpenseRow {
+  category: string;
+  amount: number | string;
+  created_at: string;
+}
+
+interface PurchaseValueRow {
+  total_amount: number | string | null;
+}
+
+const LEDGER_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const LEDGER_PAYMENT_METHODS = new Set(["CASH", "VISA", "SPLIT", "DEBT", "CLIQ", "UNKNOWN"]);
+
+const LEDGER_INVOICE_SELECT =
+  "id,sync_id,branch_id,terminal_id,shift_id,cashier_id,cashier_name,customer_id,customer_name,customer_phone,payment_method,subtotal,tax,discount,delivery_fee,total,cash_amount,visa_amount,cliq_amount,debt_amount,item_count,gross_profit,is_return,is_cancellation,original_invoice_sync_id,completed_at,istd_uuid,istd_qr";
+
+const LEDGER_ITEM_SELECT =
+  "id,invoice_id,line_no,product_id,product_name,barcode,variant_label,unit_name,qty,multiplier,unit_price,line_subtotal,line_discount,net_total,tax_percent,tax_included,tax_amount,line_total,cost_price,cost_total,gross_profit";
+
+function round3(value: number): number {
+  return Math.round((value + Number.EPSILON) * 1000) / 1000;
+}
+
+/**
+ * Parses a report date parameter. Plain YYYY-MM-DD values are interpreted as
+ * Amman wall-clock business days (+03:00), matching the legacy SQL reports.
+ */
+function parseReportDate(value: string | null | undefined, fallback: Date, endOfDay = false): Date {
+  if (!value) return fallback;
+  const parsed = /^\d{4}-\d{2}-\d{2}$/.test(value)
+    ? new Date(`${value}T${endOfDay ? "23:59:59.999" : "00:00:00.000"}+03:00`)
+    : new Date(value);
+  return Number.isNaN(parsed.getTime()) ? fallback : parsed;
+}
+
+function optionalLedgerUuid(value: string | null | undefined): string | null {
+  const clean = value?.trim() ?? "";
+  return LEDGER_UUID_RE.test(clean) ? clean : null;
+}
+
+/** Amman calendar date (YYYY-MM-DD) of an instant — the reports' day bucket. */
+function ammanDayKey(date: Date): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Amman" }).format(date);
+}
+
+/** A sales-ledger line whose recorded cost is missing or zero blocks profit. */
+function isZeroCostLine(qty: unknown, costPrice: unknown): boolean {
+  return ledgerNumber(qty) !== 0 && ledgerNumber(costPrice) <= 0;
 }
 
 function round2(value: number): number {
@@ -222,21 +380,36 @@ async function fetchSalesInvoices(storeId: string, from: Date, to: Date): Promis
   );
 }
 
-async function fetchSalesInvoiceItems(storeId: string, invoiceIds: string[]): Promise<SalesInvoiceItemRow[]> {
+async function fetchInBatches<T>(
+  table: string,
+  select: string,
+  storeId: string,
+  column: string,
+  values: string[],
+): Promise<T[]> {
   const sb = getSupabaseBrowser();
-  if (!sb || invoiceIds.length === 0) return [];
-  const rows: SalesInvoiceItemRow[] = [];
-  for (let i = 0; i < invoiceIds.length; i += IN_BATCH_SIZE) {
-    const batch = invoiceIds.slice(i, i + IN_BATCH_SIZE);
+  if (!sb || values.length === 0) return [];
+  const rows: T[] = [];
+  for (let i = 0; i < values.length; i += IN_BATCH_SIZE) {
     const { data, error } = await sb
-      .from("sales_invoice_items")
-      .select("invoice_id,product_id,product_name,barcode,qty,line_total,cost_price,gross_profit")
+      .from(table)
+      .select(select)
       .eq("store_id", storeId)
-      .in("invoice_id", batch);
+      .in(column, values.slice(i, i + IN_BATCH_SIZE));
     if (error) throw error;
-    rows.push(...((data ?? []) as SalesInvoiceItemRow[]));
+    rows.push(...((data ?? []) as T[]));
   }
   return rows;
+}
+
+async function fetchSalesInvoiceItems(storeId: string, invoiceIds: string[]): Promise<SalesInvoiceItemRow[]> {
+  return fetchInBatches<SalesInvoiceItemRow>(
+    "sales_invoice_items",
+    "invoice_id,product_id,product_name,barcode,qty,line_total,cost_price,gross_profit",
+    storeId,
+    "invoice_id",
+    invoiceIds,
+  );
 }
 
 function buildOverviewFromLedger(params: {
@@ -427,12 +600,34 @@ function buildOverviewFromLedger(params: {
   };
 }
 
-export async function fetchReportsOverview(storeId: string): Promise<ReportsOverview> {
-  const now = new Date();
-  const to = now;
-  const from = new Date(now.getTime() - 29 * DAY_MS);
+export interface ReportsOverviewRange {
+  /** Inclusive lower bound: YYYY-MM-DD (start of Amman day) or ISO timestamp. */
+  from?: string;
+  /** Inclusive upper bound: YYYY-MM-DD (end of Amman day) or ISO timestamp. */
+  to?: string;
+}
 
-  const [products, barcodes] = await Promise.all([fetchProducts(storeId), fetchBarcodes(storeId)]);
+/**
+ * Client-side reports engine (replaces the former /api/reports/overview call).
+ * Reads the store's invoice ledger straight from Supabase and computes the
+ * overview in the browser, falling back to sync-event payloads when the
+ * ledger tables are unavailable. Defaults to the trailing 30 days.
+ */
+export async function fetchReportsOverview(
+  storeId: string,
+  range?: ReportsOverviewRange,
+): Promise<ReportsOverview> {
+  const fallbackTo = new Date();
+  const to = parseReportDate(range?.to, fallbackTo, true);
+  const from = parseReportDate(range?.from, new Date(to.getTime() - 29 * DAY_MS));
+
+  let products: ProductRow[];
+  let barcodes: { barcode: string; product_id: string; cost_price: number | string | null }[];
+  try {
+    [products, barcodes] = await Promise.all([fetchProducts(storeId), fetchBarcodes(storeId)]);
+  } catch {
+    throw new Error("تعذر الاتصال بالبيانات — تحقق من صلاحيات الجدول (RLS)");
+  }
 
   try {
     const invoices = await fetchSalesInvoices(storeId, from, to);
@@ -447,7 +642,7 @@ export async function fetchReportsOverview(storeId: string): Promise<ReportsOver
     const sb = getSupabaseBrowser();
     if (sb) {
       const { error } = await sb.from("sales_invoices").select("id").limit(1);
-      if (error && (error.code === "42P01" || error.code === "42703")) {
+      if (error && (error.code === "42P01" || error.code === "42703" || error.code === "42501")) {
         const events = await fetchEvents(storeId, from, to);
         return buildOverviewFromEvents({ events, products, barcodes, from, to });
       }
@@ -647,4 +842,143 @@ export async function submitInventoryCount(opts: {
         : error.message;
     throw new Error(msg);
   }
+}
+
+/* ─── Sales Ledger (client-side aggregation) ─────────────────────── */
+
+export async function fetchSalesReport(params: {
+  from: string;
+  to: string;
+  page?: number;
+  pageSize?: number;
+  kind?: string;
+  branchId?: string;
+  terminalId?: string;
+  cashierId?: string;
+  paymentMethod?: string;
+  search?: string;
+}): Promise<Record<string, unknown>> {
+  const sb = getSupabaseBrowser();
+  const storeId = getTenantStoreId();
+  if (!sb || !storeId) throw new Error("Supabase غير مهيأة");
+
+  const { from, to, page = 1, pageSize = 50, kind = "all", branchId, terminalId, cashierId, paymentMethod, search } = params;
+
+  let q = sb
+    .from("sales_invoices")
+    .select("*", { count: "exact" })
+    .eq("store_id", storeId)
+    .gte("created_at", from)
+    .lte("created_at", to + "T23:59:59.999+03:00");
+
+  if (branchId) q = q.eq("branch_id", branchId);
+  if (terminalId) q = q.eq("terminal_id", terminalId);
+  if (cashierId) q = q.eq("cashier_id", cashierId);
+  if (kind === "sales") q = q.eq("is_return", false);
+  if (kind === "returns") q = q.eq("is_return", true);
+  if (search) q = q.ilike("cashier_name", `%${search}%`);
+
+  const offset = (page - 1) * pageSize;
+  const { data: invoices, count, error } = await q.order("created_at", { ascending: false }).range(offset, offset + pageSize - 1);
+  if (error) throw new Error(error.message);
+
+  const rows = (invoices ?? []) as Record<string, unknown>[];
+  let cash = 0, visa = 0, cliq = 0, debt = 0, gross = 0, tax = 0, discounts = 0, returns = 0, profit = 0;
+  for (const r of rows) {
+    cash += Number(r.cash_amount) || 0;
+    visa += Number(r.visa_amount) || 0;
+    cliq += Number(r.cliq_amount) || 0;
+    debt += Number(r.debt_amount) || 0;
+    gross += Number(r.total) || 0;
+    tax += Number(r.tax_amount) || 0;
+    discounts += Number(r.discount_amount) || 0;
+    if (r.is_return) returns += Math.abs(Number(r.total) || 0);
+    profit += Number(r.gross_profit) || 0;
+  }
+
+  return {
+    invoices: rows,
+    total: count ?? 0,
+    page,
+    pageSize,
+    summary: {
+      grossSales: gross,
+      returns,
+      netSales: gross - returns,
+      cash, visa, cliq, debt,
+      discounts,
+      tax,
+      grossProfit: profit,
+      invoiceCount: count ?? 0,
+    },
+  };
+}
+
+export async function fetchSalesInvoiceDetail(invoiceId: string): Promise<Record<string, unknown>> {
+  const sb = getSupabaseBrowser();
+  const storeId = getTenantStoreId();
+  if (!sb || !storeId) throw new Error("Supabase غير مهيأة");
+
+  const { data: invoice, error } = await sb
+    .from("sales_invoices")
+    .select("*")
+    .eq("id", invoiceId)
+    .eq("store_id", storeId)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  if (!invoice) throw new Error("الفاتورة غير موجودة");
+
+  const { data: items } = await sb
+    .from("sales_invoice_items")
+    .select("*")
+    .eq("invoice_id", invoiceId)
+    .eq("store_id", storeId);
+
+  return { invoice: { ...invoice, items: items ?? [] } };
+}
+
+export async function fetchProfitabilityReport(params: {
+  from: string;
+  to: string;
+}): Promise<Record<string, unknown>> {
+  const sb = getSupabaseBrowser();
+  const storeId = getTenantStoreId();
+  if (!sb || !storeId) throw new Error("Supabase غير مهيأة");
+
+  const { from, to } = params;
+
+  const { data: invoices, error } = await sb
+    .from("sales_invoices")
+    .select("id,total,gross_profit,tax,discount,is_return,created_at")
+    .eq("store_id", storeId)
+    .gte("created_at", from)
+    .lte("created_at", to + "T23:59:59.999+03:00");
+  if (error) throw new Error(error.message);
+
+  const rows = (invoices ?? []) as Record<string, unknown>[];
+  let totalRevenue = 0, totalCost = 0, totalProfit = 0, totalTax = 0, totalDiscounts = 0, totalReturns = 0;
+  for (const r of rows) {
+    const amt = Number(r.total) || 0;
+    if (r.is_return) {
+      totalReturns += Math.abs(amt);
+    } else {
+      totalRevenue += amt;
+    }
+    const profit = Number(r.gross_profit) || 0;
+    totalProfit += profit;
+    totalCost += (Number(r.total) || 0) - profit;
+    totalTax += Number(r.tax) || 0;
+    totalDiscounts += Number(r.discount) || 0;
+  }
+
+  const netRevenue = totalRevenue - totalReturns;
+  return {
+    current: {
+      summary: { totalRevenue, totalCost, totalProfit, totalTax, totalDiscounts, totalReturns, netRevenue },
+      statement: { grossMargin: totalRevenue > 0 ? (totalProfit / totalRevenue * 100) : 0 },
+      quality: { profitReliable: totalCost > 0 },
+    },
+    previous: null,
+    generatedAt: new Date().toISOString(),
+  };
 }

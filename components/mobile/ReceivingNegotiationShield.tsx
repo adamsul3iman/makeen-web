@@ -36,10 +36,10 @@ export default function ReceivingNegotiationShield({
   onOverrideMargin: () => void;
 }) {
   return (
-    <div className="mt-3 overflow-hidden rounded-xl border border-emerald-200 bg-emerald-50">
-      <div className="flex items-center gap-1.5 border-b border-emerald-200 bg-emerald-100 px-3 py-2">
-        <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-700" />
-        <p className="text-xs font-black text-emerald-900">استشعار التفاوض</p>
+    <div className="mt-3 overflow-hidden rounded-xl border border-green-200 bg-green-50">
+      <div className="flex items-center gap-1.5 border-b border-green-200 bg-green-100 px-3 py-2">
+        <ShieldCheck className="h-4 w-4 shrink-0 text-green-700" />
+        <p className="text-xs font-black text-green-900">استشعار التفاوض</p>
         {shield.isCostIncrease && (
           <span className="ml-auto flex items-center gap-1 rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-black text-rose-700">
             <AlertTriangle className="h-3 w-3" />
@@ -53,10 +53,10 @@ export default function ReceivingNegotiationShield({
           <ul className="space-y-1.5">
             {shield.lastPurchases.map((purchase, index) => (
               <li key={`${purchase.purchasedAt}-${index}`} className="flex items-center justify-between gap-2 text-xs">
-                <span className="min-w-0 flex-1 truncate font-bold text-emerald-950">
+                <span className="min-w-0 flex-1 truncate font-bold text-green-950">
                   {purchase.supplierName || "مورد"}
                 </span>
-                <span className="shrink-0 font-mono font-black text-emerald-900">
+                <span className="shrink-0 font-mono font-black text-green-900">
                   {formatCost(purchase.cost)}
                 </span>
               </li>
@@ -65,11 +65,11 @@ export default function ReceivingNegotiationShield({
         )}
 
         {shield.hasHistory && (
-          <div className="flex items-center gap-2 rounded-lg bg-white/70 px-2 py-1.5 text-[11px] font-bold text-emerald-900">
+          <div className="flex items-center gap-2 rounded-lg bg-white/70 px-2 py-1.5 text-[11px] font-bold text-green-900">
             <span>الأدنى {formatCost(shield.lowestCost)}</span>
-            <span className="text-emerald-300">•</span>
+            <span className="text-green-300">•</span>
             <span>الأعلى {formatCost(shield.highestCost)}</span>
-            <span className="text-emerald-300">•</span>
+            <span className="text-green-300">•</span>
             <span>متوسط {formatCost(shield.averageCost)}</span>
           </div>
         )}
@@ -107,7 +107,7 @@ export default function ReceivingNegotiationShield({
         )}
 
         {marginOverridden && (
-          <div className="flex items-center gap-1.5 rounded-lg bg-emerald-100 px-2 py-1.5 text-[11px] font-black text-emerald-800">
+          <div className="flex items-center gap-1.5 rounded-lg bg-green-100 px-2 py-1.5 text-[11px] font-black text-green-800">
             <Check className="h-3.5 w-3.5 shrink-0" />
             تم تأكيد تجاوز الحد الأدنى لهامش الربح لهذا الصنف
           </div>
@@ -123,18 +123,18 @@ export default function ReceivingNegotiationShield({
         )}
 
         {promptOpen && (
-          <div className="rounded-lg border border-emerald-300 bg-white px-2.5 py-2">
-            <p className="text-[11px] font-black text-emerald-900">
+          <div className="rounded-lg border border-green-300 bg-white px-2.5 py-2">
+            <p className="text-[11px] font-black text-green-900">
               سعر البيع المقترح للحفاظ على الهامش
             </p>
-            <p className="mt-0.5 font-mono text-lg font-black text-emerald-700">
+            <p className="mt-0.5 font-mono text-lg font-black text-green-700">
               {formatCost(shield.suggestedRetail)}
             </p>
             <div className="mt-2 flex gap-2">
               <button
                 type="button"
                 onClick={onAcceptRetail}
-                className="flex h-9 flex-1 items-center justify-center gap-1 rounded-lg bg-emerald-600 text-xs font-black text-white transition hover:bg-emerald-700"
+                className="flex h-9 flex-1 items-center justify-center gap-1 rounded-lg bg-green-600 text-xs font-black text-white transition hover:bg-green-700"
               >
                 <Check className="h-4 w-4" />
                 تطبيق السعر
@@ -152,7 +152,7 @@ export default function ReceivingNegotiationShield({
         )}
 
         {acceptedRetail != null && (
-          <div className="flex items-center gap-1.5 rounded-lg bg-emerald-100 px-2 py-1.5 text-[11px] font-black text-emerald-800">
+          <div className="flex items-center gap-1.5 rounded-lg bg-green-100 px-2 py-1.5 text-[11px] font-black text-green-800">
             <Check className="h-3.5 w-3.5 shrink-0" />
             تم اعتماد سعر البيع الجديد {formatCost(acceptedRetail)}
           </div>

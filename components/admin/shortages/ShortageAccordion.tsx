@@ -157,8 +157,8 @@ export default function ShortageAccordion({
                         className="flex w-full items-center justify-between gap-3 px-6 py-2.5 transition hover:bg-surface-muted"
                       >
                         <div className="flex items-center gap-3">
-                          <div className="grid h-8 w-8 place-items-center rounded-lg bg-emerald-50">
-                            <Tag className="h-4 w-4 text-emerald-600" />
+                          <div className="grid h-8 w-8 place-items-center rounded-lg bg-green-50">
+                            <Tag className="h-4 w-4 text-green-600" />
                           </div>
                           <div className="text-right">
                             <p className="text-sm font-bold text-foreground">

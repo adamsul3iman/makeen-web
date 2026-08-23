@@ -40,7 +40,7 @@ const BAUD_RATES: DeviceHardwareSettings["drawerBaudRate"][] = [
 ];
 
 function StatusDot({ ok }: { ok: boolean }) {
-  return <span className={`h-2.5 w-2.5 rounded-full ${ok ? "bg-emerald-500" : "bg-slate-300"}`} />;
+  return <span className={`h-2.5 w-2.5 rounded-full ${ok ? "bg-green-500" : "bg-slate-300"}`} />;
 }
 
 function SoundSettingsSection({
@@ -70,7 +70,7 @@ function SoundSettingsSection({
     {
       cue: "SALE_COMPLETED",
       label: "اختبار إتمام البيع",
-      className: "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100",
+      className: "border-green-200 bg-green-50 text-green-700 hover:bg-green-100",
     },
   ];
 
@@ -283,7 +283,7 @@ export default function DevicesPage() {
               <Printer className="h-5 w-5 text-blue-600" />
               الطابعة الحرارية
             </h2>
-            <p className="mt-2 flex items-center gap-2 text-sm font-bold text-emerald-700">
+            <p className="mt-2 flex items-center gap-2 text-sm font-bold text-green-700">
               <StatusDot ok /> الطباعة عبر نظام التشغيل جاهزة
             </p>
           </div>
@@ -333,10 +333,10 @@ export default function DevicesPage() {
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>
             <h2 className="flex items-center gap-2 text-base font-black">
-              <Cable className="h-5 w-5 text-emerald-600" />
+              <Cable className="h-5 w-5 text-green-600" />
               درج النقد
             </h2>
-            <p className={`mt-2 flex items-center gap-2 text-sm font-bold ${drawerStatus.selected ? "text-emerald-700" : "text-muted"}`}>
+            <p className={`mt-2 flex items-center gap-2 text-sm font-bold ${drawerStatus.selected ? "text-green-700" : "text-muted"}`}>
               <StatusDot ok={drawerStatus.selected} />
               {!drawerStatus.supported
                 ? "Web Serial غير متاح في هذا المتصفح"
@@ -380,7 +380,7 @@ export default function DevicesPage() {
                 type="checkbox"
                 checked={settings.autoOpenDrawer}
                 onChange={(event) => updateSettings({ autoOpenDrawer: event.target.checked })}
-                className="h-5 w-5 accent-emerald-600"
+                className="h-5 w-5 accent-green-600"
               />
             </label>
           </div>
@@ -399,7 +399,7 @@ export default function DevicesPage() {
             type="button"
             disabled={!drawerStatus.selected || drawerBusy}
             onClick={() => void testDrawer()}
-            className="inline-flex h-10 items-center gap-2 rounded-lg bg-emerald-600 px-4 text-sm font-black text-white disabled:opacity-40"
+            className="inline-flex h-10 items-center gap-2 rounded-lg bg-green-600 px-4 text-sm font-black text-white disabled:opacity-40"
           >
             <Cable className="h-4 w-4" /> اختبار الفتح
           </button>
@@ -422,7 +422,7 @@ export default function DevicesPage() {
               <Barcode className="h-5 w-5 text-violet-600" />
               قارئ الباركود
             </h2>
-            <p className="mt-2 flex items-center gap-2 text-sm font-bold text-emerald-700">
+            <p className="mt-2 flex items-center gap-2 text-sm font-bold text-green-700">
               <StatusDot ok /> قارئ لوحة المفاتيح جاهز
             </p>
           </div>
@@ -462,7 +462,7 @@ export default function DevicesPage() {
         <div className="mt-4 flex min-h-11 items-center gap-3 border-t border-border pt-4">
           {scannerResult ? (
             <>
-              <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+              <CheckCircle2 className="h-5 w-5 text-green-600" />
               <span className="font-mono text-sm font-black" dir="ltr">{scannerResult.code}</span>
               <span className="text-xs font-bold text-muted">{scannerResult.duration}ms</span>
             </>

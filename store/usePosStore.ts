@@ -57,7 +57,7 @@ import { openCashDrawer } from "@/lib/cashDrawer";
 import { loadDeviceHardwareSettings } from "@/lib/deviceHardware";
 import { pushAudit } from "@/lib/audit";
 import { newUuid } from "@/lib/uuid";
-import { getTenantStoreId, posFetch, setTenantStoreId } from "@/lib/tenantClient";
+import { getTenantStoreId, setTenantStoreId } from "@/lib/tenantClient";
 import { STORE_HEADER } from "@/lib/tenant";
 import { effectiveTaxPercent } from "@/lib/qr";
 import { computeFiscalBreakdown, computeSaleTotals } from "@/lib/saleMath";
@@ -197,6 +197,7 @@ interface CartSlot {
 interface PosStoreState {
   ready: boolean;
   catalogUpdatedAt: string;
+  _catalogHydrated: boolean;
   categories: CategoryMap;
   products: ProductMap;
   barcodes: BarcodeMap;
@@ -571,6 +572,7 @@ function bootCatalogState(cache: ReturnType<typeof loadCatalogBootCacheSync>) {
     return {
       ready: false,
       catalogUpdatedAt: "",
+      _catalogHydrated: false,
       categories: {} as CategoryMap,
       products: {} as ProductMap,
       barcodes: {} as BarcodeMap,
@@ -583,6 +585,7 @@ function bootCatalogState(cache: ReturnType<typeof loadCatalogBootCacheSync>) {
   return {
     ready: true,
     catalogUpdatedAt: cache.updatedAt,
+    _catalogHydrated: true,
     categories: cache.categories,
     products: cache.products,
     barcodes: cache.barcodes,
@@ -617,6 +620,7 @@ function applyCatalogState(
   return {
     ready: true,
     catalogUpdatedAt: snapshot.updatedAt,
+    _catalogHydrated: true,
     categories: mergeEntityMap(state.categories, snapshot.categories),
     products: mergeEntityMap(state.products, snapshot.products),
     barcodes: mergeEntityMap(state.barcodes, snapshot.barcodes),
@@ -1039,6 +1043,184 @@ function applyLoginPayloadToStore(
   void get().hydrateCatalog();
 }
 
+type StaffLoginLookup = {
+  /** Legacy register flow: store id + PIN. */
+  storeId?: string;
+  /** Unified staff flow: human-friendly store code + username + PIN. */
+  storeCode?: string;
+  username?: string;
+  pin: string;
+};
+
+type StaffLoginResult =
+  | { ok: true; payload: LoginPayloadData }
+  | { ok: false; error: string; unauthorized?: boolean };
+
+/**
+ * Direct-Supabase staff authentication shared by the register flows that used
+ * to round-trip through /api/login. Resolves the store (by id or code),
+ * verifies the PIN against cashier rows via sha256(pin + salt) and assembles
+ * the full login payload (role, branches, terminals) exactly like the legacy
+ * route did — minus the signed device cookie, which only server routes set.
+ */
+async function resolveStaffLoginPayload(
+  sb: NonNullable<ReturnType<typeof getSupabaseBrowser>>,
+  input: StaffLoginLookup,
+): Promise<StaffLoginResult> {
+  let storeQuery = sb
+    .from("stores")
+    .select("id,name,owner_name,email,phone,logo_url,address,receipt_header,receipt_footer,loyalty_enabled,points_per_spend,point_value,tax_percent,tax_number,receipt_show_tax_number,receipt_show_cashier_time,receipt_show_barcode_qr,receipt_compact_spacing,subscription_status,code")
+    .limit(1);
+  if (input.storeId) {
+    storeQuery = storeQuery.eq("id", input.storeId);
+  } else if (input.storeCode) {
+    storeQuery = storeQuery.eq("code", input.storeCode.trim().toUpperCase());
+  } else {
+    return { ok: false, error: "بيانات الدخول مطلوبة" };
+  }
+  const { data: store, error: storeError } = await storeQuery.maybeSingle();
+  if (storeError) throw storeError;
+  if (!store) {
+    return { ok: false, error: input.storeCode ? "كود المتجر غير صحيح" : "المتجر غير موجود" };
+  }
+  if (store.subscription_status === "suspended") {
+    return { ok: false, error: "هذا المتجر موقوف" };
+  }
+
+  const { data: cashierRows, error: cashierError } = await sb
+    .from("cashiers")
+    .select("id,name,role,role_id,pin,pin_salt,pin_hash,username,is_active")
+    .eq("store_id", store.id);
+  if (cashierError) throw cashierError;
+
+  // Suspended staff can't sign in, but their row stays discoverable so the
+  // sign-in page can say "الحساب موقوف" rather than a generic 401.
+  const username = input.username?.trim().toLowerCase() ?? "";
+  if (username) {
+    const suspended = (cashierRows ?? []).find(
+      (r) =>
+        r.role !== "admin" &&
+        r.role !== "مدير" &&
+        r.username &&
+        r.username.trim().toLowerCase() === username &&
+        r.is_active === false,
+    );
+    if (suspended) {
+      return { ok: false, error: "الحساب موقوف — تواصل مع مدير المتجر" };
+    }
+  }
+
+  // F3: verify against the stored per-cashier hash (sha256(pin + salt)).
+  // Legacy rows without a hash fall back to the plaintext pin column. Only
+  // cashier rows are eligible — the owner (role 'admin') holds dashboard
+  // credentials and never a PIN, so its hash can never unlock a register.
+  const cashier = (cashierRows ?? []).find((r) => {
+    if (r.role === "admin" || r.role === "مدير") return false;
+    if (r.is_active === false) return false;
+    if (username && (!r.username || r.username.trim().toLowerCase() !== username)) return false;
+    return r.pin_hash
+      ? sha256Hex(input.pin + (r.pin_salt ?? sha256Hex(`pos:pin-salt:${store.id}`).slice(0, 16))) === r.pin_hash
+      : r.pin != null && r.pin === input.pin;
+  });
+  if (!cashier) {
+    return { ok: false, error: "بيانات الدخول غير صحيحة", unauthorized: true };
+  }
+
+  const fallbackRoleCode = normalizeStaffRoleCode(cashier.role);
+  let staffRole = {
+    id: cashier.role_id as string | null,
+    code: fallbackRoleCode,
+    name: STAFF_ROLE_PRESETS[fallbackRoleCode].name,
+    capabilities: [...STAFF_ROLE_PRESETS[fallbackRoleCode].capabilities],
+    limits: { ...STAFF_ROLE_PRESETS[fallbackRoleCode].limits },
+  };
+  if (cashier.role_id) {
+    const { data: roleRow } = await sb
+      .from("staff_roles")
+      .select("id,code,name,capabilities,limits")
+      .eq("id", cashier.role_id)
+      .eq("store_id", store.id)
+      .maybeSingle();
+    if (roleRow) {
+      staffRole = {
+        id: roleRow.id,
+        code: normalizeStaffRoleCode(roleRow.code),
+        name: roleRow.name,
+        capabilities: Array.isArray(roleRow.capabilities) ? roleRow.capabilities : [],
+        limits: roleRow.limits && typeof roleRow.limits === "object"
+          ? roleRow.limits as typeof staffRole.limits
+          : { ...STAFF_ROLE_PRESETS[fallbackRoleCode].limits },
+      };
+    }
+  }
+
+  const { data: branches } = await sb
+    .from("branches")
+    .select("id,name")
+    .eq("store_id", store.id)
+    .order("created_at", { ascending: true });
+  const branchRows = (branches ?? []) as Array<{ id: string; name: string }>;
+  const branchIds = branchRows.map((b) => b.id);
+
+  const { data: terminals } = await sb
+    .from("terminals")
+    .select("id,branch_id,name")
+    .in("branch_id", branchIds.length > 0 ? branchIds : ["00000000-0000-0000-0000-000000000000"]);
+  const terminalRows = (terminals ?? []) as Array<{ id: string; branch_id: string; name: string }>;
+
+  // The auto-seeded "الفرع الرئيسي" / "الكاشير الرئيسي" are the safe defaults;
+  // fall back to the first branch/terminal of this store when absent.
+  const defaultBranchId =
+    branchRows.find((b) => b.name === "الفرع الرئيسي")?.id ?? branchRows[0]?.id ?? null;
+  const defaultTerminalId =
+    terminalRows.find((t) => t.branch_id === defaultBranchId && t.name === "الكاشير الرئيسي")?.id ??
+    terminalRows.find((t) => t.branch_id === defaultBranchId)?.id ??
+    terminalRows[0]?.id ??
+    null;
+
+  return {
+    ok: true,
+    payload: {
+      store: {
+        id: store.id,
+        code: store.code,
+        name: store.name,
+        ownerName: store.owner_name,
+        email: store.email,
+        phone: store.phone,
+        subscriptionStatus: store.subscription_status,
+        logoUrl: store.logo_url,
+        address: store.address,
+        receiptHeader: store.receipt_header,
+        receiptFooter: store.receipt_footer,
+        loyaltyEnabled: store.loyalty_enabled !== false,
+        pointsPerSpend: Number(store.points_per_spend) || 1,
+        pointValue: Number(store.point_value) || 0.01,
+        taxPercent: store.tax_percent != null ? Number(store.tax_percent) : 16,
+        taxNumber: store.tax_number ?? "",
+        receiptShowTaxNumber: store.receipt_show_tax_number !== false,
+        receiptShowCashierTime: store.receipt_show_cashier_time !== false,
+        receiptShowBarcodeQr: store.receipt_show_barcode_qr !== false,
+        receiptCompactSpacing: store.receipt_compact_spacing === true,
+      },
+      cashier: {
+        id: cashier.id,
+        name: cashier.name,
+        role: cashier.role,
+        roleId: staffRole.id ?? undefined,
+        roleCode: staffRole.code,
+        roleName: staffRole.name,
+        capabilities: staffRole.capabilities,
+        limits: staffRole.limits,
+      },
+      branches: branchRows,
+      terminals: terminalRows.map((t) => ({ id: t.id, branchId: t.branch_id, name: t.name })),
+      defaultBranchId,
+      defaultTerminalId,
+    },
+  };
+}
+
 export const usePosStore = create<PosStore>()(
   persist(
     (set, get) => ({
@@ -1103,18 +1285,36 @@ export const usePosStore = create<PosStore>()(
       shortageFlags: {},
 
       loadSnapshot: (snapshot) =>
-        set((state) => ({
-          ...applyCatalogState(state, snapshot),
-          // The live cart, held invoices and return reference are deliberately
-          // preserved here: they are persisted and must survive a reload or a
-          // mid-shift catalog refresh. Only catalog data is refreshed.
-          isCheckoutModalOpen: false,
-          isHoldModalOpen: false,
-          isCompleting: false,
-          invoiceDiscount: state.invoiceDiscount,
-          modalSession: 0,
-          checkoutSession: 0,
-        })),
+        set((state) => {
+          // Skip if the snapshot is stale or identical — prevents redundant
+          // identity swaps that cause flickering during mount.
+          if (
+            snapshot.updatedAt &&
+            state.catalogUpdatedAt &&
+            snapshot.updatedAt <= state.catalogUpdatedAt
+          ) {
+            return {};
+          }
+          return {
+            ...applyCatalogState(state, snapshot),
+            // The live cart, held invoices and return reference are deliberately
+            // preserved here: they are persisted and must survive a reload or a
+            // mid-shift catalog refresh. Only catalog data is refreshed.
+            invoiceDiscount: state.invoiceDiscount,
+            // Only reset modal sessions during explicit login/terminal switches,
+            // NOT during background catalog refreshes. Background snapshots must
+            // never kill an open checkout or modal mid-flow.
+            ...(state._catalogHydrated
+              ? {}
+              : {
+                  isCheckoutModalOpen: false,
+                  isHoldModalOpen: false,
+                  isCompleting: false,
+                  modalSession: 0,
+                  checkoutSession: 0,
+                }),
+          };
+        }),
 
       upsertCustomer: (customer) => {
         const storeId = get().currentStore?.id ?? getTenantStoreId();
@@ -2432,25 +2632,19 @@ export const usePosStore = create<PosStore>()(
         });
         persistDurablePosState(get());
 
-        // Offline unlock remains immediate. When online, establish a signed
-        // employee device session so report APIs can re-check this role.
+        // Offline unlock remains immediate. When online, verify against live
+        // cashier rows and refresh the signed role snapshot straight from
+        // Supabase — the legacy /api/login round-trip is gone.
         const storeId = state.currentStore?.id;
         if (storeId) {
-          void posFetch("/api/login", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ pin: code, storeId }),
-          })
-            .then(async (response) => {
-              if (!response.ok) return;
-              const data = (await response.json()) as {
-                cashier?: PosStoreState["currentCashier"];
-              };
-              if (!data.cashier || get().currentCashier?.id !== cashier.id) return;
-              set({ currentCashier: { ...data.cashier, sessionReady: true } });
-              persistDurablePosState(get());
-            })
-            .catch(() => undefined);
+          void (async () => {
+            const sb = getSupabaseBrowser();
+            if (!sb || !isSupabaseBrowserConfigured()) return;
+            const result = await resolveStaffLoginPayload(sb, { storeId, pin: code });
+            if (!result.ok || get().currentCashier?.id !== cashier.id) return;
+            set({ currentCashier: { ...result.payload.cashier, sessionReady: true } });
+            persistDurablePosState(get());
+          })().catch(() => undefined);
         }
         return true;
       },
@@ -2489,13 +2683,14 @@ export const usePosStore = create<PosStore>()(
           return false;
         }
         try {
-          const res = await posFetch("/api/login", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ pin: code, storeId }),
-          });
-          if (!res.ok) {
-            if (res.status === 401) {
+          const sb = getSupabaseBrowser();
+          if (!sb || !isSupabaseBrowserConfigured()) {
+            set({ notice: { message: "Supabase غير مُعد — تحقق من ملف .env.local", tone: "error" } });
+            return false;
+          }
+          const result = await resolveStaffLoginPayload(sb, { storeId, pin: code });
+          if (!result.ok) {
+            if (result.unauthorized) {
               const s = get();
               const next = s.pinFailCount + 1;
               if (next >= PIN_MAX_ATTEMPTS) {
@@ -2513,18 +2708,16 @@ export const usePosStore = create<PosStore>()(
                 set({ pinFailCount: next });
               }
             } else {
-              const data = (await res.json().catch(() => ({}))) as { error?: string };
               set({
                 notice: {
-                  message: data.error ?? "تعذر تسجيل الدخول",
+                  message: result.error,
                   tone: "error",
                 },
               });
             }
             return false;
           }
-          const data = (await res.json()) as LoginPayloadData;
-          applyLoginPayloadToStore(set, get, data);
+          applyLoginPayloadToStore(set, get, result.payload);
           return true;
         } catch (err) {
           console.error("🔥 RAW LOGIN STORE ERROR:", err);
@@ -2887,10 +3080,14 @@ export const usePosStore = create<PosStore>()(
           ]);
 
           if (!matchesStore()) return;
-        if (!localCatalog && Date.now() < 0) {
-          set({ ready: true, notice: { message: "تعذّر تحميل الكتالوج — لا يوجد نسخة محلية", tone: "error" } });
-          return;
-        }
+          // Dead guard restored: surface a notice when there's no local copy
+          // AND nothing has loaded yet, so the user knows why the grid is empty.
+          if (!localCatalog && !get().catalogUpdatedAt && !get().ready) {
+            set({
+              ready: true,
+              notice: { message: "تعذّر تحميل الكتالوج — لا يوجد نسخة محلية", tone: "error" },
+            });
+          }
           if (
             localCatalog &&
             (!get().catalogUpdatedAt || get().catalogUpdatedAt !== localCatalog.updatedAt)

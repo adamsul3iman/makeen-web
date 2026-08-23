@@ -4,8 +4,13 @@ import { useEffect, useState } from "react";
 import { CheckCircle2, KeyRound, Loader2, ReceiptText, Save, Store as StoreIcon } from "lucide-react";
 import Link from "next/link";
 import { usePosStore } from "@/store/usePosStore";
-import { posFetch } from "@/lib/tenantClient";
-import type { Store } from "@/types/pos.types";
+import {
+  changeAdminAccount,
+  fetchSettings,
+  fetchTaxSettings,
+  updateSettings,
+  updateTaxSettings,
+} from "@/lib/settingsClient";
 
 interface SettingsForm {
   name: string;
@@ -79,8 +84,8 @@ function Input({
 
 /**
  * Store-owner settings. Reads + writes ONLY the caller's own store row
- * (the `x-pos-store-id` header is injected by posFetch and the route scopes
- * every query with `.eq("id", storeId)`). Requires the admin cashier role.
+ * (every Supabase query is scoped with `.eq("id", storeId)` and enforced by
+ * RLS). Requires the admin cashier role.
  */
 export default function AdminSettingsPage() {
   const currentStore = usePosStore((s) => s.currentStore);
@@ -112,32 +117,28 @@ export default function AdminSettingsPage() {
 
   useEffect(() => {
     let cancelled = false;
-    posFetch("/api/settings", { cache: "no-store" })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
+    fetchSettings()
+      .then((s) => {
         if (cancelled) return;
-        const s = data?.settings;
-        if (s) {
-          setForm({
-            name: s.name ?? "",
-            ownerName: s.ownerName ?? "",
-            email: s.email ?? "",
-            phone: s.phone ?? "",
-            logoUrl: s.logoUrl ?? "",
-            address: s.address ?? "",
-            receiptHeader: s.receiptHeader ?? "",
-            receiptFooter: s.receiptFooter ?? "",
-            loyaltyEnabled: s.loyaltyEnabled !== false,
-            pointsPerSpend: s.pointsPerSpend != null ? String(s.pointsPerSpend) : "1",
-            pointValue: s.pointValue != null ? String(s.pointValue) : "0.01",
-            taxPercent: s.taxPercent != null ? String(s.taxPercent) : "16",
-            taxNumber: s.taxNumber ?? "",
-            receiptShowTaxNumber: s.receiptShowTaxNumber !== false,
-            receiptShowCashierTime: s.receiptShowCashierTime !== false,
-            receiptShowBarcodeQr: s.receiptShowBarcodeQr !== false,
-            receiptCompactSpacing: s.receiptCompactSpacing === true,
-          });
-        }
+        setForm({
+          name: s.name,
+          ownerName: s.ownerName,
+          email: s.email,
+          phone: s.phone,
+          logoUrl: s.logoUrl,
+          address: s.address,
+          receiptHeader: s.receiptHeader,
+          receiptFooter: s.receiptFooter,
+          loyaltyEnabled: s.loyaltyEnabled,
+          pointsPerSpend: String(s.pointsPerSpend),
+          pointValue: String(s.pointValue),
+          taxPercent: String(s.taxPercent),
+          taxNumber: s.taxNumber,
+          receiptShowTaxNumber: s.receiptShowTaxNumber,
+          receiptShowCashierTime: s.receiptShowCashierTime,
+          receiptShowBarcodeQr: s.receiptShowBarcodeQr,
+          receiptCompactSpacing: s.receiptCompactSpacing,
+        });
       })
       .catch(() => {
         /* offline: fall back to the persisted store context */
@@ -145,17 +146,13 @@ export default function AdminSettingsPage() {
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
-    posFetch("/api/settings/tax", { cache: "no-store" })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
+    fetchTaxSettings()
+      .then((t) => {
         if (cancelled) return;
-        const t = data?.settings;
-        if (t) {
-          setIstdTaxNumber(t.taxNumber ?? "");
-          setIstdClientId(t.istdClientId ?? "");
-          setIstdSecretMasked(t.istdSecretMasked ?? "");
-          setIstdConfigured(t.configured === true);
-        }
+        setIstdTaxNumber(t.taxNumber);
+        setIstdClientId(t.istdClientId);
+        setIstdSecretMasked(t.istdSecretMasked);
+        setIstdConfigured(t.configured);
       })
       .catch(() => {
         /* offline: leave the JoFotara section empty */
@@ -207,62 +204,52 @@ export default function AdminSettingsPage() {
     setError("");
     setSaved(false);
     try {
-      const res = await posFetch("/api/settings", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json", "x-pos-role": "admin" },
-        body: JSON.stringify({
-          name: form.name.trim(),
-          owner_name: form.ownerName,
-          email: form.email,
-          phone: form.phone,
-          logo_url: form.logoUrl,
-          address: form.address,
-          receipt_header: form.receiptHeader,
-          receipt_footer: form.receiptFooter,
-          loyalty_enabled: form.loyaltyEnabled,
-          points_per_spend: parseFloat(form.pointsPerSpend) || 1,
-          point_value: parseFloat(form.pointValue) || 0.01,
-          tax_percent: parseFloat(form.taxPercent) || 0,
-          tax_number: form.taxNumber.trim(),
-          receipt_show_tax_number: form.receiptShowTaxNumber,
-          receipt_show_cashier_time: form.receiptShowCashierTime,
-          receipt_show_barcode_qr: form.receiptShowBarcodeQr,
-          receipt_compact_spacing: form.receiptCompactSpacing,
-        }),
+      const data = await updateSettings({
+        name: form.name.trim(),
+        ownerName: form.ownerName,
+        email: form.email,
+        phone: form.phone,
+        logoUrl: form.logoUrl,
+        address: form.address,
+        receiptHeader: form.receiptHeader,
+        receiptFooter: form.receiptFooter,
+        loyaltyEnabled: form.loyaltyEnabled,
+        pointsPerSpend: parseFloat(form.pointsPerSpend) || 1,
+        pointValue: parseFloat(form.pointValue) || 0.01,
+        taxPercent: parseFloat(form.taxPercent) || 0,
+        taxNumber: form.taxNumber.trim(),
+        receiptShowTaxNumber: form.receiptShowTaxNumber,
+        receiptShowCashierTime: form.receiptShowCashierTime,
+        receiptShowBarcodeQr: form.receiptShowBarcodeQr,
+        receiptCompactSpacing: form.receiptCompactSpacing,
       });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setError(data.error ?? "تعذر حفظ الإعدادات");
-        return;
-      }
-      const data = (await res.json()) as { settings: Store };
       setSaved(true);
       setTimeout(() => setSaved(false), 4000);
       setForm({
-        name: data.settings.name ?? "",
-        ownerName: data.settings.ownerName ?? "",
-        email: data.settings.email ?? "",
-        phone: data.settings.phone ?? "",
-        logoUrl: data.settings.logoUrl ?? "",
-        address: data.settings.address ?? "",
-        receiptHeader: data.settings.receiptHeader ?? "",
-        receiptFooter: data.settings.receiptFooter ?? "",
-        loyaltyEnabled: data.settings.loyaltyEnabled !== false,
-        pointsPerSpend: data.settings.pointsPerSpend != null ? String(data.settings.pointsPerSpend) : "1",
-        pointValue: data.settings.pointValue != null ? String(data.settings.pointValue) : "0.01",
-        taxPercent: data.settings.taxPercent != null ? String(data.settings.taxPercent) : "16",
-        taxNumber: data.settings.taxNumber ?? "",
-        receiptShowTaxNumber: data.settings.receiptShowTaxNumber !== false,
-        receiptShowCashierTime: data.settings.receiptShowCashierTime !== false,
-        receiptShowBarcodeQr: data.settings.receiptShowBarcodeQr !== false,
-        receiptCompactSpacing: data.settings.receiptCompactSpacing === true,
+        name: data.name,
+        ownerName: data.ownerName,
+        email: data.email,
+        phone: data.phone,
+        logoUrl: data.logoUrl,
+        address: data.address,
+        receiptHeader: data.receiptHeader,
+        receiptFooter: data.receiptFooter,
+        loyaltyEnabled: data.loyaltyEnabled !== false,
+        pointsPerSpend: data.pointsPerSpend != null ? String(data.pointsPerSpend) : "1",
+        pointValue: data.pointValue != null ? String(data.pointValue) : "0.01",
+        taxPercent: data.taxPercent != null ? String(data.taxPercent) : "16",
+        taxNumber: data.taxNumber ?? "",
+        receiptShowTaxNumber: data.receiptShowTaxNumber !== false,
+        receiptShowCashierTime: data.receiptShowCashierTime !== false,
+        receiptShowBarcodeQr: data.receiptShowBarcodeQr !== false,
+        receiptCompactSpacing: data.receiptCompactSpacing === true,
       });
       // Mirror into the live store context so receipts update instantly.
       if (currentStore) {
-        setCurrentStore({ ...currentStore, ...data.settings });
+        setCurrentStore({ ...currentStore, ...data, subscriptionStatus: currentStore.subscriptionStatus });
       }
-    } catch {
-      setError("تعذر الاتصال بالخادم");
+    } catch (err) {
+      setError(err instanceof Error && err.message ? err.message : "تعذر الاتصال بالخادم");
     } finally {
       setSaving(false);
     }
@@ -281,41 +268,24 @@ export default function AdminSettingsPage() {
     setIstdError("");
     setIstdSaved(false);
     try {
-      const res = await posFetch("/api/settings/tax", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", "x-pos-role": "admin" },
-        body: JSON.stringify({
-          tax_number: istdTaxNumber.trim(),
-          istd_client_id: istdClientId.trim(),
-          istd_client_secret: istdClientSecret.trim(),
-        }),
+      const data = await updateTaxSettings({
+        tax_number: istdTaxNumber.trim(),
+        istd_client_id: istdClientId.trim(),
+        istd_client_secret: istdClientSecret.trim(),
       });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setIstdError(data.error ?? "تعذر حفظ بيانات الفوترة الإلكترونية");
-        return;
-      }
-      const data = (await res.json()) as {
-        settings: {
-          taxNumber?: string;
-          istdClientId?: string;
-          istdSecretMasked?: string;
-          configured?: boolean;
-        };
-      };
-      setIstdTaxNumber(data.settings.taxNumber ?? istdTaxNumber);
-      setIstdClientId(data.settings.istdClientId ?? istdClientId);
-      setIstdSecretMasked(data.settings.istdSecretMasked ?? "");
+      setIstdTaxNumber(data.taxNumber);
+      setIstdClientId(data.istdClientId);
+      setIstdSecretMasked(data.istdSecretMasked);
       setIstdClientSecret("");
-      setIstdConfigured(data.settings.configured === true);
+      setIstdConfigured(data.configured === true);
       // Mirror the fiscal number onto the receipt QR immediately.
-      if (data.settings.taxNumber && currentStore) {
-        setCurrentStore({ ...currentStore, taxNumber: data.settings.taxNumber });
+      if (data.taxNumber && currentStore) {
+        setCurrentStore({ ...currentStore, taxNumber: data.taxNumber });
       }
       setIstdSaved(true);
       setTimeout(() => setIstdSaved(false), 4000);
-    } catch {
-      setIstdError("تعذر الاتصال بالخادم");
+    } catch (err) {
+      setIstdError(err instanceof Error && err.message ? err.message : "تعذر الاتصال بالخادم");
     } finally {
       setSavingIstd(false);
     }
@@ -347,25 +317,11 @@ export default function AdminSettingsPage() {
     setCredError("");
     setCredSaved(false);
     try {
-      const res = await posFetch("/api/admin/account", {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          "x-pos-role": "admin",
-          "x-pos-admin-email": sessionEmail,
-        },
-        body: JSON.stringify({
-          current_password: currentPassword,
-          new_email: newEmail.trim(),
-          new_password: newPassword,
-        }),
+      const data = await changeAdminAccount({
+        current_password: currentPassword,
+        new_email: newEmail.trim(),
+        new_password: newPassword,
       });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setCredError(data.error ?? "تعذر تحديث بيانات الدخول");
-        return;
-      }
-      const data = (await res.json()) as { email?: string };
       const changedEmail = data.email?.toLowerCase() ?? "";
       if (changedEmail && changedEmail !== sessionEmail) {
         setAdminSessionEmail(changedEmail);
@@ -376,8 +332,8 @@ export default function AdminSettingsPage() {
       setNewPassword("");
       setCredSaved(true);
       setTimeout(() => setCredSaved(false), 4000);
-    } catch {
-      setCredError("تعذر الاتصال بالخادم");
+    } catch (err) {
+      setCredError(err instanceof Error && err.message ? err.message : "تعذر الاتصال بالخادم");
     } finally {
       setSavingCred(false);
     }

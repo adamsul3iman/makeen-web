@@ -7,7 +7,7 @@ import { SearchInput } from "@/components/admin/SearchInput";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { normalizeArabicText } from "@/lib/arabic";
 import { formatMoney } from "@/lib/format";
-import { posFetch } from "@/lib/tenantClient";
+import { fetchExpenses, createExpense } from "@/lib/expensesClient";
 import {
   EXPENSE_CATEGORIES,
   EXPENSE_CATEGORY_LABELS,
@@ -32,30 +32,32 @@ export default function AdminExpensesPage() {
   const [pageSize, setPageSize] = useState(10);
 
   useEffect(() => {
-    posFetch("/api/expenses", { cache: "no-store" })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (Array.isArray(data?.expenses)) {
-          // Live rows use snake_case (created_at) and expose cashier_id rather
-          // than a display name — normalize to the UI shape.
-          setExpenses(
-            data.expenses.map(
-              (e: Partial<ExpenseEntry> & { created_at?: string }) => ({
-                id: e.id ?? "",
-                category: e.category ?? "",
-                amount: typeof e.amount === "number" ? e.amount : 0,
-                notes: e.notes ?? "",
-                cashier: e.cashier ?? "",
-                createdAt: e.created_at ?? e.createdAt ?? new Date().toISOString(),
-              }),
-            ),
-          );
-        }
-      })
-      .catch(() => {
-        setError("تعذر تحميل المصروفات — تحقق من الاتصال");
-      })
-      .finally(() => setLoading(false));
+    const load = async () => {
+      try {
+        const rows = await fetchExpenses();
+        // Live rows use snake_case (created_at) and expose cashier_id rather
+        // than a display name — normalize to the UI shape.
+        setExpenses(
+          rows.map((e) => ({
+            id: e.id,
+            category: e.category,
+            amount: typeof e.amount === "number" ? e.amount : 0,
+            notes: e.notes ?? "",
+            cashier: "",
+            createdAt: e.created_at,
+          })),
+        );
+      } catch (err) {
+        setError(
+          err instanceof Error && err.message
+            ? err.message
+            : "تعذر تحميل المصروفات — تحقق من الاتصال",
+        );
+      } finally {
+        setLoading(false);
+      }
+    };
+    void load();
   }, [refreshKey]);
 
   const refresh = () => setRefreshKey((k) => k + 1);
@@ -100,26 +102,19 @@ export default function AdminExpensesPage() {
     setError("");
     setSaving(true);
     try {
-      const res = await posFetch("/api/expenses", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-pos-role": "admin" },
-        body: JSON.stringify({
-          category: formCategory || "general",
-          amount: amountValue,
-          notes: notes.trim() || null,
-        }),
+      await createExpense({
+        category: formCategory || "general",
+        amount: amountValue,
+        notes: notes.trim() || undefined,
       });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setError(data.error ?? "تعذر تسجيل المصروف");
-        return;
-      }
       setAmount("");
       setNotes("");
       setFormCategory("");
       refresh();
-    } catch {
-      setError("تعذر تسجيل المصروف — تحقق من الاتصال");
+    } catch (err) {
+      setError(
+        err instanceof Error && err.message ? err.message : "تعذر تسجيل المصروف — تحقق من الاتصال",
+      );
     } finally {
       setSaving(false);
     }

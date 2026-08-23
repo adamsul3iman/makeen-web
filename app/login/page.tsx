@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Eye, EyeOff, KeyRound, Loader2, Lock, LogIn, Mail, Store, User } from "lucide-react";
 import { usePosStore } from "@/store/usePosStore";
+import { homePathForDevice } from "@/lib/permissions";
 import Logo from "@/components/shared/Logo";
 
 /**
@@ -38,6 +39,7 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
 
   const [busy, setBusy] = useState(false);
+  const [navigating, setNavigating] = useState(false);
 
   const submitStaff = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -49,8 +51,15 @@ export default function LoginPage() {
     }
     setBusy(true);
     const ok = await staffLogin({ storeCode, username, pin });
-    setBusy(false);
-    if (ok) router.replace("/");
+    if (!ok) {
+      setBusy(false);
+      return;
+    }
+    const cashier = usePosStore.getState().currentCashier;
+    const roleCode = cashier?.roleCode ?? cashier?.role;
+    const target = homePathForDevice({ role: "cashier", staffRoleCode: roleCode });
+    setNavigating(true);
+    router.replace(target);
   };
 
   const submitOwner = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -63,9 +72,22 @@ export default function LoginPage() {
     }
     setBusy(true);
     const ok = await adminLogin(email, password);
-    setBusy(false);
-    if (ok) router.replace("/");
+    if (!ok) {
+      setBusy(false);
+      return;
+    }
+    const target = homePathForDevice({ role: "admin" });
+    setNavigating(true);
+    router.replace(target);
   };
+
+  if (navigating) {
+    return (
+      <div dir="rtl" className="flex min-h-screen w-screen items-center justify-center bg-gray-100">
+        <Loader2 className="h-10 w-10 animate-spin text-primary" />
+      </div>
+    );
+  }
 
   const tabBase =
     "flex h-12 flex-1 items-center justify-center gap-2 rounded-xl text-sm font-black transition";

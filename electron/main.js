@@ -5,7 +5,7 @@ import electron from "electron";
 import serve from "electron-serve";
 import electronUpdater from "electron-updater";
 
-const { app, BrowserWindow, dialog, Menu, shell } = electron;
+const { app, BrowserWindow, dialog, ipcMain, Menu, shell } = electron;
 const { autoUpdater } = electronUpdater;
 
 const UPDATE_CHECK_DELAY_MS = 10_000;
@@ -15,6 +15,62 @@ const DEVELOPMENT_ROOT = path.resolve(ELECTRON_DIRECTORY, "..");
 
 let mainWindow = null;
 let updateCheckTimer = null;
+
+const DEFAULT_THERMAL_PRINTER = "Rongta RP80";
+
+// ── Silent-print IPC ─────────────────────────────────────────────────
+// Renderer calls window.electronAPI.printSilent({ html, printerName }).
+// A hidden BrowserWindow is created, the HTML is loaded, and
+// webContents.print({ silent: true }) sends it straight to the printer.
+
+ipcMain.handle("print:silent", async (_event, { html, printerName }) => {
+  const deviceName = printerName || DEFAULT_THERMAL_PRINTER;
+  let printWindow = null;
+  try {
+    printWindow = new BrowserWindow({
+      show: false,
+      width: 400,
+      height: 800,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        webSecurity: false,
+      },
+    });
+
+    await printWindow.loadURL(
+      `data:text/html;charset=utf-8,${encodeURIComponent(html)}`,
+    );
+
+    // Small delay to let the renderer paint before printing.
+    await new Promise((r) => setTimeout(r, 300));
+
+    const success = await printWindow.webContents.print({
+      silent: true,
+      printBackground: true,
+      deviceName,
+    });
+
+    return { success: !!success };
+  } catch (err) {
+    console.error("[electron] Silent print failed:", err);
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    if (printWindow && !printWindow.isDestroyed()) {
+      printWindow.destroy();
+    }
+  }
+});
+
+ipcMain.handle("print:getPrinters", async () => {
+  if (!mainWindow) return [];
+  try {
+    return mainWindow.webContents.getPrintersAsync();
+  } catch {
+    return [];
+  }
+});
 
 /**
  * Serve the static Next.js export from the `out/` directory.
@@ -40,12 +96,8 @@ function createMainWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
-      // The renderer loads from the custom app://- protocol (electron-serve).
-      // Chromium treats custom-scheme origins as opaque, which blocks outbound
-      // fetch to external APIs (Supabase) by same-origin policy. Disabling
-      // webSecurity relaxes this; safe here because the app only loads its own
-      // static content and makes outbound API calls.
+      sandbox: false,
+      preload: path.join(ELECTRON_DIRECTORY, "preload.js"),
       webSecurity: false,
     },
   });
@@ -75,8 +127,12 @@ function createMainWindow() {
     mainWindow = null;
   });
 
-  // Load the static index.html from the `out/` directory via electron-serve.
-  void staticServe(mainWindow);
+  // Load the static export via electron-serve to register the app://- protocol,
+  // then navigate to /login (the POS entry point). The root / is the public
+  // marketing page for the web domain only — desktop users go straight to login.
+  void staticServe(mainWindow).then(() => {
+    void mainWindow.loadURL("app://-/login");
+  });
 }
 
 function configureAutoUpdater() {

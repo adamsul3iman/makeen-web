@@ -26,7 +26,7 @@ import {
   YAxis,
 } from "recharts";
 import { formatMoney } from "@/lib/format";
-import { posFetch } from "@/lib/tenantClient";
+import { fetchProfitabilityReport } from "@/lib/reportsClient";
 import type { ProfitabilityResponse } from "@/types/profitability.types";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -71,7 +71,7 @@ function Metric({
 }) {
   const toneClass =
     tone === "good"
-      ? "border-emerald-100 bg-emerald-50 text-emerald-800"
+      ? "border-green-100 bg-green-50 text-green-800"
       : tone === "bad"
         ? "border-red-100 bg-red-50 text-red-800"
         : tone === "warn"
@@ -129,16 +129,9 @@ export default function ProfitabilityReportPage() {
       setLoading(true);
       setError("");
     }, 0);
-    posFetch(`/api/reports/profitability?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, {
-      cache: "no-store",
-    })
-      .then(async (response) => {
-        const body = await response.json().catch(() => null);
-        if (!response.ok) throw new Error(body?.error ?? "تعذر تحميل قائمة الدخل");
-        return body as ProfitabilityResponse;
-      })
+    fetchProfitabilityReport({ from, to })
       .then((body) => {
-        if (alive) setReport(body);
+        if (alive) setReport(body as unknown as ProfitabilityResponse);
       })
       .catch((reason) => {
         if (alive) setError(reason instanceof Error ? reason.message : "تعذر تحميل قائمة الدخل");
@@ -208,7 +201,7 @@ export default function ProfitabilityReportPage() {
     <div className="space-y-6">
       <header className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <p className="text-xs font-black text-emerald-700">دفتر الربحية</p>
+          <p className="text-xs font-black text-green-700">دفتر الربحية</p>
           <h1 className="mt-1 text-2xl font-black text-foreground">قائمة الدخل والربح التشغيلي</h1>
           <p className="mt-1 text-sm font-semibold text-muted">
             الإيراد قبل الضريبة، تكلفة البضاعة عند البيع، المصروفات، ومقارنة الفترة السابقة.
@@ -275,8 +268,8 @@ export default function ProfitabilityReportPage() {
       <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]">
         <div className="overflow-hidden rounded-lg border border-border bg-white">
           <header className="flex items-center justify-between gap-3 px-4 py-4">
-            <h2 className="flex items-center gap-2 text-sm font-black text-foreground"><Calculator className="h-4 w-4 text-emerald-700" /> قائمة الدخل</h2>
-            <span className={`rounded-full px-2 py-1 text-xs font-black ${reliable ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+            <h2 className="flex items-center gap-2 text-sm font-black text-foreground"><Calculator className="h-4 w-4 text-green-700" /> قائمة الدخل</h2>
+            <span className={`rounded-full px-2 py-1 text-xs font-black ${reliable ? "bg-green-50 text-green-700" : "bg-amber-50 text-amber-700"}`}>
               {reliable ? "تكلفة مكتملة" : "تحتاج استكمال تكلفة"}
             </span>
           </header>
@@ -340,7 +333,7 @@ export default function ProfitabilityReportPage() {
           <dl className="mt-4 space-y-3 text-sm">
             <div className="flex justify-between gap-3"><dt className="font-bold text-muted">ضريبة مخرجات المبيعات</dt><dd className="font-black tabular-nums">{taxPosition ? formatMoney(taxPosition.outputTax) : "—"}</dd></div>
             <div className="flex justify-between gap-3"><dt className="font-bold text-muted">(-) ضريبة مدخلات الموردين</dt><dd className="font-black tabular-nums text-blue-700">{taxPosition ? formatMoney(taxPosition.deductibleInputTax) : "—"}</dd></div>
-            <div className="flex justify-between gap-3 border-t border-border pt-3"><dt className="font-black text-foreground">{taxPosition && taxPosition.netPayable < 0 ? "رصيد ضريبي دائن" : "صافي الضريبة المستحقة"}</dt><dd className={`font-black tabular-nums ${taxPosition && taxPosition.netPayable < 0 ? "text-emerald-700" : "text-amber-800"}`}>{taxPosition ? formatMoney(Math.abs(taxPosition.netPayable)) : "—"}</dd></div>
+            <div className="flex justify-between gap-3 border-t border-border pt-3"><dt className="font-black text-foreground">{taxPosition && taxPosition.netPayable < 0 ? "رصيد ضريبي دائن" : "صافي الضريبة المستحقة"}</dt><dd className={`font-black tabular-nums ${taxPosition && taxPosition.netPayable < 0 ? "text-green-700" : "text-amber-800"}`}>{taxPosition ? formatMoney(Math.abs(taxPosition.netPayable)) : "—"}</dd></div>
             <div className="flex justify-between gap-3"><dt className="font-bold text-muted">إجمالي المقبوضات مع الضريبة</dt><dd className="font-black tabular-nums">{statement ? formatMoney(statement.receiptsIncludingTax) : "—"}</dd></div>
             <div className="flex justify-between gap-3"><dt className="font-bold text-muted">فواتير الفترة</dt><dd className="font-black tabular-nums">{statement?.invoiceCount ?? 0}</dd></div>
             <div className="flex justify-between gap-3"><dt className="font-bold text-muted">مصروفات مسجلة</dt><dd className="font-black tabular-nums">{statement?.expenseCount ?? 0}</dd></div>

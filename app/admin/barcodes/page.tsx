@@ -4,8 +4,9 @@ import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import Link from "next/link";
 import { Loader2, Minus, PanelsTopLeft, Plus, Printer, Search, Send, Trash2 } from "lucide-react";
 import { formatMoney } from "@/lib/format";
-import { posFetch } from "@/lib/tenantClient";
 import { setTenantStoreId } from "@/lib/tenantClient";
+import { generateLabels } from "@/lib/printClient";
+import { normalizeArabicText } from "@/lib/arabic";
 import { enqueueLabelPrint } from "@/lib/idb";
 import BarcodeLabel from "@/components/print/BarcodeLabel";
 import { useDefaultPrintTemplate } from "@/hooks/useDefaultPrintTemplate";
@@ -43,16 +44,23 @@ const genBarcode = (): string =>
   "L" + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2, 6).toUpperCase();
 
 /**
- * Search the lean label endpoint (server-side Arabic-normalized filter +
- * limit) instead of downloading the whole catalog and filtering on the client.
+ * Search the label catalog via generateLabels (direct Supabase read of the
+ * store's products with their active barcodes), applying the Arabic-normalized
+ * text filter and limit on the client.
  */
 async function fetchLabelProducts(q: string, limit: number): Promise<{ products: LabelProduct[]; total: number }> {
-  const params = new URLSearchParams();
-  if (q.trim()) params.set("q", q.trim());
-  params.set("limit", String(limit));
-  const res = await posFetch(`/api/catalog/labels?${params.toString()}`, { cache: "no-store" });
-  if (!res.ok) throw new Error("تعذر تحميل الكتالوج");
-  return (await res.json()) as { products: LabelProduct[]; total: number };
+  const catalog = await generateLabels();
+  const needle = normalizeArabicText(q.trim());
+  const barcodeNeedle = q.trim().toLowerCase();
+  const matches =
+    needle || barcodeNeedle
+      ? catalog.filter(
+          (product) =>
+            normalizeArabicText(product.name).includes(needle) ||
+            product.variants.some((variant) => variant.barcode.toLowerCase().includes(barcodeNeedle)),
+        )
+      : catalog;
+  return { products: matches.slice(0, limit), total: matches.length };
 }
 
 export default function AdminBarcodesPage() {
@@ -241,7 +249,7 @@ export default function AdminBarcodesPage() {
         </p>
       )}
       {sendState === "done" && (
-        <p className="rounded-xl bg-emerald-500/10 px-4 py-3 text-sm font-bold text-emerald-600">
+        <p className="rounded-xl bg-green-500/10 px-4 py-3 text-sm font-bold text-green-600">
           أُرسلت {totalLabels} ملصق لقائمة انتظار طابعة الملصقات — افتح صفحة الطابعة على جهاز الملصقات.
         </p>
       )}

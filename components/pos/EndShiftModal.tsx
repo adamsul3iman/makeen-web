@@ -125,7 +125,7 @@ function SummaryTab({
           className="w-full rounded-xl border border-border bg-white px-4 py-3 text-left text-2xl font-bold tabular-nums outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/30"
         />
         {actualCash.length > 0 && (
-          <div className={`rounded-lg px-3 py-2 text-sm font-bold ${cashVariance === 0 ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+          <div className={`rounded-lg px-3 py-2 text-sm font-bold ${cashVariance === 0 ? "bg-green-50 text-green-700" : "bg-amber-50 text-amber-700"}`}>
             المطلوب: {formatMoney(shiftTotals.expectedCashInDrawer)} • الفرق: {formatMoney(cashVariance)}
           </div>
         )}
@@ -146,7 +146,7 @@ function SummaryTab({
           className="w-full rounded-xl border border-border bg-white px-4 py-3 text-left text-2xl font-bold tabular-nums outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/30"
         />
         {actualCard.length > 0 && (
-          <div className={`rounded-lg px-3 py-2 text-sm font-bold ${cardVariance === 0 ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+          <div className={`rounded-lg px-3 py-2 text-sm font-bold ${cardVariance === 0 ? "bg-green-50 text-green-700" : "bg-amber-50 text-amber-700"}`}>
             المطلوب: {formatMoney(shiftTotals.expectedCard)} • الفرق: {formatMoney(cardVariance)}
           </div>
         )}
@@ -167,7 +167,7 @@ function SummaryTab({
           className="w-full rounded-xl border border-border bg-white px-4 py-3 text-left text-2xl font-bold tabular-nums outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/30"
         />
         {actualCliq.length > 0 && (
-          <div className={`rounded-lg px-3 py-2 text-sm font-bold ${cliqVariance === 0 ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+          <div className={`rounded-lg px-3 py-2 text-sm font-bold ${cliqVariance === 0 ? "bg-green-50 text-green-700" : "bg-amber-50 text-amber-700"}`}>
             المطلوب: {formatMoney(shiftTotals.cliqSales ?? 0)} • الفرق: {formatMoney(cliqVariance)}
           </div>
         )}
@@ -233,9 +233,9 @@ function CashFlowTab({ cashMovements }: { cashMovements: CashMovement[] }) {
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3">
-        <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-center">
-          <p className="text-xs font-bold text-emerald-600">إجمالي الإيداعات</p>
-          <p className="text-lg font-black tabular-nums text-emerald-700">{formatMoney(totalIn)}</p>
+        <div className="rounded-xl border border-green-200 bg-green-50 p-3 text-center">
+          <p className="text-xs font-bold text-green-600">إجمالي الإيداعات</p>
+          <p className="text-lg font-black tabular-nums text-green-700">{formatMoney(totalIn)}</p>
         </div>
         <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-center">
           <p className="text-xs font-bold text-rose-600">إجمالي السحوبات</p>
@@ -250,9 +250,9 @@ function CashFlowTab({ cashMovements }: { cashMovements: CashMovement[] }) {
               key={m.id}
               className="flex items-center gap-3 rounded-xl border border-border bg-white px-4 py-3"
             >
-              <div className={`grid h-9 w-9 shrink-0 place-items-center rounded-full ${isIn ? "bg-emerald-100" : "bg-rose-100"}`}>
+              <div className={`grid h-9 w-9 shrink-0 place-items-center rounded-full ${isIn ? "bg-green-100" : "bg-rose-100"}`}>
                 {isIn ? (
-                  <ArrowDownCircle className="h-5 w-5 text-emerald-600" />
+                  <ArrowDownCircle className="h-5 w-5 text-green-600" />
                 ) : (
                   <ArrowUpCircle className="h-5 w-5 text-rose-600" />
                 )}
@@ -262,7 +262,7 @@ function CashFlowTab({ cashMovements }: { cashMovements: CashMovement[] }) {
                 {m.notes && <p className="truncate text-xs text-muted">{m.notes}</p>}
               </div>
               <div className="text-left">
-                <p className={`text-sm font-bold tabular-nums ${isIn ? "text-emerald-600" : "text-rose-600"}`}>
+                <p className={`text-sm font-bold tabular-nums ${isIn ? "text-green-600" : "text-rose-600"}`}>
                   {isIn ? "+" : "-"}{formatMoney(m.amount)}
                 </p>
                 <p className="text-[10px] text-muted">
@@ -350,7 +350,7 @@ function ProductsTab({ shiftId }: { shiftId: string }) {
             </div>
             <div className="text-left">
               <p className="text-sm font-bold tabular-nums">{formatMoney(item.totalRevenue)}</p>
-              <p className="text-[10px] text-emerald-600">ربح: {formatMoney(item.totalProfit)}</p>
+              <p className="text-[10px] text-green-600">ربح: {formatMoney(item.totalProfit)}</p>
             </div>
           </div>
         ))}

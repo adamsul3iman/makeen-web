@@ -28,7 +28,7 @@ import {
 } from "@/components/ui/AdminDataTable";
 import { PageHeader } from "@/components/ui/Card";
 import { formatMoney } from "@/lib/format";
-import { posFetch } from "@/lib/tenantClient";
+import { fetchSalesReport } from "@/lib/reportsClient";
 import type { SalesLedgerResponse, SalesPaymentMethod } from "@/types/salesLedger.types";
 
 const isoDate = (date: Date): string => date.toISOString().slice(0, 10);
@@ -188,20 +188,10 @@ export default function SalesLedgerPage() {
       setLoading(true);
       setError(null);
     }, 0);
-    const params = new URLSearchParams({ from, to, page: String(page), pageSize: "50", kind });
-    if (branchId) params.set("branchId", branchId);
-    if (terminalId) params.set("terminalId", terminalId);
-    if (cashierId) params.set("cashierId", cashierId);
-    if (paymentMethod) params.set("paymentMethod", paymentMethod);
-    if (search) params.set("search", search);
-    posFetch(`/api/reports/sales?${params.toString()}`, { cache: "no-store" })
-      .then(async (response) => {
-        const body = await response.json().catch(() => null);
-        if (!response.ok) throw new Error(body?.error ?? "تعذر تحميل سجل المبيعات");
-        return body as SalesLedgerResponse;
-      })
+    const params = { from, to, page, pageSize: 50, kind, branchId, terminalId, cashierId, paymentMethod, search };
+    fetchSalesReport(params)
       .then((body) => {
-        if (active) setData(body);
+        if (active) setData(body as unknown as SalesLedgerResponse);
       })
       .catch((reason) => {
         if (active) setError(reason instanceof Error ? reason.message : "تعذر تحميل سجل المبيعات");

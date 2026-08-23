@@ -16,7 +16,9 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { usePosStore } from "./usePosStore";
 import { enqueueSync, getSyncsByStatus, saveReceivingCache, loadReceivingCache, loadCatalogCache, loadCatalogBootCacheSync } from "../lib/idb";
-import { posFetch, getTenantStoreId } from "../lib/tenantClient";
+import { getTenantStoreId } from "../lib/tenantClient";
+import { fetchPriceHistory, fetchReceivingSuppliers } from "../lib/receivingClient";
+import { getSupabaseBrowser } from "../lib/supabaseBrowser";
 import { newUuid } from "../lib/uuid";
 import { hasAnyReceivingCapability } from "../lib/permissions";
 import {
@@ -285,15 +287,11 @@ export const useReceivingStore = create<ReceivingStore>()(
           // IndexedDB unavailable — fall through to the network.
         }
         try {
-          const res = await posFetch("/api/receiving/suppliers");
-          if (!res.ok) return;
-          const body = (await res.json()) as {
-            suppliers?: Array<{ id: string; name: string; balance?: number; paymentTermsDays?: number }>;
-          };
+          const rows = await fetchReceivingSuppliers();
           const suppliers = Object.fromEntries(
-            (body.suppliers ?? []).map((s) => [
+            rows.map((s) => [
               s.id,
-              { id: s.id, name: s.name, balance: s.balance ?? 0, paymentTermsDays: s.paymentTermsDays ?? 0 },
+              { id: s.id, name: s.name, balance: 0, paymentTermsDays: 0 },
             ]) as [string, { id: string; name: string; balance?: number; paymentTermsDays?: number }][],
           );
           if (Object.keys(suppliers).length > 0) {
@@ -355,26 +353,24 @@ export const useReceivingStore = create<ReceivingStore>()(
         // Try an immediate online create so a live device sees the real row
         // now (and the SUPPLIER_CREATE mirror in the queue is a no-op).
         try {
-          const res = await posFetch("/api/receiving/suppliers", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id, name: trimmedName, phone: entry.phone }),
-          });
-          if (res.ok) {
-            const body = (await res.json()) as {
-              supplier?: { id?: string; name?: string; phone?: string; balance?: number; paymentTermsDays?: number };
-            };
-            const row = body.supplier;
-            if (row?.id) {
+          const sb = getSupabaseBrowser();
+          if (sb && storeId) {
+            const { data: row, error } = await sb
+              .from("suppliers")
+              .insert({ id, store_id: storeId, name: trimmedName, phone: entry.phone || null, balance: 0 })
+              .select("id,name,phone,balance")
+              .maybeSingle();
+            if (!error && row) {
+              const created = row as { id: string; name: string | null; phone: string | null; balance: number | string | null };
               set((state) => ({
                 suppliers: {
                   ...state.suppliers,
-                  [row.id!]: {
-                    id: row.id!,
-                    name: row.name ?? trimmedName,
-                    phone: row.phone ?? entry.phone,
-                    balance: row.balance ?? 0,
-                    paymentTermsDays: row.paymentTermsDays ?? 0,
+                  [created.id]: {
+                    id: created.id,
+                    name: created.name ?? trimmedName,
+                    phone: created.phone ?? entry.phone,
+                    balance: Number(created.balance) || 0,
+                    paymentTermsDays: 0,
                   },
                 },
               }));
@@ -462,15 +458,12 @@ export const useReceivingStore = create<ReceivingStore>()(
 
       loadPriceHistory: async (barcode) => {
         try {
-          const res = await posFetch(`/api/receiving/price-history?barcode=${encodeURIComponent(barcode)}`);
-          if (!res.ok) return;
-          const body = (await res.json()) as {
-            currentCost?: number;
-            currentRetail?: number;
-            description?: string;
-            history?: PurchaseRecord[];
-          };
-          const history = Array.isArray(body.history) ? body.history : [];
+          const entries = await fetchPriceHistory(barcode);
+          const primary = entries.find((e) => e.costPrice > 0) ?? entries[0];
+          const history: PurchaseRecord[] = [];
+          const description = primary?.productName ?? barcode;
+          const currentCost = primary?.costPrice ?? 0;
+          const currentRetail = primary?.sellingPrice ?? 0;
           const storeId = usePosStore.getState().currentStore?.id ?? null;
           const existingCache = await loadReceivingCache(storeId).catch(() => null);
           await saveReceivingCache(
@@ -479,9 +472,9 @@ export const useReceivingStore = create<ReceivingStore>()(
                 ...(existingCache?.histories ?? {}),
                 [barcode]: {
                   barcode,
-                  description: body.description ?? barcode,
-                  currentCost: body.currentCost ?? 0,
-                  currentRetail: body.currentRetail ?? 0,
+                  description,
+                  currentCost,
+                  currentRetail,
                   history,
                 },
               },
@@ -493,7 +486,7 @@ export const useReceivingStore = create<ReceivingStore>()(
 
           const line = get().draft.lines.find((l) => l.key === barcode);
           if (line) {
-            const shield = buildShieldForLine(line, history, body.currentCost ?? 0, body.currentRetail ?? 0);
+            const shield = buildShieldForLine(line, history, currentCost, currentRetail);
             set((state) => ({ shieldByBarcode: { ...state.shieldByBarcode, [barcode]: shield } }));
           }
         } catch {

@@ -8,7 +8,7 @@ const TOAST_DURATION = 3000;
 type ToastTone = "success" | "error" | "info";
 
 const TONE_STYLES: Record<ToastTone, string> = {
-  success: "bg-emerald-600 text-white",
+  success: "bg-green-600 text-white",
   error: "bg-destructive text-white",
   info: "bg-foreground text-background",
 };

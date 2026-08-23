@@ -157,7 +157,7 @@ export default function PinnedCategories() {
               "group flex h-11 shrink-0 items-center gap-1.5 rounded-lg border px-3 text-xs font-bold transition active:scale-[0.97]",
               activeCategoryId === cat.id
                 ? "border-primary bg-primary/10 text-primary"
-                : "border-slate-200 bg-white text-slate-700 hover:border-emerald-300 hover:bg-emerald-50/40",
+                : "border-slate-200 bg-white text-slate-700 hover:border-green-300 hover:bg-green-50/40",
             )}
           >
               <span

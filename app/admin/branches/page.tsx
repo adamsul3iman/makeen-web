@@ -14,7 +14,15 @@ import {
 import { SearchInput } from "@/components/admin/SearchInput";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { normalizeArabicText } from "@/lib/arabic";
-import { posFetch } from "@/lib/tenantClient";
+import {
+  createBranch,
+  createTerminal,
+  deleteBranch,
+  deleteTerminal,
+  fetchBranches,
+  updateBranch,
+  updateTerminal,
+} from "@/lib/branchesClient";
 
 interface AdminTerminal {
   id: string;
@@ -30,7 +38,8 @@ interface AdminBranch {
 /**
  * Branch (فرع) and terminal (كاشير) management. Every store owns branches,
  * each branch owns cash registers with independent drawers and shifts.
- * Reads are store-scoped (x-pos-store-id); all writes require admin role.
+ * Reads and writes go straight to Supabase (store-scoped by RLS); writes
+ * require the admin role.
  */
 export default function AdminBranchesPage() {
   const [branches, setBranches] = useState<AdminBranch[]>([]);
@@ -56,10 +65,8 @@ export default function AdminBranchesPage() {
 
   const load = useCallback(async () => {
     try {
-      const res = await posFetch("/api/branches", { cache: "no-store" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "تعذر التحميل");
-      setBranches(data.branches ?? []);
+      const rows = await fetchBranches();
+      setBranches(rows);
       setStatus(null);
     } catch (err) {
       setStatus({ tone: "error", message: err instanceof Error ? err.message : "تعذر التحميل" });
@@ -69,78 +76,28 @@ export default function AdminBranchesPage() {
   }, []);
 
   useEffect(() => {
-    posFetch("/api/branches", { cache: "no-store" })
-      .then((res) => (res.ok ? res.json() : Promise.reject(new Error("تعذر التحميل"))))
-      .then((data) => {
-        setBranches(data.branches ?? []);
-        setStatus(null);
-      })
-      .catch((err) => {
-        setStatus({ tone: "error", message: err instanceof Error ? err.message : "تعذر التحميل" });
-      })
-      .finally(() => setLoading(false));
-  }, []);
+    void load();
+  }, [load]);
 
-  const post = async (path: string, body: Record<string, unknown>) => {
+  const mutate = async (action: () => Promise<unknown>, fallback: string) => {
     setBusy(true);
     setStatus(null);
     try {
-      const res = await posFetch(path, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-pos-role": "admin" },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "فشل الإجراء");
+      await action();
       await load();
       return true;
     } catch (err) {
-      setStatus({ tone: "error", message: err instanceof Error ? err.message : "فشل الإجراء" });
+      setStatus({ tone: "error", message: err instanceof Error ? err.message : fallback });
       return false;
     } finally {
       setBusy(false);
     }
   };
 
-  const patch = async (path: string, body: Record<string, unknown>) => {
-    setBusy(true);
-    setStatus(null);
-    try {
-      const res = await posFetch(path, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json", "x-pos-role": "admin" },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "فشل التعديل");
-      await load();
-      setStatus({ tone: "success", message: "تم الحفظ" });
-      return true;
-    } catch (err) {
-      setStatus({ tone: "error", message: err instanceof Error ? err.message : "فشل التعديل" });
-      return false;
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const del = async (path: string, label: string) => {
+  const del = async (label: string, action: () => Promise<unknown>) => {
     if (!window.confirm(`حذف "${label}"؟`)) return;
-    setBusy(true);
-    setStatus(null);
-    try {
-      const res = await posFetch(path, {
-        method: "DELETE",
-        headers: { "x-pos-role": "admin" },
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "فشل الحذف");
-      await load();
+    if (await mutate(action, "فشل الحذف")) {
       setStatus({ tone: "success", message: "تم الحذف" });
-    } catch (err) {
-      setStatus({ tone: "error", message: err instanceof Error ? err.message : "فشل الحذف" });
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -148,7 +105,7 @@ export default function AdminBranchesPage() {
     e.preventDefault();
     const name = newBranch.trim();
     if (!name) return;
-    if (await post("/api/branches", { name })) {
+    if (await mutate(() => createBranch(name), "فشل الإجراء")) {
       setNewBranch("");
       setStatus({ tone: "success", message: "تم إنشاء الفرع مع كاشير افتراضي" });
     }
@@ -157,7 +114,7 @@ export default function AdminBranchesPage() {
   const addTerminal = async (branchId: string) => {
     const name = (newTerminal[branchId] ?? "").trim();
     if (!name) return;
-    if (await post("/api/terminals", { branch_id: branchId, name })) {
+    if (await mutate(() => createTerminal(branchId, name), "فشل الإجراء")) {
       setNewTerminal((prev) => ({ ...prev, [branchId]: "" }));
       setStatus({ tone: "success", message: "تمت إضافة الكاشير" });
     }
@@ -166,7 +123,7 @@ export default function AdminBranchesPage() {
   const saveBranchName = async (branchId: string) => {
     const name = (editingBranch[branchId] ?? "").trim();
     if (!name) return;
-    if (await patch(`/api/branches/${branchId}`, { name })) {
+    if (await mutate(() => updateBranch(branchId, name), "فشل التعديل")) {
       setEditingBranch((prev) => ({ ...prev, [branchId]: "" }));
     }
   };
@@ -174,7 +131,7 @@ export default function AdminBranchesPage() {
   const saveTerminalName = async (terminalId: string) => {
     const name = (editingTerminal[terminalId] ?? "").trim();
     if (!name) return;
-    if (await patch(`/api/terminals/${terminalId}`, { name })) {
+    if (await mutate(() => updateTerminal(terminalId, name), "فشل التعديل")) {
       setEditingTerminal((prev) => ({ ...prev, [terminalId]: "" }));
     }
   };
@@ -302,7 +259,7 @@ export default function AdminBranchesPage() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => void del(`/api/branches/${branch.id}`, branch.name)}
+                        onClick={() => void del(branch.name, () => deleteBranch(branch.id))}
                         disabled={busy}
                         className="grid h-8 w-8 place-items-center rounded-lg text-destructive transition hover:bg-destructive/10 disabled:opacity-40"
                         aria-label="حذف"
@@ -365,7 +322,7 @@ export default function AdminBranchesPage() {
                           </button>
                           <button
                             type="button"
-                            onClick={() => void del(`/api/terminals/${terminal.id}`, terminal.name)}
+                            onClick={() => void del(terminal.name, () => deleteTerminal(terminal.id))}
                             disabled={busy}
                             className="grid h-8 w-8 place-items-center rounded-lg text-destructive transition hover:bg-destructive/10 disabled:opacity-40"
                             aria-label="حذف"

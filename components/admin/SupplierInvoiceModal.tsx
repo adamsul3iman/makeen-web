@@ -5,7 +5,7 @@ import { Plus, Save, Trash2, X } from "lucide-react";
 import EntityCombobox from "@/components/shared/EntityCombobox";
 import QuickCreateEntityModal from "@/components/shared/QuickCreateEntityModal";
 import { formatMoney } from "@/lib/format";
-import { posFetch } from "@/lib/tenantClient";
+import { createSupplier as createSupplierRequest, createSupplierInvoice } from "@/lib/suppliersClient";
 import type { SupplierAccountOption, SupplierProductOption } from "@/types/supplierAccounts.types";
 
 interface InvoiceLineInput {
@@ -87,15 +87,9 @@ export default function SupplierInvoiceModal({
   };
 
   const createSupplier = async (data: { name: string; phone: string }) => {
-    const response = await posFetch("/api/suppliers", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-pos-role": "admin" },
-      body: JSON.stringify(data),
-    });
-    const body = (await response.json().catch(() => null)) as { supplier?: SupplierAccountOption; error?: string } | null;
-    if (!response.ok || !body?.supplier) throw new Error(body?.error ?? "تعذر إضافة المورد");
-    setSupplierOptions((current) => [...current, body.supplier!].sort((a, b) => a.name.localeCompare(b.name, "ar")));
-    setSupplierId(body.supplier.id);
+    const supplier = await createSupplierRequest({ name: data.name, phone: data.phone });
+    setSupplierOptions((current) => [...current, { id: supplier.id, name: supplier.name, balance: supplier.balance }].sort((a, b) => a.name.localeCompare(b.name, "ar")));
+    setSupplierId(supplier.id);
     setAddingSupplier(false);
   };
 
@@ -123,13 +117,14 @@ export default function SupplierInvoiceModal({
     setSaving(true);
     setError("");
     try {
-      const response = await posFetch("/api/supplier-accounts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ supplierId, invoiceNumber, invoiceDate, dueDate, notes, items: parsedLines }),
+      await createSupplierInvoice({
+        supplier_id: supplierId,
+        invoice_number: invoiceNumber.trim(),
+        total_amount: totals.total,
+        due_date: dueDate,
+        notes,
+        items: parsedLines,
       });
-      const body = (await response.json().catch(() => null)) as { error?: string } | null;
-      if (!response.ok) throw new Error(body?.error ?? "تعذر إنشاء فاتورة المورد");
       onCreated();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "تعذر إنشاء فاتورة المورد");
@@ -184,8 +179,8 @@ export default function SupplierInvoiceModal({
         </div>
 
         <footer className="flex flex-col gap-3 border-t border-border bg-white p-4 sm:flex-row sm:items-center sm:justify-between">
-          <dl className="flex flex-wrap gap-x-5 gap-y-1 text-sm"><div><dt className="inline font-bold text-muted">الصافي: </dt><dd className="inline font-black tabular-nums">{formatMoney(totals.net)}</dd></div><div><dt className="inline font-bold text-muted">الضريبة: </dt><dd className="inline font-black tabular-nums">{formatMoney(totals.tax)}</dd></div><div><dt className="inline font-black text-foreground">الإجمالي: </dt><dd className="inline text-lg font-black tabular-nums text-emerald-700">{formatMoney(totals.total)}</dd></div></dl>
-          <div className="flex gap-2"><button type="button" onClick={onClose} disabled={saving} className="h-11 rounded-lg border border-border px-5 text-sm font-black text-muted">إلغاء</button><button type="submit" disabled={saving || totals.total <= 0} className="inline-flex h-11 items-center gap-2 rounded-lg bg-emerald-600 px-5 text-sm font-black text-white disabled:opacity-40"><Save className="h-4 w-4" /> {saving ? "جارٍ الحفظ…" : "حفظ الفاتورة"}</button></div>
+          <dl className="flex flex-wrap gap-x-5 gap-y-1 text-sm"><div><dt className="inline font-bold text-muted">الصافي: </dt><dd className="inline font-black tabular-nums">{formatMoney(totals.net)}</dd></div><div><dt className="inline font-bold text-muted">الضريبة: </dt><dd className="inline font-black tabular-nums">{formatMoney(totals.tax)}</dd></div><div><dt className="inline font-black text-foreground">الإجمالي: </dt><dd className="inline text-lg font-black tabular-nums text-green-700">{formatMoney(totals.total)}</dd></div></dl>
+          <div className="flex gap-2"><button type="button" onClick={onClose} disabled={saving} className="h-11 rounded-lg border border-border px-5 text-sm font-black text-muted">إلغاء</button><button type="submit" disabled={saving || totals.total <= 0} className="inline-flex h-11 items-center gap-2 rounded-lg bg-green-600 px-5 text-sm font-black text-white disabled:opacity-40"><Save className="h-4 w-4" /> {saving ? "جارٍ الحفظ…" : "حفظ الفاتورة"}</button></div>
         </footer>
       </form>
       {addingSupplier ? <QuickCreateEntityModal title="إضافة مورد" nameLabel="اسم المورد" namePlaceholder="اسم الشركة أو المورد" withPhone onClose={() => setAddingSupplier(false)} onCreate={createSupplier} /> : null}

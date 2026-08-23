@@ -59,6 +59,8 @@ next-env.d.ts
 # Electron & Desktop App Builds
 dist-electron/
 dist-electron-final/
+/dist-final/
+/dist-final-*/
 
 # Python Environment
 .venv/

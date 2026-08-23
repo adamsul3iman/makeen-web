@@ -1,4 +1,5 @@
-import { posFetch } from "./tenantClient";
+import { getSupabaseBrowser } from "./supabaseBrowser";
+import { getTenantStoreId } from "./tenantClient";
 
 /** Interventions that must land in the immutable admin audit log (P3). */
 export const AUDIT_ACTION_TYPES = [
@@ -37,11 +38,10 @@ export interface AuditEntry {
 /**
  * Best-effort push of a sensitive admin intervention to the audit log.
  *
- * Never throws and never blocks the action it reports: if the server is
+ * Never throws and never blocks the action it reports: if Supabase is
  * unreachable the sensitive action has already completed locally and the
  * entry is simply not recorded (the same offline posture as the rest of the
- * POS). The server resolves the acting admin's identity itself, so the log
- * cannot be forged with a fake display name.
+ * POS). The acting admin is recorded as the owner account.
  */
 export async function pushAudit(
   email: string | null | undefined,
@@ -51,19 +51,18 @@ export async function pushAudit(
 ): Promise<boolean> {
   if (!email) return false;
   try {
-    const res = await posFetch("/api/admin/audit", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-pos-admin-email": email,
-      },
-      body: JSON.stringify({
-        action_type: actionType,
-        target_id: targetId ?? null,
-        details: details ?? {},
-      }),
+    const sb = getSupabaseBrowser();
+    const storeId = getTenantStoreId();
+    if (!sb || !storeId) return false;
+    const { error } = await sb.from("admin_audit_logs").insert({
+      store_id: storeId,
+      admin_id: "owner",
+      admin_name: "المدير",
+      action_type: actionType,
+      target_id: targetId ?? null,
+      details: details ?? {},
     });
-    return res.ok;
+    return !error;
   } catch {
     return false;
   }
