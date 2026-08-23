@@ -5,7 +5,7 @@ import { Printer, X } from "lucide-react";
 import { usePosStore } from "@/store/usePosStore";
 import { formatMoney } from "@/lib/format";
 import { formatShiftDateTime } from "@/lib/dateTime";
-import { smartPrint } from "@/lib/printAgent";
+import { smartPrint, isElectron } from "@/lib/printAgent";
 import { buildLiveShiftAudit } from "@/lib/shiftPrintPayload";
 import { useModalEscape } from "@/hooks/useModalEscape";
 
@@ -53,9 +53,10 @@ export default function ShiftDetailsModal() {
           branchName: currentStore?.name ?? "",
         }),
       });
-      if (!printedSilently) window.print();
+      // Native dialog is browser-only — never inside the Electron wrapper.
+      if (!printedSilently && !isElectron()) window.print();
     } catch {
-      window.print();
+      if (!isElectron()) window.print();
     } finally {
       setPrinting(false);
     }

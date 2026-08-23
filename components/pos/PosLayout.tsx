@@ -59,7 +59,7 @@ import SecondaryAuthModal from "../auth/SecondaryAuthModal";
 import PreviousInvoicesModal from "./PreviousInvoicesModal";
 import AuditLogTimeline from "../admin/AuditLogTimeline";
 import { firstBackofficePath, hasCapability } from "@/lib/permissions";
-import { smartPrint, captureReceiptHtml } from "@/lib/printAgent";
+import { smartPrint, captureReceiptHtml, isElectron } from "@/lib/printAgent";
 
 export default function PosLayout() {
   const router = useRouter();
@@ -281,24 +281,24 @@ export default function PosLayout() {
   }, [modalOpen]);
 
   const printReceipt = useCallback(() => {
-    if (!activeTerminalId || !lastCompletedInvoice) {
-      requestAnimationFrame(() => window.print());
-      return;
-    }
-    // Try silent agent print for the receipt.
+    // Silent printing only. There is deliberately NO window.print() path
+    // here: the native dialog blocks the checkout lane, and inside the
+    // Electron wrapper it is forbidden outright (smartPrint suppresses its
+    // fallback tier there too). A failed silent print surfaces as a notice.
+    if (!activeTerminalId || !lastCompletedInvoice) return;
     const html = captureReceiptHtml();
-    if (html) {
-      void smartPrint({
-        terminalId: activeTerminalId,
-        jobType: "RECEIPT",
-        renderedHtml: html,
-        printerKind: "THERMAL",
-      }).then((usedAgent) => {
-        if (!usedAgent) requestAnimationFrame(() => window.print());
-      });
-    } else {
+    if (!html) return;
+    void smartPrint({
+      terminalId: activeTerminalId,
+      jobType: "RECEIPT",
+      renderedHtml: html,
+      printerKind: "THERMAL",
+    }).then((usedAgent) => {
+      if (usedAgent || isElectron()) return;
+      // Plain browser without Electron/agent: the native dialog is the
+      // only remaining way to produce the receipt.
       requestAnimationFrame(() => window.print());
-    }
+    });
   }, [activeTerminalId, lastCompletedInvoice]);
 
   // Settle local hardware after a completed sale. The drawer call never opens

@@ -28,8 +28,10 @@ declare global {
 
 /**
  * True when running inside Electron (preload exposes window.electronAPI).
+ * Exported so callers can honor the hard UX rule: the native print dialog
+ * may NEVER appear inside the Electron wrapper — only in plain browsers.
  */
-function isElectron(): boolean {
+export function isElectron(): boolean {
   return typeof window !== "undefined" && !!window.electronAPI;
 }
 
@@ -266,9 +268,12 @@ export interface PrintOptions {
  * Smart print — three-tier strategy:
  *   1. Electron IPC silent print (no dialog, direct to thermal printer)
  *   2. Standalone print agent via Supabase print_jobs table
- *   3. Fallback: window.print() (shows native dialog)
+ *   3. Fallback: window.print() (native dialog) — BROWSER ONLY.
  *
  * Returns true if a silent path handled it (caller should NOT call window.print()).
+ * Inside Electron the fallback tier is suppressed: a native dialog freezes a
+ * checkout lane, so a failed silent print surfaces as an error notice instead
+ * (callers key off the `false` return while isElectron() is true).
  */
 export async function smartPrint(options: PrintOptions): Promise<boolean> {
   // ── Tier 1: Electron silent print ────────────────────────────────
@@ -307,7 +312,12 @@ export async function smartPrint(options: PrintOptions): Promise<boolean> {
     }
   }
 
-  // ── Tier 3: window.print() fallback ─────────────────────────────
-  options.onFallback?.();
+  // ── Tier 3: window.print() fallback (browser only) ──────────────
+  // Hard constraint: never inside the Electron wrapper. The native
+  // dialog blocks the cashier until dismissed; a failed silent print
+  // must surface as an in-app notice instead.
+  if (!isElectron()) {
+    options.onFallback?.();
+  }
   return false;
 }

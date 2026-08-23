@@ -599,7 +599,7 @@ export async function countPoisonSyncRecords(): Promise<number> {
 
 /**
  * Merge a patch into a queued record's payload (e.g. stamp the ISTD clearance
- * result onto an invoice so the later /api/sync mirror writes it without
+ * result onto an invoice so the later sync mirror writes it without
  * re-submitting to ISTD). No-op when the record no longer exists.
  */
 export async function patchSyncRecordPayload(

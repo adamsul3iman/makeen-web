@@ -5,7 +5,7 @@ import { Printer, LogOut, CheckCircle } from "lucide-react";
 import { usePosStore } from "@/store/usePosStore";
 import { formatMoney } from "@/lib/format";
 import { formatShiftDateTime } from "@/lib/dateTime";
-import { smartPrint } from "@/lib/printAgent";
+import { smartPrint, isElectron } from "@/lib/printAgent";
 import { buildLiveShiftAudit } from "@/lib/shiftPrintPayload";
 
 const REASON_LABELS: Record<string, string> = {
@@ -30,15 +30,12 @@ export default function ShiftClosedSuccess() {
   const activeTerminalId = usePosStore((s) => s.activeTerminalId);
   const currentCashier = usePosStore((s) => s.currentCashier);
   const [printing, setPrinting] = useState(false);
-
-  if (!isClosed || shiftState.status !== "CLOSED") return null;
-
   // Use a snapshot of the closed shift totals — after closeShift, shiftTotals
   // is reset to empty. We read the last known values from the success state
   // which we'll store in a dedicated snapshot on the store.
-  // For now, the summary data is captured from the SHIFT_CLOSED sync payload
-  // displayed via the notice. We'll use a local snapshot approach.
   const closedSummary = usePosStore((s) => s.closedShiftSummary);
+
+  if (!isClosed || shiftState.status !== "CLOSED") return null;
 
   const handleLogout = () => {
     setShiftClosedSuccess(false);
@@ -71,10 +68,12 @@ export default function ShiftClosedSuccess() {
   const s = closedSummary;
 
   const handlePrint = async () => {
-    if (!activeTerminalId || !s) {
+    // Never open the native dialog inside Electron — silent paths only.
+    if ((!activeTerminalId || !s) && !isElectron()) {
       window.print();
       return;
     }
+    if (!activeTerminalId || !s) return;
     setPrinting(true);
     try {
       const usedAgent = await smartPrint({
@@ -94,9 +93,9 @@ export default function ShiftClosedSuccess() {
           discrepancyNote: s.discrepancyNote,
         }),
       });
-      if (!usedAgent) window.print();
+      if (!usedAgent && !isElectron()) window.print();
     } catch {
-      window.print();
+      if (!isElectron()) window.print();
     } finally {
       setPrinting(false);
     }

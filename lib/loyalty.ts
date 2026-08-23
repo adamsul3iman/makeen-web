@@ -18,9 +18,13 @@ export const DEFAULT_LOYALTY_CONFIG: LoyaltyConfig = {
 };
 
 /** Read the caller's own loyalty config; null when the store row is missing. */
-export async function getLoyaltyConfig(storeId: string): Promise<LoyaltyConfig | null> {
-  if (!supabase) return null;
-  const { data, error } = await supabase
+export async function getLoyaltyConfig(
+  storeId: string,
+  db?: typeof supabase,
+): Promise<LoyaltyConfig | null> {
+  const client = db ?? supabase;
+  if (!client) return null;
+  const { data, error } = await client
     .from("stores")
     .select("loyalty_enabled,points_per_spend,point_value")
     .eq("id", storeId)
@@ -51,15 +55,17 @@ export async function awardLoyaltyPoints(opts: {
   amount: number;
   reference: string;
   description?: string;
+  db?: typeof supabase;
 }): Promise<{ awarded: boolean; points: number; error?: string }> {
-  if (!supabase) return { awarded: false, points: 0 };
+  const client = opts.db ?? supabase;
+  if (!client) return { awarded: false, points: 0 };
   const { storeId, customerId, amount, reference, description } = opts;
-  const config = await getLoyaltyConfig(storeId);
+  const config = await getLoyaltyConfig(storeId, client);
   if (!config) return { awarded: false, points: 0, error: "loyalty config not found" };
   const points = pointsForAmount(amount, config);
   if (points <= 0) return { awarded: false, points: 0 };
 
-  const { data: customer, error: readError } = await supabase
+  const { data: customer, error: readError } = await client
     .from("customers")
     .select("id,loyalty_points")
     .eq("id", customerId)
@@ -71,7 +77,7 @@ export async function awardLoyaltyPoints(opts: {
 
   // Idempotency: a failed ack retries the same sync_id; never double-award.
   const marker = `sync:${reference}`;
-  const { data: existing } = await supabase
+  const { data: existing } = await client
     .from("loyalty_events")
     .select("id")
     .eq("store_id", storeId)
@@ -84,7 +90,7 @@ export async function awardLoyaltyPoints(opts: {
   const current = Math.max(0, Number(customer.loyalty_points) || 0);
   const balanceAfter = current + points;
 
-  const { error: txError } = await supabase.from("loyalty_events").insert({
+  const { error: txError } = await client.from("loyalty_events").insert({
     store_id: storeId,
     customer_id: customer.id,
     type: "EARN",
@@ -95,7 +101,7 @@ export async function awardLoyaltyPoints(opts: {
   });
   if (txError) return { awarded: false, points, error: txError.message };
 
-  const { error: updateError } = await supabase
+  const { error: updateError } = await client
     .from("customers")
     .update({ loyalty_points: balanceAfter })
     .eq("id", customer.id)

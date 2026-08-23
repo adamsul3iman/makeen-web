@@ -29,7 +29,7 @@ async function syncIfOnline(): Promise<void> {
 /**
  * Background sync engine:
  *  - Keeps the store's `isOnline` flag in sync with the browser.
- *  - Pushes the PENDING queue to /api/sync every 15s while online.
+ *  - Drains the PENDING queue straight into Supabase every 15s while online.
  *  - Triggers an immediate push when the tab comes back online.
  *  - Re-runs when the tab regains visibility (intervals are throttled
  *    in background tabs).

@@ -206,8 +206,8 @@ export default function SalesLedgerPage() {
   }, [branchId, cashierId, from, kind, page, paymentMethod, reloadKey, search, terminalId, to]);
 
   const terminals = useMemo(() => {
-    if (!data) return [];
-    return branchId ? data.filters.terminals.filter((terminal) => terminal.branchId === branchId) : data.filters.terminals;
+    const options = data?.filters?.terminals ?? [];
+    return branchId ? options.filter((terminal) => terminal.branchId === branchId) : options;
   }, [branchId, data]);
 
   function resetPage(change: () => void) {
@@ -293,7 +293,7 @@ export default function SalesLedgerPage() {
           الفرع
           <select value={branchId} onChange={(event) => resetPage(() => { setBranchId(event.target.value); setTerminalId(""); })} className="h-10 rounded-lg border border-border bg-surface px-3 text-sm font-bold text-foreground">
             <option value="">كل الفروع</option>
-            {(data?.filters.branches ?? []).map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
+            {(data?.filters?.branches ?? []).map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}
           </select>
         </label>
         <label className="grid gap-1 text-xs font-black text-muted">
@@ -307,7 +307,7 @@ export default function SalesLedgerPage() {
           الكاشير
           <select value={cashierId} onChange={(event) => resetPage(() => setCashierId(event.target.value))} className="h-10 rounded-lg border border-border bg-surface px-3 text-sm font-bold text-foreground">
             <option value="">كل الكاشيرين</option>
-            {(data?.filters.cashiers ?? []).map((cashier) => <option key={cashier.id} value={cashier.id}>{cashier.name}</option>)}
+            {(data?.filters?.cashiers ?? []).map((cashier) => <option key={cashier.id} value={cashier.id}>{cashier.name}</option>)}
           </select>
         </label>
         <form onSubmit={submitSearch} className="flex items-end gap-2 md:col-span-2 xl:col-span-5">

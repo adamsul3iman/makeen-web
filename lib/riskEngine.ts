@@ -47,10 +47,13 @@ export function severityForScore(score: number): RiskSeverity {
 }
 
 /** Idempotently append one server-derived risk signal. */
-export async function recordRiskSignal(input: RiskSignalInput): Promise<string | null> {
-  if (!supabase) return null;
+export async function recordRiskSignal(
+  input: RiskSignalInput & { db?: typeof supabase },
+): Promise<string | null> {
+  const client = input.db ?? supabase;
+  if (!client) return null;
   const score = Math.max(0, Math.min(100, Math.round(input.score)));
-  const { data, error } = await supabase
+  const { data, error } = await client
     .from("risk_events")
     .upsert({
       store_id: input.storeId,
@@ -94,8 +97,9 @@ export async function recordInvoiceRiskSignals(
   syncId: string,
   payload: InvoiceRiskPayload,
   fallbackActorName = "",
+  db?: typeof supabase,
 ): Promise<void> {
-  if (!supabase) return;
+  if (!supabase && !db) return;
 
   const total = round3(payload.total);
   const discount = Math.abs(round3(payload.discount));
@@ -115,6 +119,7 @@ export async function recordInvoiceRiskSignals(
     const originalId = payload.originalInvoiceId ?? syncId;
     await recordRiskSignal({
       ...base,
+      db,
       eventKey: `invoice-void:${originalId}`,
       eventType: "INVOICE_VOID",
       score: 72,
@@ -126,6 +131,7 @@ export async function recordInvoiceRiskSignals(
     const amount = Math.abs(total);
     await recordRiskSignal({
       ...base,
+      db,
       eventKey: `invoice-return:${syncId}`,
       eventType: "INVOICE_RETURN",
       score: Math.min(85, 35 + Math.floor(amount / 5)),
@@ -138,6 +144,7 @@ export async function recordInvoiceRiskSignals(
   if (discount > 0 && (discountRatio >= 10 || discount >= 5)) {
     await recordRiskSignal({
       ...base,
+      db,
       eventKey: `high-discount:${syncId}`,
       eventType: "HIGH_DISCOUNT",
       score: Math.min(90, 20 + Math.floor(discountRatio * 1.5) + Math.floor(discount / 5)),
