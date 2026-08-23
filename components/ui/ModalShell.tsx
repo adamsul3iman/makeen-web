@@ -32,7 +32,10 @@ export interface ModalShellProps {
   size?: ModalSize;
   height?: ModalHeight;
   placement?: "center" | "top";
+  /** Backdrop click + Escape close the modal. */
   dismissible?: boolean;
+  /** Render the X button even when `dismissible` is false. */
+  showClose?: boolean;
   closeLabel?: string;
   className?: string;
   bodyClassName?: string;
@@ -50,6 +53,7 @@ export function ModalShell({
   height = "auto",
   placement = "center",
   dismissible = true,
+  showClose,
   closeLabel = "إغلاق",
   className,
   bodyClassName,
@@ -57,6 +61,7 @@ export function ModalShell({
   const titleId = useId();
   const descriptionId = useId();
   const panelRef = useRef<HTMLElement>(null);
+  const shouldShowClose = showClose ?? (dismissible && Boolean(onClose));
 
   useEffect(() => {
     if (!open) return;
@@ -69,7 +74,10 @@ export function ModalShell({
 
     document.body.style.overflow = "hidden";
     document.addEventListener("keydown", handleKeyDown);
-    panelRef.current?.focus();
+    // Don't steal focus from a child that already grabbed it (autoFocus).
+    if (!panelRef.current?.contains(document.activeElement)) {
+      panelRef.current?.focus();
+    }
 
     return () => {
       document.body.style.overflow = previousOverflow;
@@ -122,7 +130,7 @@ export function ModalShell({
               )}
             </div>
           </div>
-          {dismissible && onClose && (
+          {shouldShowClose && onClose && (
             <Button
               variant="ghost"
               size="icon"

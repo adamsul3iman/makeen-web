@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Pencil, X } from "lucide-react";
+import { Pencil } from "lucide-react";
 import { usePosStore } from "@/store/usePosStore";
 import { formatMoney } from "@/lib/format";
+import { ModalShell } from "@/components/ui/ModalShell";
 
 /**
  * Inline unit-price override for a cart line (Admin Mode only).
@@ -36,60 +37,19 @@ export default function AdminLineEditModal() {
   };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-      dir="rtl"
-      onClick={() => setLineEditTarget(null)}
-    >
-      <div
-        className="w-full max-w-xs overflow-hidden rounded-2xl bg-white p-6 shadow-2xl max-h-[85vh] overflow-y-auto"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <header className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="grid h-10 w-10 place-items-center rounded-xl bg-sky-500/15 text-sky-600">
-              <Pencil className="h-5 w-5" />
-            </div>
-            <div>
-              <h2 className="text-base font-black">تعديل سعر الصنف</h2>
-              <p className="max-w-[220px] truncate text-xs font-semibold text-muted">
-                {item.name}
-              </p>
-            </div>
-          </div>
-          <button
-            type="button"
-            aria-label="إغلاق"
-            onClick={() => setLineEditTarget(null)}
-            className="grid h-11 w-11 cursor-pointer place-items-center rounded-lg text-muted transition hover:bg-surface-muted"
-          >
-            <X className="h-5 w-5" />
-          </button>
-        </header>
-
-        <p className="mt-4 text-sm font-semibold text-muted">
-          السعر الحالي: {formatMoney(item.unitPrice)} • الكمية: {item.qty}
-        </p>
-
-        <div className="mt-2 flex items-center gap-2 rounded-xl border border-border bg-surface-muted/60 px-3 py-2.5 focus-within:ring-2 focus-within:ring-primary/30">
-          <span className="text-sm font-black text-muted">د.أ</span>
-          <input
-            ref={inputRef}
-            type="number"
-            inputMode="decimal"
-            min={0}
-            step="0.01"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") commit();
-              if (e.key === "Escape") setLineEditTarget(null);
-            }}
-            className="w-full bg-transparent text-xl font-black tabular-nums outline-none"
-          />
+    <ModalShell
+      title="تعديل سعر الصنف"
+      description={item.name}
+      icon={
+        <div className="grid h-10 w-10 place-items-center rounded-xl bg-sky-500/15 text-sky-600">
+          <Pencil className="h-5 w-5" />
         </div>
-
-        <div className="mt-4 flex gap-2">
+      }
+      size="sm"
+      onClose={() => setLineEditTarget(null)}
+      closeLabel="إغلاق"
+      footer={
+        <div className="flex gap-2">
           <button
             type="button"
             onClick={() => setLineEditTarget(null)}
@@ -106,7 +66,29 @@ export default function AdminLineEditModal() {
             تطبيق
           </button>
         </div>
+      }
+    >
+      <p className="text-sm font-semibold text-muted">
+        السعر الحالي: {formatMoney(item.unitPrice)} • الكمية: {item.qty}
+      </p>
+
+      <div className="mt-3 flex items-center gap-2 rounded-xl border border-border bg-surface-muted/60 px-3 py-2.5 focus-within:ring-2 focus-within:ring-primary/30">
+        <span className="text-sm font-black text-muted">د.أ</span>
+        <input
+          ref={inputRef}
+          type="number"
+          inputMode="decimal"
+          min={0}
+          step="0.01"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commit();
+            if (e.key === "Escape") setLineEditTarget(null);
+          }}
+          className="w-full bg-transparent text-xl font-black tabular-nums outline-none"
+        />
       </div>
-    </div>
+    </ModalShell>
   );
 }

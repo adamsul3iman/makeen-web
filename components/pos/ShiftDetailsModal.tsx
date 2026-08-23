@@ -1,9 +1,12 @@
 "use client";
 
+import { useState } from "react";
 import { Printer, X } from "lucide-react";
 import { usePosStore } from "@/store/usePosStore";
 import { formatMoney } from "@/lib/format";
 import { formatShiftDateTime } from "@/lib/dateTime";
+import { smartPrint } from "@/lib/printAgent";
+import { buildLiveShiftAudit } from "@/lib/shiftPrintPayload";
 import { useModalEscape } from "@/hooks/useModalEscape";
 
 export default function ShiftDetailsModal() {
@@ -12,6 +15,10 @@ export default function ShiftDetailsModal() {
   const shiftTotals = usePosStore((s) => s.shiftTotals);
   const invoiceCount = usePosStore((s) => s.shiftTransactions.length);
   const closeShiftDetailsModal = usePosStore((s) => s.closeShiftDetailsModal);
+  const activeTerminalId = usePosStore((s) => s.activeTerminalId);
+  const currentCashier = usePosStore((s) => s.currentCashier);
+  const currentStore = usePosStore((s) => s.currentStore);
+  const [printing, setPrinting] = useState(false);
 
   useModalEscape(closeShiftDetailsModal, isOpen);
 
@@ -28,6 +35,31 @@ export default function ShiftDetailsModal() {
     { label: "سحوبات", value: `- ${formatMoney(shiftTotals.cashOutTotal)}` },
     { label: "المصروفات", value: `- ${formatMoney(shiftTotals.expenses)}` },
   ];
+
+  const handlePrint = async () => {
+    setPrinting(true);
+    try {
+      const printedSilently = await smartPrint({
+        terminalId: activeTerminalId ?? "",
+        jobType: "X_REPORT",
+        printerKind: "THERMAL",
+        shift: buildLiveShiftAudit({
+          shiftId: shiftState.shiftId,
+          startTime: shiftState.startTime,
+          startingCash: shiftState.startingCash,
+          totals: shiftTotals,
+          invoiceCount,
+          cashierName: currentCashier?.name ?? "",
+          branchName: currentStore?.name ?? "",
+        }),
+      });
+      if (!printedSilently) window.print();
+    } catch {
+      window.print();
+    } finally {
+      setPrinting(false);
+    }
+  };
 
   return (
     <div
@@ -95,16 +127,17 @@ export default function ShiftDetailsModal() {
         <footer className="border-t border-border px-5 py-4">
           <button
             type="button"
-            onClick={() => window.print()}
-            className="flex h-14 w-full items-center justify-center gap-2 rounded-xl bg-primary text-lg font-black text-primary-foreground shadow-sm transition hover:bg-primary-hover"
+            onClick={() => void handlePrint()}
+            disabled={printing}
+            className="flex h-14 w-full items-center justify-center gap-2 rounded-xl bg-primary text-lg font-black text-primary-foreground shadow-sm transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-60"
           >
-            <Printer className="h-5 w-5" />
-            طباعة تقرير مؤقت X
+            <Printer className={`h-5 w-5 ${printing ? "animate-pulse" : ""}`} />
+            {printing ? "جارٍ الإرسال للطابعة…" : "طباعة تقرير مؤقت X"}
           </button>
         </footer>
       </div>
 
-      {/* Hidden printable report */}
+      {/* Fallback printable report — used only when window.print() is the last resort */}
       <div id="x-report-print" className="hidden print:block print:p-4" dir="rtl">
         <h1 className="text-center text-lg font-black">تقرير مؤقت (X)</h1>
         <p className="text-center text-sm">

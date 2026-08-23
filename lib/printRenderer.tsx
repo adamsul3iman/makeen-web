@@ -80,13 +80,13 @@ export type PrintJobKind = "Z_REPORT" | "X_REPORT" | "RECEIPT" | "INVOICE";
  * the local print agent to pipe to Puppeteer / pdf-to-printer.
  *
  * @param shift  – the full ShiftAudit payload
- * @param kind   – "Z_REPORT" → thermal table, everything else → A4
+ * @param kind   – "Z_REPORT" / "X_REPORT" → thermal, others → A4
  */
 export function renderShiftPrintHtml(
   shift: ShiftAudit,
   kind: PrintJobKind,
 ): string {
-  const isThermal = kind === "Z_REPORT";
+  const isThermal = kind === "Z_REPORT" || kind === "X_REPORT";
 
   const componentHtml = isThermal
     ? renderToString(<ThermalShiftPrintView shift={shift} />)
@@ -97,7 +97,11 @@ export function renderShiftPrintHtml(
   const cleaned = componentHtml.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "");
 
   return wrapHtml(
-    isThermal ? "تقرير Z — طباعة حرارية" : "تقرير Z — طباعة A4",
+    kind === "X_REPORT"
+      ? "تقرير X — طباعة حرارية"
+      : isThermal
+        ? "تقرير Z — طباعة حرارية"
+        : "تقرير Z — طباعة A4",
     isThermal ? THERMAL_ACTIVE_CSS : A4_ACTIVE_CSS,
     cleaned,
   );

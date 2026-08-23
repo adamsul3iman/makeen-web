@@ -6,6 +6,7 @@ import { usePosStore } from "@/store/usePosStore";
 import { formatMoney } from "@/lib/format";
 import { formatShiftDateTime } from "@/lib/dateTime";
 import { smartPrint } from "@/lib/printAgent";
+import { buildLiveShiftAudit } from "@/lib/shiftPrintPayload";
 
 const REASON_LABELS: Record<string, string> = {
   cash_counting_error: "خطأ في العد",
@@ -52,7 +53,7 @@ export default function ShiftClosedSuccess() {
         dir="rtl"
       >
         <div className="flex flex-col items-center gap-6 p-8 text-center">
-          <CheckCircle className="h-20 w-20 text-emerald-500" />
+          <CheckCircle className="h-20 w-20 text-green-500" />
           <h1 className="text-2xl font-black text-foreground">تم إغلاق الوردية بنجاح</h1>
           <button
             type="button"
@@ -79,51 +80,19 @@ export default function ShiftClosedSuccess() {
       const usedAgent = await smartPrint({
         terminalId: activeTerminalId,
         jobType: "Z_REPORT",
-        shift: {
-          id: s.shiftId ?? "",
-          shiftId: s.shiftId ?? "",
-          openedAt: s.startTime,
-          closedAt: s.closeTime,
-          date: "",
-          cashier: currentCashier?.name ?? "",
-          branchId: null,
-          branch: "",
-          terminalId: null,
-          terminal: "",
+        printerKind: "THERMAL",
+        shift: buildLiveShiftAudit({
+          shiftId: s.shiftId,
+          startTime: s.startTime,
           startingCash: s.startingCash,
-          cashSales: s.cashSales,
-          visaSales: s.visaSales,
-          cliqSales: s.cliqSales,
-          debtSales: s.debtSales,
-          debtCollections: s.debtCollections,
-          discounts: s.discounts,
-          returns: s.returns,
-          expenses: s.expenses,
-          totalSales: s.totalSales,
-          expectedCashInDrawer: s.expectedCashInDrawer,
+          totals: s,
+          cashierName: currentCashier?.name ?? "",
+          closedAt: s.closeTime,
           actualCash: s.actualCash,
           variance: s.variance,
-          expectedCard: s.expectedCard,
-          actualCard: s.actualCard,
-          cardVariance: s.cardVariance,
-          expectedCliq: s.expectedCliq,
-          actualCliq: s.actualCliq,
-          cliqVariance: s.cliqVariance,
-          cashIn: s.cashInTotal,
-          cashOut: s.cashOutTotal,
-          drawerOpenCount: 0,
           discrepancyReason: s.discrepancyReason,
           discrepancyNote: s.discrepancyNote,
-          approvalStatus: "NOT_REQUIRED",
-          approvedByName: "",
-          approvedAt: null,
-          approvalNote: "",
-          closeSource: "DEVICE",
-          resolvedByName: "",
-          resolutionNote: "",
-          status: "CLOSED",
-        },
-        printerKind: "THERMAL",
+        }),
       });
       if (!usedAgent) window.print();
     } catch {
@@ -178,7 +147,7 @@ export default function ShiftClosedSuccess() {
     >
       <div className="scrollbar-hidden flex max-h-[90vh] w-full max-w-md flex-col overflow-y-auto p-6">
         <div className="flex flex-col items-center gap-3 pb-6">
-          <CheckCircle className="h-16 w-16 text-emerald-500" />
+          <CheckCircle className="h-16 w-16 text-green-500" />
           <h1 className="text-2xl font-black text-foreground">تم إغلاق الوردية بنجاح</h1>
         </div>
 
@@ -213,7 +182,7 @@ export default function ShiftClosedSuccess() {
                 <span className="font-bold">{r.label}</span>
                 <span>{r.expected}</span>
                 <span>{r.actual}</span>
-                <span className={r.variance === "0.00" ? "text-emerald-600 font-bold" : "text-amber-600 font-black"}>
+                <span className={r.variance === "0.00" ? "text-green-600 font-bold" : "text-amber-600 font-black"}>
                   {r.variance}
                 </span>
               </div>

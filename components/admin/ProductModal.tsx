@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Barcode,
   Building2,
@@ -16,7 +16,6 @@ import {
 } from "lucide-react";
 import EntityCombobox, { type EntityOption } from "@/components/shared/EntityCombobox";
 import QuickCreateEntityModal from "@/components/shared/QuickCreateEntityModal";
-import { posFetch } from "@/lib/tenantClient";
 
 export interface InventoryVariant {
   id: string;
@@ -193,6 +192,32 @@ export default function ProductModal({
   const [generatingKey, setGeneratingKey] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(Boolean(initial));
 
+  // Dirty tracking: serialize the editable form state once at mount, then
+  // compare on every render to detect unsaved changes.
+  const initialSnapshotRef = useRef<string | null>(null);
+  if (initialSnapshotRef.current === null) {
+    initialSnapshotRef.current = JSON.stringify({
+      name: initial?.name ?? "",
+      categoryId: initial?.categoryId ?? entryDefaults?.categoryId ?? "",
+      brandId: initial?.brandId ?? entryDefaults?.brandId ?? "",
+      supplierId: initial?.supplierId ?? entryDefaults?.supplierId ?? "",
+      baseUnit: initial?.baseUnit ?? entryDefaults?.baseUnit ?? "حبة",
+      stock: String(initial?.stock ?? 0),
+      reorderLevel: String(initial?.reorderLevel ?? entryDefaults?.reorderLevel ?? 0),
+      taxPercent: String(initial?.taxPercent ?? entryDefaults?.taxPercent ?? 16),
+      taxIncluded: initial?.taxIncluded ?? entryDefaults?.taxIncluded ?? true,
+      isActive: initial?.isActive ?? entryDefaults?.isActive ?? true,
+      showInPos: initial?.showInPos ?? entryDefaults?.showInPos ?? true,
+      isSellable: initial?.isSellable ?? entryDefaults?.isSellable ?? true,
+      isPurchasable: initial?.isPurchasable ?? entryDefaults?.isPurchasable ?? true,
+      allowPriceChange: initial?.allowPriceChange ?? entryDefaults?.allowPriceChange ?? false,
+      isQuickKey: initial?.isQuickKey ?? entryDefaults?.isQuickKey ?? false,
+      rows: initial?.variants.length ? initial.variants.map(toRow) : [emptyRow(true)],
+    });
+  }
+  const currentSnapshot = JSON.stringify({ name, categoryId, brandId, supplierId, baseUnit, stock, reorderLevel, taxPercent, taxIncluded, isActive, showInPos, isSellable, isPurchasable, allowPriceChange, isQuickKey, rows });
+  const isDirty = currentSnapshot !== initialSnapshotRef.current;
+
   useEffect(() => {
     nameRef.current?.focus();
   }, []);
@@ -205,19 +230,10 @@ export default function ProductModal({
     setGeneratingKey(row.key);
     setSaveError(null);
     try {
+      const { generateEan13, checkBarcodeUnique } = await import("@/lib/inventoryClient");
       let candidate = "";
       for (let attempt = 0; attempt < 5; attempt++) {
-        const response = await posFetch("/api/catalog/products/barcode", {
-          cache: "no-store",
-          headers: { "x-pos-role": "admin" },
-        });
-        const body = (await response.json().catch(() => null)) as
-          | { barcode?: string; error?: string }
-          | null;
-        if (!response.ok || !body?.barcode) {
-          throw new Error(body?.error ?? "تعذر توليد الباركود");
-        }
-        candidate = body.barcode;
+        candidate = generateEan13();
         const collides = rows.some(
           (other) => other.key !== row.key && other.barcode.trim() === candidate,
         );
@@ -252,23 +268,52 @@ export default function ProductModal({
     const sale = Number(row.price);
     return Number.isFinite(cost) && cost > 0 && (allowPriceChange || (Number.isFinite(sale) && sale > 0));
   });
+  const taxValid = Number.isFinite(taxValue) && taxValue >= 0 && taxValue <= 100;
   const canSave =
     name.trim().length > 0 &&
     validRows.length > 0 &&
     pricesValid &&
-    Number.isFinite(taxValue) &&
-    taxValue >= 0 &&
-    taxValue <= 100;
-  const validationMessage =
-    name.trim().length === 0
-      ? "أدخل اسم المنتج"
-      : validRows.length === 0
-        ? "امسح الباركود أو ولّد باركوداً"
-        : !pricesValid
-          ? allowPriceChange
-            ? "أدخل تكلفة صحيحة أكبر من صفر"
-            : "أدخل تكلفة وسعر بيع أكبر من صفر"
-          : null;
+    taxValid;
+
+  // Per-row validation: red = blocks save, amber = row will be silently dropped
+  // from the payload (no barcode) — surface it so the user doesn't lose data.
+  const rowErrors = useMemo(() => {
+    const map: Record<string, { barcode?: "warn" | "error"; costPrice?: boolean; price?: boolean }> = {};
+    for (const row of rows) {
+      const entry: { barcode?: "warn" | "error"; costPrice?: boolean; price?: boolean } = {};
+      const hasBarcode = row.barcode.trim().length > 0;
+      const cost = Number(row.costPrice);
+      const sale = Number(row.price);
+      if (!hasBarcode && (row.costPrice.trim() || row.price.trim() || row.wholesalePrice.trim() || row.variantLabel.trim())) {
+        entry.barcode = "warn";
+      }
+      if (hasBarcode && !(Number.isFinite(cost) && cost > 0)) entry.costPrice = true;
+      if (hasBarcode && !allowPriceChange && !(Number.isFinite(sale) && sale > 0)) entry.price = true;
+      if (entry.barcode || entry.costPrice || entry.price) map[row.key] = entry;
+    }
+    return map;
+  }, [rows, allowPriceChange]);
+
+  const firstInvalidRowIndex = rows.findIndex(
+    (row) => rowErrors[row.key]?.costPrice || rowErrors[row.key]?.price,
+  );
+  const validationMessage = (() => {
+    if (name.trim().length === 0) return "أدخل اسم المنتج";
+    if (firstInvalidRowIndex >= 0) {
+      const errors = rowErrors[rows[firstInvalidRowIndex].key];
+      if (errors.costPrice) return `الصف ${firstInvalidRowIndex + 1}: أدخل تكلفة صحيحة أكبر من صفر`;
+      return `الصف ${firstInvalidRowIndex + 1}: أدخل سعر بيع أكبر من صفر`;
+    }
+    if (validRows.length === 0) return "امسح الباركود أو ولّد باركوداً واحداً على الأقل";
+    if (!taxValid) return "نسبة الضريبة يجب أن تكون بين 0 و 100";
+    return null;
+  })();
+
+  const handleCloseAttempt = () => {
+    if (saving) return;
+    if (isDirty && !window.confirm("لديك تعديلات غير محفوظة. هل تريد الإغلاق دون حفظ؟")) return;
+    onClose();
+  };
 
   const handleSave = async (addAnother: boolean) => {
     if (!canSave) return;
@@ -359,7 +404,7 @@ export default function ProductModal({
           <button
             type="button"
             aria-label="إغلاق"
-            onClick={onClose}
+            onClick={handleCloseAttempt}
             className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-muted hover:bg-surface-muted"
           >
             <X className="h-5 w-5" />
@@ -584,7 +629,11 @@ export default function ProductModal({
                           value={row.barcode}
                           onChange={(event) => updateRow(row.key, { barcode: event.target.value })}
                           dir="ltr"
-                          className="w-full rounded-lg border border-border bg-white px-3 py-2.5 text-sm font-bold tabular-nums outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+                          className={`w-full rounded-lg border bg-white px-3 py-2.5 text-sm font-bold tabular-nums outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 ${
+                            rowErrors[row.key]?.barcode === "warn"
+                              ? "border-amber-400 bg-amber-50/50"
+                              : "border-border"
+                          }`}
                         />
                         <button
                           type="button"
@@ -597,6 +646,11 @@ export default function ProductModal({
                           {generatingKey === row.key ? "جارٍ..." : "توليد"}
                         </button>
                       </div>
+                      {rowErrors[row.key]?.barcode === "warn" && (
+                        <p className="mt-1 text-[11px] font-bold text-amber-600">
+                          أدخل أو ولّد باركوداً — وإلا لن يُحفظ هذا الصف
+                        </p>
+                      )}
                     </div>
 
                     <label className="text-xs font-bold text-muted">
@@ -616,8 +670,11 @@ export default function ProductModal({
                         onChange={(event) => updateRow(row.key, { costPrice: event.target.value })}
                         inputMode="decimal"
                         dir="ltr"
-                        className={`${fieldClass} tabular-nums`}
+                        className={`${fieldClass} tabular-nums ${rowErrors[row.key]?.costPrice ? "border-destructive focus:border-destructive focus:ring-destructive/20" : ""}`}
                       />
+                      {rowErrors[row.key]?.costPrice && (
+                        <span className="mt-1 block text-[11px] font-bold text-destructive">أدخل تكلفة أكبر من صفر</span>
+                      )}
                     </label>
 
                     <label className="text-xs font-bold text-muted">
@@ -627,8 +684,11 @@ export default function ProductModal({
                         onChange={(event) => updateRow(row.key, { price: event.target.value })}
                         inputMode="decimal"
                         dir="ltr"
-                        className={`${fieldClass} tabular-nums`}
+                        className={`${fieldClass} tabular-nums ${rowErrors[row.key]?.price ? "border-destructive focus:border-destructive focus:ring-destructive/20" : ""}`}
                       />
+                      {rowErrors[row.key]?.price && (
+                        <span className="mt-1 block text-[11px] font-bold text-destructive">أدخل سعر بيع أكبر من صفر</span>
+                      )}
                     </label>
 
                     <label className={showAdvanced ? "text-xs font-bold text-muted" : "hidden"}>
@@ -666,11 +726,13 @@ export default function ProductModal({
             </p>
           )}
           {!saveError && validationMessage && (
-            <p className="sm:ml-auto px-1 text-xs font-bold text-muted">{validationMessage}</p>
+            <p className="sm:ml-auto rounded-lg bg-destructive/10 px-3 py-2 text-xs font-bold text-destructive">
+              {validationMessage}
+            </p>
           )}
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleCloseAttempt}
             disabled={saving}
             className="h-11 rounded-lg border border-border bg-white px-5 text-sm font-black text-muted"
           >

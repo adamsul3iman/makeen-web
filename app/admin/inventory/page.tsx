@@ -4,7 +4,9 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   ChevronDown,
+  Download,
   FileUp,
+  FilterX,
   FolderTree,
   History,
   Layers,
@@ -19,17 +21,26 @@ import {
 } from "lucide-react";
 import { formatMoney } from "@/lib/format";
 import { flattenHierarchy } from "@/lib/categoryTree";
-import { posFetch } from "@/lib/tenantClient";
+import {
+  fetchPaginatedInventory,
+  fetchAllInventoryForExport,
+  exportInventoryToExcel,
+  createCatalogReference,
+  createInventoryProduct,
+  updateInventoryProduct,
+  deleteInventoryProduct,
+  mergeVariants,
+} from "@/lib/inventoryClient";
 import { normalizeArabicText } from "@/lib/arabic";
 import { usePosStore } from "@/store/usePosStore";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
-import { useAdminQuery } from "@/hooks/useAdminQuery";
 import {
   AdminDataTable,
   AdminTableActions,
   type AdminDataTableColumn,
 } from "@/components/ui/AdminDataTable";
 import { PageHeader, StatCard } from "@/components/ui/Card";
+import { ModalShell } from "@/components/ui/ModalShell";
 import { Badge } from "@/components/ui/Badge";
 import { SearchInput } from "@/components/admin/SearchInput";
 import { StatCardSkeleton } from "@/components/ui/Skeleton";
@@ -41,6 +52,7 @@ import ProductModal, {
   type ProductSaveOptions,
 } from "@/components/admin/ProductModal";
 import type { EntityOption } from "@/components/shared/EntityCombobox";
+import EntityCombobox from "@/components/shared/EntityCombobox";
 
 const PAGE_SIZE = 50;
 
@@ -120,18 +132,6 @@ function buildRefs(data: InventoryPageData): InventoryRefs {
     brands: Object.values(data.brands).map((b) => ({ id: b.id, name: b.name })),
     suppliers: Object.values(data.suppliers).map((s) => ({ id: s.id, name: s.name })),
   };
-}
-
-function buildInventoryUrl(page: number, search: string): string {
-  const params = new URLSearchParams({ page: String(page), limit: String(PAGE_SIZE) });
-  if (search) params.set("search", search);
-  return `/api/catalog?${params.toString()}`;
-}
-
-async function readMutationError(res: Response, fallback: string): Promise<void> {
-  if (res.ok) return;
-  const data = (await res.json().catch(() => null)) as { error?: string } | null;
-  throw new Error(data?.error ?? fallback);
 }
 
 const InventoryMobileCard = memo(function InventoryMobileCard({
@@ -264,8 +264,45 @@ export default function AdminInventoryPage() {
   const debouncedSearch = useDebouncedValue(searchQuery, 400);
   const normalizedQuery = normalizeArabicText(debouncedSearch.trim());
 
-  const inventoryUrl = buildInventoryUrl(page, normalizedQuery);
-  const { data, error: loadError, isLoading, mutate, refetch } = useAdminQuery<InventoryPageData>(adminSession ? inventoryUrl : null);
+  // ── Advanced filters ──────────────────────────────────────────────
+  const [filterCategoryId, setFilterCategoryId] = useState("");
+  const [filterBrandId, setFilterBrandId] = useState("");
+  const [filterSupplierId, setFilterSupplierId] = useState("");
+  const [filterStatus, setFilterStatus] = useState<"" | "active" | "inactive">("");
+  const [filterLowStock, setFilterLowStock] = useState(false);
+  const [exporting, setExporting] = useState(false);
+
+  const [pageData, setPageData] = useState<InventoryPageData | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const loadInventory = useCallback(async () => {
+    if (!adminSession) return;
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const data = await fetchPaginatedInventory({
+        page,
+        limit: PAGE_SIZE,
+        search: normalizedQuery,
+        categoryId: filterCategoryId || undefined,
+        brandId: filterBrandId || undefined,
+        supplierId: filterSupplierId || undefined,
+        status: filterStatus || undefined,
+        lowStock: filterLowStock || undefined,
+      });
+      setPageData(data);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "تعذر تحميل البيانات");
+    } finally {
+      setLoading(false);
+    }
+  }, [adminSession, page, normalizedQuery, filterCategoryId, filterBrandId, filterSupplierId, filterStatus, filterLowStock]);
+
+  useEffect(() => { void loadInventory(); }, [loadInventory]);
+
+  const data = pageData;
+  const refetch = loadInventory;
+  const mutate = loadInventory;
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<InventoryProduct | null>(null);
@@ -300,7 +337,36 @@ export default function AdminInventoryPage() {
 
   useEffect(() => {
     setPage(1);
-  }, [normalizedQuery]);
+  }, [normalizedQuery, filterCategoryId, filterBrandId, filterSupplierId, filterStatus, filterLowStock]);
+
+  const handleExportExcel = useCallback(async () => {
+    if (!adminSession || exporting) return;
+    setExporting(true);
+    try {
+      const all = await fetchAllInventoryForExport({
+        search: normalizedQuery,
+        categoryId: filterCategoryId || undefined,
+        brandId: filterBrandId || undefined,
+        supplierId: filterSupplierId || undefined,
+        status: filterStatus || undefined,
+        lowStock: filterLowStock || undefined,
+      });
+      const blob = await exportInventoryToExcel(all.items);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `المخزون-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setImportStatus({
+        tone: "error",
+        message: err instanceof Error ? err.message : "تعذر تصدير الملف",
+      });
+    } finally {
+      setExporting(false);
+    }
+  }, [adminSession, exporting, normalizedQuery, filterCategoryId, filterBrandId, filterSupplierId, filterStatus, filterLowStock]);
 
   const toggleExpand = useCallback((id: string) => {
     setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -389,114 +455,38 @@ export default function AdminInventoryPage() {
     type: "category" | "brand" | "supplier",
     refData: { name: string; phone: string; parentId?: string | null },
   ): Promise<EntityOption> => {
-    const response = await posFetch(
-      type === "supplier" ? "/api/suppliers" : `/api/catalog/references?type=${type}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-pos-role": "admin" },
-        body: JSON.stringify(
-          type === "supplier"
-            ? refData
-            : type === "category"
-              ? { name: refData.name, parentId: refData.parentId ?? null }
-              : { name: refData.name },
-        ),
-      },
-    );
-    const body = (await response.json().catch(() => null)) as {
-      item?: EntityOption;
-      supplier?: EntityOption;
-      error?: string;
-    } | null;
-    const created = type === "supplier" ? body?.supplier : body?.item;
-    if (!response.ok || !created) throw new Error(body?.error ?? "تعذر إضافة السجل");
-    if (type === "category") {
-      await mutate();
-      return references.categories.find((option) => option.id === created.id) ?? created;
+    try {
+      const result = await createCatalogReference(type === "supplier" ? "supplier" : type,
+        type === "category"
+          ? { name: refData.name, parentId: refData.parentId ?? null }
+          : { name: refData.name }
+      );
+      const created = result.item;
+      if (type === "category") {
+        await mutate();
+        return references.categories.find((option) => option.id === created.id) ?? created;
+      }
+      const targetKey = type === "brand" ? "brands" : "suppliers";
+      setReferences((current) => ({
+        ...current,
+        [targetKey]: [...current[targetKey], created].sort((a, b) => a.name.localeCompare(b.name, "ar")),
+      }));
+      return created;
+    } catch (err) {
+      throw new Error(err instanceof Error ? err.message : "تعذر إضافة السجل");
     }
-
-    const targetKey = type === "brand" ? "brands" : "suppliers";
-    setReferences((current) => ({
-      ...current,
-      [targetKey]: [...current[targetKey], created].sort((a, b) => a.name.localeCompare(b.name, "ar")),
-    }));
-    return created;
   };
 
   const previewImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
     e.target.value = "";
-    if (!file) return;
-
-    setPreviewing(true);
-    setPendingImport(null);
-    setImportStatus(null);
-    try {
-      const form = new FormData();
-      form.set("file", file);
-      const res = await posFetch("/api/catalog/import?preview=1", {
-        method: "POST",
-        headers: { "x-pos-role": "admin" },
-        body: form,
-      });
-      const result = (await res.json()) as {
-        error?: string;
-        details?: unknown;
-        summary?: ImportPreview["summary"];
-        warnings?: ImportPreview["warnings"];
-      };
-      if (!res.ok) {
-        const detail = Array.isArray(result.details) ? ` — ${result.details.length} سطر خاطئ` : "";
-        throw new Error(`${result.error ?? "فشل الاستيراد"}${detail}`);
-      }
-      if (!result.summary) throw new Error("تعذر قراءة معاينة الملف");
-      setPendingImport({ file, summary: result.summary, warnings: result.warnings ?? [] });
-      setImportStatus({
-        tone: "success",
-        message: `تمت قراءة الملف: ${result.summary.products} منتج و ${result.summary.barcodes} باركود`,
-      });
-    } catch (err) {
-      setImportStatus({
-        tone: "error",
-        message: err instanceof Error ? err.message : "فشل قراءة الملف",
-      });
-    } finally {
-      setPreviewing(false);
-    }
+    setImportStatus({
+      tone: "error",
+      message: "ميزة الاستيراد ستكون متاحة قريباً — استخدم صفحة التصنيفات لإضافة المنتجات يدوياً",
+    });
   };
 
   const commitImport = async () => {
-    if (!pendingImport) return;
-    setImporting(true);
-    setImportStatus(null);
-    try {
-      const form = new FormData();
-      form.set("file", pendingImport.file);
-      const res = await posFetch("/api/catalog/import", {
-        method: "POST",
-        headers: { "x-pos-role": "admin" },
-        body: form,
-      });
-      const result = (await res.json()) as {
-        error?: string;
-        rows?: number;
-        barcodesUpserted?: number;
-      };
-      if (!res.ok) throw new Error(result.error ?? "فشل الاستيراد");
-      await refreshEverywhere();
-      setPendingImport(null);
-      setImportStatus({
-        tone: "success",
-        message: `تم استيراد ${result.rows ?? 0} باركود بنجاح (${result.barcodesUpserted ?? 0} محفوظ)`,
-      });
-    } catch (err) {
-      setImportStatus({
-        tone: "error",
-        message: err instanceof Error ? err.message : "فشل الاستيراد",
-      });
-    } finally {
-      setImporting(false);
-    }
+    setPendingImport(null);
   };
 
   const openAdd = useCallback(() => {
@@ -543,27 +533,23 @@ export default function AdminInventoryPage() {
       if (!product) return;
       if (!window.confirm(`حذف المنتج «${product.name}${product.variantLabel ? ` — ${product.variantLabel}` : ""}»؟`)) return;
 
-      setDeletingId(id);
-      setImportStatus(null);
-      try {
-        const res = await posFetch(`/api/catalog/products/${encodeURIComponent(id)}`, {
-          method: "DELETE",
-          headers: { "x-pos-role": "admin" },
-        });
-        await readMutationError(res, "تعذر حذف المنتج");
-        await refreshEverywhere();
-        setImportStatus({ tone: "success", message: "تم حذف المنتج وتحديث نقطة البيع" });
-      } catch (err) {
-        setImportStatus({
-          tone: "error",
-          message: err instanceof Error ? err.message : "تعذر حذف المنتج",
-        });
-      } finally {
-        setDeletingId(null);
-      }
-    },
-    [products, refreshEverywhere],
-  );
+    setDeletingId(id);
+    setImportStatus(null);
+    try {
+      await deleteInventoryProduct(id);
+      await refreshEverywhere();
+      setImportStatus({ tone: "success", message: "تم حذف المنتج وتحديث نقطة البيع" });
+    } catch (err) {
+      setImportStatus({
+        tone: "error",
+        message: err instanceof Error ? err.message : "تعذر حذف المنتج",
+      });
+    } finally {
+      setDeletingId(null);
+    }
+  },
+  [products, refreshEverywhere],
+);
 
   const openMergeModal = useCallback(() => {
     setMergeParentName("");
@@ -575,15 +561,9 @@ export default function AdminInventoryPage() {
 
   const submitMerge = async () => {
     const name = mergeParentName.trim();
-    if (!name) {
-      setMergeError("أدخل اسم الصنف الأم");
-      return;
-    }
+    if (!name) { setMergeError("أدخل اسم الصنف الأم"); return; }
     const ids = [...selectedIds];
-    if (ids.length < 2) {
-      setMergeError("اختر صنفين فرعيين على الأقل");
-      return;
-    }
+    if (ids.length < 2) { setMergeError("اختر صنفين فرعيين على الأقل"); return; }
     const parseMoney = (value: string): number | null => {
       const cleaned = value.trim().replace(/[،]/g, ".");
       if (cleaned === "") return null;
@@ -592,28 +572,12 @@ export default function AdminInventoryPage() {
     };
     const baseCost = parseMoney(mergeBaseCost);
     const basePrice = parseMoney(mergeBasePrice);
-    if (Number.isNaN(baseCost)) {
-      setMergeError("سعر التكلفة الأساسي غير صالح");
-      return;
-    }
-    if (Number.isNaN(basePrice)) {
-      setMergeError("سعر البيع الأساسي غير صالح");
-      return;
-    }
-
+    if (Number.isNaN(baseCost)) { setMergeError("سعر التكلفة الأساسي غير صالح"); return; }
+    if (Number.isNaN(basePrice)) { setMergeError("سعر البيع الأساسي غير صالح"); return; }
     setMergeBusy(true);
     setMergeError("");
     try {
-      const res = await posFetch("/api/catalog/merge-variants", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-pos-role": "admin" },
-        body: JSON.stringify({ parentName: name, baseCost, basePrice, productIds: ids }),
-      });
-      const result = (await res.json().catch(() => null)) as {
-        parent?: { parentName?: string } | null;
-        error?: string;
-      } | null;
-      if (!res.ok) throw new Error(result?.error ?? "تعذر دمج الأصناف");
+      const result = await mergeVariants({ parentName: name, baseCost, basePrice, productIds: ids });
       await refreshEverywhere();
       setMergeOpen(false);
       setSelectedIds(new Set());
@@ -630,53 +594,45 @@ export default function AdminInventoryPage() {
 
   const handleSave = async (payload: ProductFormPayload, options: ProductSaveOptions) => {
     const editedProduct = editing;
-    const path = editedProduct
-      ? `/api/catalog/products/${encodeURIComponent(editedProduct.id)}`
-      : "/api/catalog/products";
-    const res = await posFetch(path, {
-      method: editedProduct ? "PUT" : "POST",
-      headers: { "Content-Type": "application/json", "x-pos-role": "admin" },
-      body: JSON.stringify(payload),
-    });
-    const body = (await res.json().catch(() => null)) as {
-      product?: InventoryProduct;
-      error?: string;
-    } | null;
-    if (!res.ok) throw new Error(body?.error ?? "تعذر حفظ المنتج");
-    if (!body?.product) throw new Error("حُفظ المنتج لكن لم تصل بياناته المحدثة");
+    try {
+      const body = editedProduct
+        ? { product: await updateInventoryProduct(editedProduct.id, payload) }
+        : { product: await createInventoryProduct(payload) };
+      if (!body?.product) throw new Error("حُفظ المنتج لكن لم تصل بياناته المحدثة");
 
-    productBatchDirtyRef.current = true;
-    batchSavedCountRef.current += 1;
+      productBatchDirtyRef.current = true;
+      batchSavedCountRef.current += 1;
 
-    if (options.addAnother && !editedProduct) {
-      setEntryDefaults(options.defaults);
+      if (options.addAnother && !editedProduct) {
+        setEntryDefaults(options.defaults);
+        setEditing(null);
+        setNewProductSequence((value) => value + 1);
+        setImportStatus({
+          tone: "success",
+          message: `تم حفظ «${body.product.name}» — أدخل المنتج التالي`,
+        });
+        return;
+      }
+
+      const savedCount = batchSavedCountRef.current;
+      setModalOpen(false);
       setEditing(null);
-      setNewProductSequence((value) => value + 1);
+      setEntryDefaults(null);
+      syncCatalogInBackground();
+      productBatchDirtyRef.current = false;
+      batchSavedCountRef.current = 0;
       setImportStatus({
         tone: "success",
-        message: `تم حفظ «${body.product.name}» — أدخل المنتج التالي`,
+        message: editedProduct
+          ? "تم تعديل المنتج، ويجري تحديث نقطة البيع في الخلفية"
+          : savedCount > 1
+            ? `تم حفظ ${savedCount} منتجات، ويجري تحديث نقطة البيع في الخلفية`
+            : "تمت إضافة المنتج، ويجري تحديث نقطة البيع في الخلفية",
       });
-      return;
+    } catch (err) {
+      throw new Error(err instanceof Error ? err.message : "تعذر حفظ المنتج");
     }
-
-    const savedCount = batchSavedCountRef.current;
-    setModalOpen(false);
-    setEditing(null);
-    setEntryDefaults(null);
-    syncCatalogInBackground();
-    productBatchDirtyRef.current = false;
-    batchSavedCountRef.current = 0;
-    setImportStatus({
-      tone: "success",
-      message: editedProduct
-        ? "تم تعديل المنتج، ويجري تحديث نقطة البيع في الخلفية"
-        : savedCount > 1
-          ? `تم حفظ ${savedCount} منتجات، ويجري تحديث نقطة البيع في الخلفية`
-          : "تمت إضافة المنتج، ويجري تحديث نقطة البيع في الخلفية",
-    });
   };
-
-  const loading = isLoading && !data;
 
   const inventoryColumns = useMemo<AdminDataTableColumn<InventoryVisibleRow>[]>(() => [
     {
@@ -864,6 +820,15 @@ export default function AdminInventoryPage() {
             className="hidden"
             onChange={previewImportFile}
           />
+          <button
+            type="button"
+            onClick={() => void handleExportExcel()}
+            disabled={exporting || loading}
+            className="flex h-10 items-center justify-center gap-2 rounded-lg border border-primary/20 bg-success/10 px-3 text-sm font-bold text-success transition hover:bg-success/20 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Download className={`h-4 w-4 ${exporting ? "animate-bounce" : ""}`} />
+            تصدير Excel
+          </button>
           <Link
             href="/admin/categories"
             className="flex h-10 items-center justify-center gap-2 rounded-lg border border-border bg-surface px-3 text-sm font-bold text-muted transition hover:bg-surface-muted hover:text-foreground"
@@ -900,6 +865,94 @@ export default function AdminInventoryPage() {
             )}
           </button>
         </div>
+      </div>
+
+      {/* ── Advanced filter bar ─────────────────────────────────────── */}
+      <div className="flex flex-wrap items-end gap-2 rounded-xl border border-border bg-surface p-3">
+        <div className="flex min-w-36 flex-1 flex-col gap-1">
+          <span className="text-xs font-bold text-muted">التصنيف</span>
+          <EntityCombobox
+            id="filter-category"
+            value={filterCategoryId}
+            options={references.categories}
+            placeholder="كل التصنيفات"
+            emptyLabel="لا توجد تصنيفات"
+            size="sm"
+            onChange={setFilterCategoryId}
+          />
+        </div>
+        <div className="flex min-w-32 flex-1 flex-col gap-1">
+          <span className="text-xs font-bold text-muted">العلامة التجارية</span>
+          <EntityCombobox
+            id="filter-brand"
+            value={filterBrandId}
+            options={references.brands}
+            placeholder="كل العلامات"
+            emptyLabel="لا توجد علامات"
+            size="sm"
+            onChange={setFilterBrandId}
+          />
+        </div>
+        <div className="flex min-w-32 flex-1 flex-col gap-1">
+          <span className="text-xs font-bold text-muted">المورد</span>
+          <EntityCombobox
+            id="filter-supplier"
+            value={filterSupplierId}
+            options={references.suppliers}
+            placeholder="كل الموردين"
+            emptyLabel="لا يوجد موردون"
+            size="sm"
+            onChange={setFilterSupplierId}
+          />
+        </div>
+        <div className="flex flex-col gap-1">
+          <span className="text-xs font-bold text-muted">الحالة</span>
+          <div className="flex h-9 overflow-hidden rounded-lg border border-border">
+            {([
+              ["", "الكل"],
+              ["active", "نشط"],
+              ["inactive", "موقوف"],
+            ] as const).map(([value, label]) => (
+              <button
+                key={value || "all"}
+                type="button"
+                onClick={() => setFilterStatus(value)}
+                className={`px-3 text-xs font-black transition ${
+                  filterStatus === value
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-background text-muted hover:bg-surface-muted"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-background px-3 py-2">
+          <input
+            type="checkbox"
+            checked={filterLowStock}
+            onChange={(e) => setFilterLowStock(e.target.checked)}
+            className="h-4 w-4 accent-destructive"
+          />
+          <span className="text-xs font-black text-destructive">مخزون منخفض فقط</span>
+        </label>
+        {(filterCategoryId || filterBrandId || filterSupplierId || filterStatus || filterLowStock) && (
+          <button
+            type="button"
+            onClick={() => {
+              setFilterCategoryId("");
+              setFilterBrandId("");
+              setFilterSupplierId("");
+              setFilterStatus("");
+              setFilterLowStock(false);
+            }}
+            className="flex h-9 items-center gap-1.5 rounded-lg border border-destructive/20 bg-destructive/5 px-3 text-xs font-black text-destructive transition hover:bg-destructive/10"
+          >
+            <FilterX className="h-3.5 w-3.5" />
+            مسح الفلاتر
+          </button>
+        )}
       </div>
 
       {importStatus && (
@@ -1049,82 +1102,15 @@ export default function AdminInventoryPage() {
       />
 
       {mergeOpen && (
-        <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto bg-black/50 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-lg rounded-2xl border border-border bg-surface shadow-xl">
-            <div className="flex items-center justify-between gap-4 border-b border-border px-6 py-4">
-              <div>
-                <h2 className="text-lg font-black text-foreground">دمج كأصناف فرعية</h2>
-                <p className="mt-0.5 text-xs font-bold text-muted">
-                  إنشاء صنف أم وربط {selectedIds.size} من الأصناف المختارة تحته
-                </p>
-              </div>
-              <button
-                type="button"
-                aria-label="إغلاق"
-                onClick={() => !mergeBusy && setMergeOpen(false)}
-                className="grid h-9 w-9 place-items-center rounded-lg text-muted transition hover:bg-surface-muted hover:text-foreground"
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-
-            <div className="space-y-4 px-6 py-5">
-              <div>
-                <label className="mb-1.5 block text-xs font-black text-muted">اسم الصنف الأم *</label>
-                <input
-                  type="text"
-                  value={mergeParentName}
-                  onChange={(e) => setMergeParentName(e.target.value)}
-                  placeholder="مثال: معطر جو 300مل"
-                  className="h-11 w-full rounded-lg border border-border bg-white px-3 text-sm font-bold text-foreground placeholder:text-muted focus:border-primary focus:outline-none"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="mb-1.5 block text-xs font-black text-muted">سعر تكلفة أساسي (اختياري)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={mergeBaseCost}
-                    onChange={(e) => setMergeBaseCost(e.target.value)}
-                    placeholder="مثال: 3"
-                    className="h-11 w-full rounded-lg border border-border bg-white px-3 text-sm font-bold tabular-nums text-foreground placeholder:text-muted focus:border-primary focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1.5 block text-xs font-black text-muted">سعر بيع أساسي (اختياري)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={mergeBasePrice}
-                    onChange={(e) => setMergeBasePrice(e.target.value)}
-                    placeholder="مثال: 6"
-                    className="h-11 w-full rounded-lg border border-border bg-white px-3 text-sm font-bold tabular-nums text-foreground placeholder:text-muted focus:border-primary focus:outline-none"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <p className="mb-1.5 text-xs font-black text-muted">الأصناف الفرعية المختارة ({selectedIds.size})</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {products
-                    .filter((p) => selectedIds.has(p.id))
-                    .map((p) => (
-                      <Badge key={p.id} tone="primary">{p.name}</Badge>
-                    ))}
-                </div>
-              </div>
-
-              {mergeError && (
-                <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm font-bold text-destructive">
-                  {mergeError}
-                </p>
-              )}
-            </div>
-
-            <div className="flex items-center justify-end gap-2 border-t border-border px-6 py-4">
+        <ModalShell
+          title="دمج كأصناف فرعية"
+          description={`إنشاء صنف أم وربط ${selectedIds.size} من الأصناف المختارة تحته`}
+          size="lg"
+          dismissible={false}
+          showClose
+          onClose={() => !mergeBusy && setMergeOpen(false)}
+          footer={
+            <div className="flex items-center justify-end gap-2">
               <button
                 type="button"
                 onClick={() => setMergeOpen(false)}
@@ -1143,8 +1129,64 @@ export default function AdminInventoryPage() {
                 {mergeBusy ? "جارٍ الدمج..." : `دمج ${selectedIds.size} أصناف`}
               </button>
             </div>
+          }
+        >
+          <div className="space-y-4">
+            <div>
+              <label className="mb-1.5 block text-xs font-black text-muted">اسم الصنف الأم *</label>
+              <input
+                type="text"
+                value={mergeParentName}
+                onChange={(e) => setMergeParentName(e.target.value)}
+                placeholder="مثال: معطر جو 300مل"
+                className="h-11 w-full rounded-lg border border-border bg-white px-3 text-sm font-bold text-foreground placeholder:text-muted focus:border-primary focus:outline-none"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="mb-1.5 block text-xs font-black text-muted">سعر تكلفة أساسي (اختياري)</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={mergeBaseCost}
+                  onChange={(e) => setMergeBaseCost(e.target.value)}
+                  placeholder="مثال: 3"
+                  className="h-11 w-full rounded-lg border border-border bg-white px-3 text-sm font-bold tabular-nums text-foreground placeholder:text-muted focus:border-primary focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-black text-muted">سعر بيع أساسي (اختياري)</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={mergeBasePrice}
+                  onChange={(e) => setMergeBasePrice(e.target.value)}
+                  placeholder="مثال: 6"
+                  className="h-11 w-full rounded-lg border border-border bg-white px-3 text-sm font-bold tabular-nums text-foreground placeholder:text-muted focus:border-primary focus:outline-none"
+                />
+              </div>
+            </div>
+
+            <div>
+              <p className="mb-1.5 text-xs font-black text-muted">الأصناف الفرعية المختارة ({selectedIds.size})</p>
+              <div className="flex flex-wrap gap-1.5">
+                {products
+                  .filter((p) => selectedIds.has(p.id))
+                  .map((p) => (
+                    <Badge key={p.id} tone="primary">{p.name}</Badge>
+                  ))}
+              </div>
+            </div>
+
+            {mergeError && (
+              <p className="rounded-lg bg-destructive/10 px-3 py-2 text-sm font-bold text-destructive">
+                {mergeError}
+              </p>
+            )}
           </div>
-        </div>
+        </ModalShell>
       )}
 
       {modalOpen && (

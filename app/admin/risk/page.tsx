@@ -10,12 +10,12 @@ import {
   Search,
   ShieldAlert,
   UserRoundSearch,
-  X,
 } from "lucide-react";
 import { ListPagination } from "@/components/admin/ListPagination";
+import { ModalShell } from "@/components/ui/ModalShell";
 import { formatMoney } from "@/lib/format";
 import { hasCapability } from "@/lib/permissions";
-import { posFetch } from "@/lib/tenantClient";
+import { fetchRiskEvents, reviewRiskEvent } from "@/lib/riskClient";
 import { usePosStore } from "@/store/usePosStore";
 import type { RiskEvent, RiskResponse, RiskSeverity, RiskStatus } from "@/types/risk.types";
 
@@ -87,13 +87,16 @@ export default function RiskPage() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const params = new URLSearchParams({ from, to, page: String(page), pageSize: String(pageSize) });
-    if (q.trim()) params.set("q", q.trim());
-    if (status) params.set("status", status);
-    if (severity) params.set("severity", severity);
     try {
-      const response = await posFetch(`/api/risk?${params.toString()}`, { cache: "no-store" });
-      const next = response.ok ? await response.json() as RiskResponse : null;
+      const next: RiskResponse = await fetchRiskEvents({
+        from,
+        to,
+        q: q.trim() || undefined,
+        status: status ? (status as RiskStatus) : undefined,
+        severity: severity ? (severity as RiskSeverity) : undefined,
+        page,
+        pageSize,
+      });
       if (!next || !Array.isArray(next.events)) throw new Error("risk_load_failed");
       setData(next);
       setPage(next.page);
@@ -116,13 +119,7 @@ export default function RiskPage() {
     setReviewing(true);
     setReviewError("");
     try {
-      const response = await posFetch("/api/risk", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json", "x-pos-role": "admin" },
-        body: JSON.stringify({ id: reviewTarget.id, status: reviewStatus, note: reviewNote.trim() }),
-      });
-      const result = await response.json().catch(() => null) as { error?: string } | null;
-      if (!response.ok) throw new Error(result?.error ?? "تعذر حفظ المراجعة");
+      await reviewRiskEvent(reviewTarget.id, reviewStatus, reviewNote.trim());
       setReviewTarget(null);
       setReviewNote("");
       await load();
@@ -206,17 +203,26 @@ export default function RiskPage() {
       </section>
 
       {reviewTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4" dir="rtl">
-          <div className="w-full max-w-md rounded-xl bg-white shadow-2xl">
-            <header className="flex items-center justify-between border-b border-border px-5 py-4"><div><h2 className="text-base font-black">مراجعة إشارة</h2><p className="text-xs font-bold text-muted">{EVENT_LABELS[reviewTarget.eventType] ?? reviewTarget.eventType} • {reviewTarget.actorName || "غير معروف"}</p></div><button type="button" aria-label="إغلاق" onClick={() => { setReviewTarget(null); setReviewNote(""); }} className="grid h-9 w-9 place-items-center rounded-lg hover:bg-surface-muted"><X className="h-5 w-5" /></button></header>
-            <div className="space-y-4 px-5 py-4">
-              <label className="block text-sm font-bold">القرار<select value={reviewStatus} onChange={(event) => setReviewStatus(event.target.value as RiskStatus)} className="mt-1.5 h-11 w-full rounded-lg border border-border px-3"><option value="REVIEWED">تمت المراجعة</option><option value="DISMISSED">استبعاد الإشارة</option><option value="ESCALATED">تصعيد للتحقيق</option></select></label>
-              <label className="block text-sm font-bold">نتيجة المراجعة<textarea value={reviewNote} onChange={(event) => setReviewNote(event.target.value)} maxLength={500} rows={4} placeholder="ما الذي تمت مراجعته وما النتيجة؟" className="mt-1.5 w-full resize-none rounded-lg border border-border px-3 py-2 outline-none focus:border-primary" /></label>
-              {reviewError && <p className="rounded-lg bg-destructive/10 px-3 py-2 text-xs font-bold text-destructive">{reviewError}</p>}
+        <ModalShell
+          title="مراجعة إشارة"
+          description={`${EVENT_LABELS[reviewTarget.eventType] ?? reviewTarget.eventType} • ${reviewTarget.actorName || "غير معروف"}`}
+          size="md"
+          dismissible={false}
+          showClose
+          onClose={() => { setReviewTarget(null); setReviewNote(""); }}
+          footer={
+            <div className="flex gap-2">
+              <button type="button" onClick={() => void submitReview()} disabled={reviewing || reviewNote.trim().length < 3} className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-slate-900 text-sm font-black text-white disabled:opacity-40"><CheckCircle2 className="h-4 w-4" />{reviewing ? "جارٍ الحفظ…" : "حفظ نتيجة المراجعة"}</button>
+              <button type="button" onClick={() => { setReviewTarget(null); setReviewNote(""); }} className="h-11 rounded-lg border border-border px-4 text-sm font-black">إلغاء</button>
             </div>
-            <footer className="flex gap-2 border-t border-border px-5 py-4"><button type="button" onClick={() => void submitReview()} disabled={reviewing || reviewNote.trim().length < 3} className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-slate-900 text-sm font-black text-white disabled:opacity-40"><CheckCircle2 className="h-4 w-4" />{reviewing ? "جارٍ الحفظ…" : "حفظ نتيجة المراجعة"}</button><button type="button" onClick={() => { setReviewTarget(null); setReviewNote(""); }} className="h-11 rounded-lg border border-border px-4 text-sm font-black">إلغاء</button></footer>
+          }
+        >
+          <div className="space-y-4">
+            <label className="block text-sm font-bold">القرار<select value={reviewStatus} onChange={(event) => setReviewStatus(event.target.value as RiskStatus)} className="mt-1.5 h-11 w-full rounded-lg border border-border px-3"><option value="REVIEWED">تمت المراجعة</option><option value="DISMISSED">استبعاد الإشارة</option><option value="ESCALATED">تصعيد للتحقيق</option></select></label>
+            <label className="block text-sm font-bold">نتيجة المراجعة<textarea value={reviewNote} onChange={(event) => setReviewNote(event.target.value)} maxLength={500} rows={4} placeholder="ما الذي تمت مراجعته وما النتيجة؟" className="mt-1.5 w-full resize-none rounded-lg border border-border px-3 py-2 outline-none focus:border-primary" /></label>
+            {reviewError && <p className="rounded-lg bg-destructive/10 px-3 py-2 text-xs font-bold text-destructive">{reviewError}</p>}
           </div>
-        </div>
+        </ModalShell>
       )}
     </div>
   );

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, Loader2, Search } from "lucide-react";
 import { normalizeArabicText } from "@/lib/arabic";
-import { posFetch } from "@/lib/tenantClient";
+import { searchProducts } from "@/lib/inventoryClient";
 
 export interface AsyncProductOption {
   id: string;
@@ -80,17 +80,10 @@ export default function AsyncProductCombobox({
 
     setSearching(true);
     try {
-      const params = new URLSearchParams({ limit: "15" });
-      if (q.trim()) params.set("q", q.trim());
-      const res = await posFetch(`/api/catalog/products/search?${params}`, {
-        cache: "no-store",
-        signal: controller.signal,
-      });
-      if (!res.ok) return;
-      const data = (await res.json()) as { products?: AsyncProductOption[] };
-      if (Array.isArray(data.products)) setOptions(data.products);
+      const results = await searchProducts(q, 15);
+      if (!controller.signal.aborted) setOptions(results);
     } catch {
-      // aborted or network error — silently ignore
+      // silently ignore
     } finally {
       setSearching(false);
     }
@@ -198,7 +191,7 @@ export default function AsyncProductCombobox({
         createPortal(
           <div
             ref={listRef}
-            className="fixed z-[70]"
+            className="fixed z-[85]"
             style={{ top: position.top, bottom: position.bottom, left: position.left, width: position.width }}
           >
             <div

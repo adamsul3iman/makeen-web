@@ -40,9 +40,11 @@ export default function EntityCombobox({
   disabled = false,
   required = false,
   autoFocus = false,
+  size = "md",
 }: {
   id: string;
-  label: string;
+  /** Optional — omitted renders a compact, label-less control (filter bars). */
+  label?: string;
   value: string;
   options: EntityOption[];
   placeholder: string;
@@ -53,6 +55,7 @@ export default function EntityCombobox({
   disabled?: boolean;
   required?: boolean;
   autoFocus?: boolean;
+  size?: "sm" | "md";
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -139,20 +142,25 @@ export default function EntityCombobox({
 
   return (
     <div ref={rootRef} className="relative min-w-0" dir="rtl">
-      <label id={`${id}-label`} className="mb-1.5 block text-sm font-bold text-muted">
-        {label}{required && <span className="text-destructive"> *</span>}
-      </label>
+      {label ? (
+        <label id={`${id}-label`} className="mb-1.5 block text-sm font-bold text-muted">
+          {label}{required && <span className="text-destructive"> *</span>}
+        </label>
+      ) : null}
       <button
         id={id}
         ref={triggerRef}
         type="button"
-        aria-labelledby={`${id}-label`}
+        aria-label={label ? undefined : placeholder}
+        aria-labelledby={label ? `${id}-label` : undefined}
         aria-haspopup="listbox"
         aria-expanded={open}
         autoFocus={autoFocus}
         disabled={disabled}
         onClick={handleToggle}
-        className="flex h-11 w-full items-center justify-between gap-2 rounded-lg border border-border bg-white px-3 text-right text-sm font-bold outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+        className={`flex w-full items-center justify-between gap-2 rounded-lg border border-border bg-white px-3 text-right font-bold outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50 ${
+          size === "sm" ? "h-9 text-xs" : "h-11 text-sm"
+        }`}
       >
         <span className={`min-w-0 flex-1 truncate ${selected ? "text-foreground" : "text-muted"}`}>
           {selected?.name ?? placeholder}
@@ -164,7 +172,7 @@ export default function EntityCombobox({
         createPortal(
           <div
             ref={listRef}
-            className="fixed z-[70]"
+            className="fixed z-[85]"
             style={{ top: position.top, bottom: position.bottom, left: position.left, width: position.width }}
           >
             <div
@@ -178,14 +186,14 @@ export default function EntityCombobox({
                     ref={searchRef}
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
-                    placeholder={`ابحث في ${label}`}
+                    placeholder={`ابحث في ${label ?? placeholder}`}
                     className="h-10 min-w-0 flex-1 bg-transparent text-sm font-bold outline-none"
                   />
                 </div>
               </div>
               <div
                 role="listbox"
-                aria-labelledby={`${id}-label`}
+                aria-label={label ?? placeholder}
                 className="min-h-0 max-h-56 flex-1 overflow-y-auto p-1.5"
               >
                 {!required && (

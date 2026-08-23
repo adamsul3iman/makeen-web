@@ -3,8 +3,9 @@
 import { useState } from "react";
 import {
   ArrowRight,
-  ChevronLeft,
   LogOut,
+  PanelRightClose,
+  PanelRightOpen,
   X,
 } from "lucide-react";
 import Logo from "@/components/shared/Logo";
@@ -44,26 +45,38 @@ function SidebarCore({ collapsed, onToggleCollapse }: SidebarCoreProps) {
 
   return (
     <>
-      <div className="flex items-center gap-3 border-b border-slate-800 px-4 py-4">
+      <div className="flex items-center justify-between gap-2 border-b border-slate-800 px-3 py-3">
         {collapsed ? (
           <button
             type="button"
             onClick={onToggleCollapse}
-            className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-white p-1.5 shadow-lg shadow-black/20 transition hover:ring-2 hover:ring-emerald-500/50"
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-slate-800 text-slate-300 transition hover:bg-white/10 hover:text-white"
             title="توسيع الشريط الجانبي"
+            aria-label="توسيع الشريط الجانبي"
           >
-            <Logo className="h-6 w-6" />
+            <PanelRightOpen className="h-5 w-5" />
           </button>
         ) : (
-          <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-white p-1.5 shadow-lg shadow-black/20">
-            <Logo className="h-6 w-6" />
-          </div>
-        )}
-        {!collapsed && (
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-black text-white">{storeName}</p>
-            <p className="text-xs text-slate-500">MAKEEN</p>
-          </div>
+          <>
+            <div className="flex min-w-0 items-center gap-2">
+              <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-white p-1.5 shadow-lg shadow-black/20">
+                <Logo className="h-6 w-6" />
+              </div>
+              <div className="min-w-0">
+                <p className="truncate text-sm font-black text-white">{storeName}</p>
+                <p className="text-xs text-slate-500">MAKEEN</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onToggleCollapse}
+              className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-slate-800 text-slate-300 transition hover:bg-white/10 hover:text-white"
+              title="طي الشريط الجانبي"
+              aria-label="طي الشريط الجانبي"
+            >
+              <PanelRightClose className="h-5 w-5" />
+            </button>
+          </>
         )}
       </div>
 
@@ -71,7 +84,7 @@ function SidebarCore({ collapsed, onToggleCollapse }: SidebarCoreProps) {
         <a
           href="/pos"
           className={cn(
-            "flex items-center justify-center gap-2 rounded-lg bg-emerald-500 px-3 py-2.5 text-xs font-black text-white transition hover:bg-emerald-400",
+            "flex items-center justify-center gap-2 rounded-lg bg-primary px-3 py-2.5 text-xs font-black text-white transition hover:bg-primary-hover",
             collapsed && "px-2",
           )}
           title={collapsed ? "العودة لنقطة البيع" : undefined}
@@ -101,19 +114,12 @@ function SidebarCore({ collapsed, onToggleCollapse }: SidebarCoreProps) {
             </p>
           </div>
         )}
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={onToggleCollapse}
-            className="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-800 text-slate-300 transition hover:bg-white/10 hover:text-white"
-            title={collapsed ? "توسيع الشريط الجانبي" : "طي الشريط"}
-          >
-            <Logo className="h-6 w-6" />
-          </button>
+        <div className={cn("flex items-center justify-center", collapsed && "justify-center")}>
           <button
             type="button"
             onClick={() => setConfirmLogout(true)}
             title="تسجيل الخروج"
+            aria-label="تسجيل الخروج"
             className="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-800 text-slate-300 transition hover:bg-destructive hover:text-white"
           >
             <LogOut className="h-4 w-4" />
