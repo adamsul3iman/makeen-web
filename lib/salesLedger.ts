@@ -1,6 +1,7 @@
 import type {
   SalesInvoiceItemDetail,
   SalesLedgerInvoice,
+  SalesLedgerSummary,
   SalesPaymentMethod,
   SalesTaxBreakdown,
 } from "@/types/salesLedger.types";
@@ -102,6 +103,56 @@ export function mapSalesInvoiceItem(row: Record<string, unknown>): SalesInvoiceI
     grossProfit: profitReliable ? profit : null,
     profitReliable,
   };
+}
+
+export function mapSalesLedgerSummary(value: unknown): { summary: SalesLedgerSummary; taxBreakdown: SalesTaxBreakdown[] } {
+  const root = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  const raw = root.summary && typeof root.summary === "object" ? (root.summary as Record<string, unknown>) : {};
+  const grossProfitCandidate = ledgerNumber(raw.grossProfitCandidate, ledgerNumber(raw.grossProfit));
+  const profitReliable = raw.profitReliable !== false;
+  const summary: SalesLedgerSummary = {
+    invoiceCount: ledgerNumber(raw.invoiceCount),
+    saleCount: ledgerNumber(raw.saleCount),
+    returnCount: ledgerNumber(raw.returnCount),
+    grossSales: ledgerNumber(raw.grossSales),
+    returns: ledgerNumber(raw.returns),
+    netSales: ledgerNumber(raw.netSales),
+    subtotal: ledgerNumber(raw.subtotal),
+    tax: ledgerNumber(raw.tax),
+    discounts: ledgerNumber(raw.discounts),
+    deliveryFee: ledgerNumber(raw.deliveryFee),
+    grossProfitCandidate,
+    grossProfit: profitReliable ? grossProfitCandidate : null,
+    profitMargin: profitReliable ? ledgerNumber(raw.profitMargin) : null,
+    profitReliable,
+    cash: ledgerNumber(raw.cash),
+    visa: ledgerNumber(raw.visa),
+    cliq: ledgerNumber(raw.cliq),
+    debt: ledgerNumber(raw.debt),
+    itemCount: ledgerNumber(raw.itemCount),
+    averageTicket: ledgerNumber(raw.averageTicket),
+  };
+  const taxBreakdown = Array.isArray(root.taxBreakdown)
+    ? root.taxBreakdown.map((entry) => {
+      const row = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
+      const groupCandidate = ledgerNumber(row.grossProfitCandidate, ledgerNumber(row.grossProfit));
+      const profitReliable = row.profitReliable !== false;
+      return {
+        taxPercent: ledgerNumber(row.taxPercent),
+        taxIncluded: row.taxIncluded === true,
+        lineCount: ledgerNumber(row.lineCount),
+        quantity: ledgerNumber(row.quantity),
+        netSales: ledgerNumber(row.netSales),
+        tax: ledgerNumber(row.tax),
+        grossSales: ledgerNumber(row.grossSales),
+        cost: ledgerNumber(row.cost),
+        grossProfitCandidate: groupCandidate,
+        grossProfit: profitReliable ? groupCandidate : null,
+        profitReliable,
+      } satisfies SalesTaxBreakdown;
+    })
+    : [];
+  return { summary, taxBreakdown };
 }
 
 export function buildTaxBreakdown(items: SalesInvoiceItemDetail[]): SalesTaxBreakdown[] {

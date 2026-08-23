@@ -8,6 +8,7 @@ import {
   ledgerText,
   mapSalesInvoiceItem,
   mapSalesLedgerInvoice,
+  mapSalesLedgerSummary,
 } from "./salesLedger";
 import { attachInputTax, profitabilityDelta } from "./profitability";
 import type {
@@ -847,6 +848,29 @@ export async function submitInventoryCount(opts: {
 
 /* ─── Sales Ledger (client-side aggregation) ─────────────────────── */
 
+async function loadSalesLedgerFilters(
+  sb: NonNullable<ReturnType<typeof getSupabaseBrowser>>,
+  storeId: string,
+): Promise<SalesLedgerResponse["filters"]> {
+  const [branchResult, cashierResult] = await Promise.all([
+    sb.from("branches").select("id,name").eq("store_id", storeId).order("name"),
+    sb.from("cashiers").select("id,name").eq("store_id", storeId).order("name"),
+  ]);
+  if (branchResult.error) throw new Error(branchResult.error.message);
+  if (cashierResult.error) throw new Error(cashierResult.error.message);
+  const branches: SalesLedgerOption[] = (branchResult.data ?? []).map((row) => ({ id: row.id, name: row.name }));
+  const branchIds = branches.map((branch) => branch.id);
+  const terminalResult = branchIds.length
+    ? await sb.from("terminals").select("id,name,branch_id").in("branch_id", branchIds).order("name")
+    : { data: [], error: null };
+  if (terminalResult.error) throw new Error(terminalResult.error.message);
+  return {
+    branches,
+    terminals: (terminalResult.data ?? []).map((row) => ({ id: row.id, name: row.name, branchId: row.branch_id })),
+    cashiers: (cashierResult.data ?? []).map((row) => ({ id: row.id, name: row.name })),
+  };
+}
+
 export async function fetchSalesReport(params: {
   from: string;
   to: string;
@@ -858,84 +882,144 @@ export async function fetchSalesReport(params: {
   cashierId?: string;
   paymentMethod?: string;
   search?: string;
-}): Promise<Record<string, unknown>> {
+}): Promise<SalesLedgerResponse> {
   const sb = getSupabaseBrowser();
   const storeId = getTenantStoreId();
   if (!sb || !storeId) throw new Error("Supabase غير مهيأة");
 
-  const { from, to, page = 1, pageSize = 50, kind = "all", branchId, terminalId, cashierId, paymentMethod, search } = params;
+  const toDate = parseReportDate(params.to, new Date(), true);
+  const fromDate = parseReportDate(params.from, new Date(toDate.getTime() - 29 * DAY_MS));
+  if (fromDate > toDate) throw new Error("تاريخ البداية يجب أن يسبق تاريخ النهاية");
+  if (toDate.getTime() - fromDate.getTime() > 731 * DAY_MS) throw new Error("الفترة القصوى للتقرير سنتان");
 
-  let q = sb
-    .from("sales_invoices")
-    .select("*", { count: "exact" })
-    .eq("store_id", storeId)
-    .gte("created_at", from)
-    .lte("created_at", to + "T23:59:59.999+03:00");
+  const page = Math.max(1, Math.trunc(ledgerNumber(params.page, 1)));
+  const pageSize = Math.min(100, Math.max(10, Math.trunc(ledgerNumber(params.pageSize, 50))));
+  const paymentCandidate = ledgerText(params.paymentMethod);
+  const paymentMethod = LEDGER_PAYMENT_METHODS.has(paymentCandidate) ? paymentCandidate : null;
+  const kind = params.kind === "SALE" || params.kind === "RETURN" ? params.kind : "ALL";
+  const search = ledgerText(params.search).slice(0, 80) || null;
+  const rpcParams = {
+    p_store_id: storeId,
+    p_from: fromDate.toISOString(),
+    p_to: toDate.toISOString(),
+    p_branch_id: optionalLedgerUuid(params.branchId),
+    p_terminal_id: optionalLedgerUuid(params.terminalId),
+    p_cashier_id: optionalLedgerUuid(params.cashierId),
+    p_payment_method: paymentMethod,
+    p_kind: kind,
+    p_search: search,
+  };
 
-  if (branchId) q = q.eq("branch_id", branchId);
-  if (terminalId) q = q.eq("terminal_id", terminalId);
-  if (cashierId) q = q.eq("cashier_id", cashierId);
-  if (kind === "sales") q = q.eq("is_return", false);
-  if (kind === "returns") q = q.eq("is_return", true);
-  if (search) q = q.ilike("cashier_name", `%${search}%`);
+  const [listResult, summaryResult, qualityResult, filters] = await Promise.all([
+    sb.rpc("list_sales_ledger", {
+      ...rpcParams,
+      p_limit: pageSize,
+      p_offset: (page - 1) * pageSize,
+    }),
+    sb.rpc("sales_ledger_summary", rpcParams),
+    sb.rpc("sales_ledger_quality", rpcParams),
+    loadSalesLedgerFilters(sb, storeId),
+  ]);
+  if (listResult.error) throw new Error(listResult.error.message);
+  if (summaryResult.error) throw new Error(summaryResult.error.message);
+  if (qualityResult.error) throw new Error(qualityResult.error.message);
 
-  const offset = (page - 1) * pageSize;
-  const { data: invoices, count, error } = await q.order("created_at", { ascending: false }).range(offset, offset + pageSize - 1);
-  if (error) throw new Error(error.message);
-
-  const rows = (invoices ?? []) as Record<string, unknown>[];
-  let cash = 0, visa = 0, cliq = 0, debt = 0, gross = 0, tax = 0, discounts = 0, returns = 0, profit = 0;
-  for (const r of rows) {
-    cash += Number(r.cash_amount) || 0;
-    visa += Number(r.visa_amount) || 0;
-    cliq += Number(r.cliq_amount) || 0;
-    debt += Number(r.debt_amount) || 0;
-    gross += Number(r.total) || 0;
-    tax += Number(r.tax_amount) || 0;
-    discounts += Number(r.discount_amount) || 0;
-    if (r.is_return) returns += Math.abs(Number(r.total) || 0);
-    profit += Number(r.gross_profit) || 0;
-  }
-
+  const rows = Array.isArray(listResult.data) ? (listResult.data as Record<string, unknown>[]) : [];
+  const total = rows.length > 0 ? ledgerNumber(rows[0].total_count) : 0;
+  const report = mapSalesLedgerSummary(summaryResult.data);
+  const quality = qualityResult.data && typeof qualityResult.data === "object"
+    ? (qualityResult.data as Record<string, unknown>)
+    : {};
   return {
-    invoices: rows,
-    total: count ?? 0,
-    page,
-    pageSize,
-    summary: {
-      grossSales: gross,
-      returns,
-      netSales: gross - returns,
-      cash, visa, cliq, debt,
-      discounts,
-      tax,
-      grossProfit: profit,
-      invoiceCount: count ?? 0,
+    invoices: rows.map(mapSalesLedgerInvoice),
+    summary: report.summary,
+    taxBreakdown: report.taxBreakdown,
+    dataQuality: {
+      zeroCostLineCount: ledgerNumber(quality.zeroCostLineCount),
+      zeroCostNetSales: ledgerNumber(quality.zeroCostNetSales),
+      missingBarcodeLineCount: ledgerNumber(quality.missingBarcodeLineCount),
+      unknownProductLineCount: ledgerNumber(quality.unknownProductLineCount),
     },
+    filters,
+    pagination: {
+      page,
+      pageSize,
+      total,
+      totalPages: total === 0 ? 0 : Math.ceil(total / pageSize),
+    },
+    generatedAt: new Date().toISOString(),
   };
 }
 
-export async function fetchSalesInvoiceDetail(invoiceId: string): Promise<Record<string, unknown>> {
+export async function fetchSalesInvoiceDetail(invoiceId: string): Promise<{ invoice: SalesInvoiceDetail }> {
   const sb = getSupabaseBrowser();
   const storeId = getTenantStoreId();
   if (!sb || !storeId) throw new Error("Supabase غير مهيأة");
+  if (!invoiceId) throw new Error("معرّف الفاتورة مفقود");
 
-  const { data: invoice, error } = await sb
+  const invoiceResult = await sb
     .from("sales_invoices")
-    .select("*")
+    .select("id,sync_id,branch_id,terminal_id,shift_id,cashier_id,cashier_name,customer_id,customer_name,customer_phone,payment_method,subtotal,tax,discount,delivery_fee,total,amount_paid,change_amount,cash_amount,visa_amount,cliq_amount,debt_amount,item_count,gross_profit,is_return,is_cancellation,original_invoice_sync_id,completed_at,istd_uuid,istd_qr")
     .eq("id", invoiceId)
     .eq("store_id", storeId)
     .maybeSingle();
-  if (error) throw new Error(error.message);
-  if (!invoice) throw new Error("الفاتورة غير موجودة");
+  if (invoiceResult.error) throw new Error(invoiceResult.error.message);
+  if (!invoiceResult.data) throw new Error("الفاتورة غير موجودة");
 
-  const { data: items } = await sb
-    .from("sales_invoice_items")
-    .select("*")
-    .eq("invoice_id", invoiceId)
-    .eq("store_id", storeId);
+  const invoiceRow = { ...(invoiceResult.data as Record<string, unknown>) };
+  const branchId = ledgerText(invoiceRow.branch_id);
+  const terminalId = ledgerText(invoiceRow.terminal_id);
+  const syncId = ledgerText(invoiceRow.sync_id);
+  const [itemResult, paymentResult, branchResult, terminalResult, returnResult] = await Promise.all([
+    sb
+      .from("sales_invoice_items")
+      .select("id,line_no,product_id,product_name,barcode,variant_label,unit_name,qty,multiplier,unit_price,line_subtotal,line_discount,net_total,tax_percent,tax_included,tax_amount,line_total,cost_price,cost_total,gross_profit")
+      .eq("invoice_id", invoiceId)
+      .eq("store_id", storeId)
+      .order("line_no"),
+    sb.from("sales_payments").select("method,amount").eq("invoice_id", invoiceId).eq("store_id", storeId),
+    branchId ? sb.from("branches").select("name").eq("id", branchId).eq("store_id", storeId).maybeSingle() : Promise.resolve({ data: null, error: null }),
+    terminalId ? sb.from("terminals").select("name").eq("id", terminalId).maybeSingle() : Promise.resolve({ data: null, error: null }),
+    sb
+      .from("sales_invoices")
+      .select("id,sync_id,total,completed_at")
+      .eq("store_id", storeId)
+      .eq("original_invoice_sync_id", syncId)
+      .order("completed_at", { ascending: false }),
+  ]);
+  if (itemResult.error) throw new Error(itemResult.error.message);
+  if (paymentResult.error) throw new Error(paymentResult.error.message);
+  if (branchResult.error) throw new Error(branchResult.error.message);
+  if (terminalResult.error) throw new Error(terminalResult.error.message);
+  if (returnResult.error) throw new Error(returnResult.error.message);
 
-  return { invoice: { ...invoice, items: items ?? [] } };
+  const branchData = branchResult.data as { name?: string | null } | null;
+  const terminalData = terminalResult.data as { name?: string | null } | null;
+  invoiceRow.branch_name = branchData?.name ?? "";
+  invoiceRow.terminal_name = terminalData?.name ?? "";
+  const items = (itemResult.data ?? []).map((row) => mapSalesInvoiceItem(row as Record<string, unknown>));
+  invoiceRow.profit_reliable = items.every((item) => item.profitReliable);
+  const base = mapSalesLedgerInvoice(invoiceRow);
+  return {
+    invoice: {
+      ...base,
+      amountPaid: ledgerNumber(invoiceRow.amount_paid),
+      changeAmount: ledgerNumber(invoiceRow.change_amount),
+      items,
+      payments: ((paymentResult.data ?? []) as Array<{ method: string; amount: unknown }>).map((row) => ({
+        method: (["CASH", "VISA", "DEBT", "CLIQ"].includes(row.method) ? row.method : "UNKNOWN") as SalesInvoicePaymentDetail["method"],
+        amount: ledgerNumber(row.amount),
+      })),
+      taxBreakdown: buildTaxBreakdown(items),
+      linkedReturns: (returnResult.data ?? []).map((row) => ({
+        id: row.id,
+        syncId: row.sync_id,
+        reference: invoiceReference(row.sync_id),
+        total: ledgerNumber(row.total),
+        completedAt: row.completed_at,
+      })),
+    },
+  };
 }
 
 export async function fetchProfitabilityReport(params: {

@@ -191,7 +191,7 @@ export default function SalesLedgerPage() {
     const params = { from, to, page, pageSize: 50, kind, branchId, terminalId, cashierId, paymentMethod, search };
     fetchSalesReport(params)
       .then((body) => {
-        if (active) setData(body as unknown as SalesLedgerResponse);
+        if (active) setData(body);
       })
       .catch((reason) => {
         if (active) setError(reason instanceof Error ? reason.message : "تعذر تحميل سجل المبيعات");
@@ -343,15 +343,15 @@ export default function SalesLedgerPage() {
         <Metric label="عدد الفواتير" value={summary ? quantity(summary.invoiceCount) : "—"} icon={<ReceiptText className="h-4 w-4" />} />
       </section>
 
-      {data && (data.dataQuality.zeroCostLineCount > 0 || data.dataQuality.missingBarcodeLineCount > 0 || data.dataQuality.unknownProductLineCount > 0) && (
+      {data && ((data.dataQuality?.zeroCostLineCount ?? 0) > 0 || (data.dataQuality?.missingBarcodeLineCount ?? 0) > 0 || (data.dataQuality?.unknownProductLineCount ?? 0) > 0) && (
         <section className="flex items-start gap-3 rounded-lg border border-warning/20 bg-warning-soft px-4 py-3 text-warning-strong">
           <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
           <div>
             <h2 className="text-sm font-black">تنبيه جودة البيانات المحاسبية</h2>
             <p className="mt-1 text-xs font-bold leading-5">
-              {data.dataQuality.zeroCostLineCount > 0 ? `${data.dataQuality.zeroCostLineCount} سطر بلا تكلفة بقيمة مبيعات ${formatMoney(data.dataQuality.zeroCostNetSales)}؛ لذلك تم حجب الربح والهامش حتى استكمال التكلفة. ` : ""}
-              {data.dataQuality.missingBarcodeLineCount > 0 ? `${data.dataQuality.missingBarcodeLineCount} سطر تاريخي بلا باركود. ` : ""}
-              {data.dataQuality.unknownProductLineCount > 0 ? `${data.dataQuality.unknownProductLineCount} سطر غير مرتبط بمنتج حالي.` : ""}
+              {(data.dataQuality?.zeroCostLineCount ?? 0) > 0 ? `${data.dataQuality?.zeroCostLineCount} سطر بلا تكلفة بقيمة مبيعات ${formatMoney(data.dataQuality?.zeroCostNetSales ?? 0)}؛ لذلك تم حجب الربح والهامش حتى استكمال التكلفة. ` : ""}
+              {(data.dataQuality?.missingBarcodeLineCount ?? 0) > 0 ? `${data.dataQuality?.missingBarcodeLineCount} سطر تاريخي بلا باركود. ` : ""}
+              {(data.dataQuality?.unknownProductLineCount ?? 0) > 0 ? `${data.dataQuality?.unknownProductLineCount} سطر غير مرتبط بمنتج حالي.` : ""}
             </p>
           </div>
         </section>
@@ -392,7 +392,7 @@ export default function SalesLedgerPage() {
               <div className="flex items-center justify-between gap-3"><span className="text-xs font-bold text-muted">{dateTime(invoice.completedAt)} · {invoice.cashierName || "غير محدد"}</span><span className="font-black tabular-nums">{formatMoney(invoice.total)}</span></div>
             </Link>
           ))}
-          {!loading && data?.invoices.length === 0 && <p className="px-4 py-12 text-center text-sm font-bold text-muted">لا توجد فواتير مطابقة</p>}
+          {!loading && (data?.invoices?.length ?? 0) === 0 && <p className="px-4 py-12 text-center text-sm font-bold text-muted">لا توجد فواتير مطابقة</p>}
         </div>
         <footer className="flex items-center justify-between gap-3 border-t border-border px-4 py-3">
           <button type="button" disabled={!pagination || page <= 1 || loading} onClick={() => setPage((value) => Math.max(1, value - 1))} className="inline-flex h-9 items-center gap-1 rounded-lg border border-border px-3 text-sm font-black disabled:opacity-40"><ChevronRight className="h-4 w-4" />السابق</button>
