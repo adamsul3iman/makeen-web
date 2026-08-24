@@ -128,7 +128,7 @@ export default function PosLayout() {
   const canSell = hasCapability(currentCashier, "pos.sell");
 
   const activeBranch = branches.find((b) => b.id === activeBranchId);
-  const activeTerminal = terminals.find((t) => t.id === activeTerminalId);
+  const activeTerminal = (terminals ?? []).find((t) => t.id === activeTerminalId);
 
   const modalOpen =
     isCheckoutModalOpen ||
@@ -293,8 +293,19 @@ export default function PosLayout() {
       jobType: "RECEIPT",
       renderedHtml: html,
       printerKind: "THERMAL",
-    }).then((usedAgent) => {
-      if (usedAgent || isElectron()) return;
+    }).then((printed) => {
+      if (printed) return;
+      if (isElectron()) {
+        // Every silent tier failed inside the wrapper — the cashier must
+        // know the receipt did not print (no dialog may appear here).
+        usePosStore.setState({
+          notice: {
+            message: "تم البيع، لكن فشلت الطباعة الصامتة — تحقق من الطابعة ثم أعد الطباعة",
+            tone: "error",
+          },
+        });
+        return;
+      }
       // Plain browser without Electron/agent: the native dialog is the
       // only remaining way to produce the receipt.
       requestAnimationFrame(() => window.print());

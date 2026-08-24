@@ -1131,7 +1131,7 @@ async function resolveStaffLoginPayload(
 
   const { data: cashierRows, error: cashierError } = await sb
     .from("cashiers")
-    .select("id,name,role,role_id,pin,pin_salt,pin_hash,username,is_active")
+    .select("id,name,role,role_id,pin_salt,pin_hash,username,is_active")
     .eq("store_id", store.id);
   if (cashierError) throw cashierError;
 
@@ -1160,9 +1160,11 @@ async function resolveStaffLoginPayload(
     if (r.role === "admin" || r.role === "مدير") return false;
     if (r.is_active === false) return false;
     if (username && (!r.username || r.username.trim().toLowerCase() !== username)) return false;
+    // Hash-less rows can no longer authenticate: migration 076 backfilled
+    // every legacy row via 016's formula and dropped the plaintext pin column.
     return r.pin_hash
       ? sha256Hex(input.pin + (r.pin_salt ?? sha256Hex(`pos:pin-salt:${store.id}`).slice(0, 16))) === r.pin_hash
-      : r.pin != null && r.pin === input.pin;
+      : false;
   });
   if (!cashier) {
     return { ok: false, error: "بيانات الدخول غير صحيحة", unauthorized: true };
@@ -1757,18 +1759,16 @@ export const usePosStore = create<PosStore>()(
         setCompletingCrossTab(true);
         set({ isCompleting: true });
         try {
+          // SYNC-F1 guard: this IDB put is the point of durability. Once it
+          // resolves, the sale IS saved — every step below is success-only
+          // bookkeeping and must never surface as "save failed", or the
+          // cashier re-rings the sale and both copies mirror (duplicated
+          // revenue + double stock deduction).
           await enqueueSync(record);
-          const pendingSyncCount = (await getSyncsByStatus("PENDING")).length;
 
-          // P4: learn the customer's prices from the settled invoice. Async
-          // IDB writes — never on the render/main-thread path. Anonymous
-          // sales short-circuit before any I/O.
-          const activeStoreId =
-            get().currentStore?.id ?? getTenantStoreId() ?? record.storeId ?? null;
-          if (activeStoreId) {
-            await upsertPriceMemoryFromPayload(record.payload, activeStoreId);
-          }
-
+          // Pure synchronous derivation first: cannot throw, so the success
+          // settlement always has complete data even if a later IDB read/write
+          // hiccups.
           let shiftTotals = get().shiftTotals;
           let shiftTransactions = get().shiftTransactions;
           const shiftState = get().shiftState;
@@ -1839,22 +1839,45 @@ export const usePosStore = create<PosStore>()(
             completed_at: record.payload.completed_at,
           };
 
-          set({
-            items: [],
-            totals: emptyTotals(),
-            deliveryFee: 0,
-            isCheckoutModalOpen: false,
-            pendingSyncCount,
-            shiftTotals,
-            shiftTransactions,
-            lastCompletedInvoice: completedInvoice,
-            invoiceDiscount: null,
-            returnReference: null,
-            isReturnMode: false,
-            activeCustomerId: null,
-            priceMemory: {},
-            notice: { message: "تم حفظ الفاتورة محلياً وستتم المزامنة", tone: "success" },
-          });
+          const settleSuccess = () => {
+            set({
+              items: [],
+              totals: emptyTotals(),
+              deliveryFee: 0,
+              isCheckoutModalOpen: false,
+              shiftTotals,
+              shiftTransactions,
+              lastCompletedInvoice: completedInvoice,
+              invoiceDiscount: null,
+              returnReference: null,
+              isReturnMode: false,
+              activeCustomerId: null,
+              priceMemory: {},
+              notice: { message: "تم حفظ الفاتورة محلياً وستتم المزامنة", tone: "success" },
+            });
+          };
+
+          try {
+            const pendingSyncCount = (await getSyncsByStatus("PENDING")).length;
+
+            // P4: learn the customer's prices from the settled invoice. Async
+            // IDB writes — never on the render/main-thread path. Anonymous
+            // sales short-circuit before any I/O.
+            const activeStoreId =
+              get().currentStore?.id ?? getTenantStoreId() ?? record.storeId ?? null;
+            if (activeStoreId) {
+              await upsertPriceMemoryFromPayload(record.payload, activeStoreId);
+            }
+
+            settleSuccess();
+            set({ pendingSyncCount });
+          } catch (postEnqueueError) {
+            console.error(
+              "Post-enqueue bookkeeping failed; invoice stays durably queued:",
+              postEnqueueError,
+            );
+            settleSuccess();
+          }
           emitPosSound("SALE_COMPLETED");
 
           // ISTD/JoFotara e-invoicing fast path. Detached and never awaited:
@@ -2804,7 +2827,7 @@ export const usePosStore = create<PosStore>()(
           // 2. Fetch all non-admin cashiers for this store.
           const { data: cashierRows, error: cashierError } = await sb
             .from("cashiers")
-            .select("id,name,role,role_id,pin,pin_salt,pin_hash,username,is_active")
+            .select("id,name,role,role_id,pin_salt,pin_hash,username,is_active")
             .eq("store_id", store.id);
           if (cashierError) throw cashierError;
 
@@ -2832,7 +2855,7 @@ export const usePosStore = create<PosStore>()(
             }
             return r.pin_hash
               ? sha256Hex(code + (r.pin_salt ?? sha256Hex(`pos:pin-salt:${store.id}`).slice(0, 16))) === r.pin_hash
-              : r.pin != null && r.pin === code;
+              : false;
           });
           if (!cashier) {
             set({ notice: { message: "بيانات الدخول غير صحيحة", tone: "error" } });

@@ -195,7 +195,7 @@ export async function staffLoginResponse(input: StaffLoginRequest): Promise<Resp
 
   const { data: cashierRows, error: cashierError } = await supabase
     .from("cashiers")
-    .select("id,name,role,role_id,pin,pin_salt,pin_hash,username,is_active")
+    .select("id,name,role,role_id,pin_salt,pin_hash,username,is_active")
     .eq("store_id", store.id);
   if (cashierError) {
     return Response.json({ error: cashierError.message }, { status: 500 });
@@ -218,7 +218,8 @@ export async function staffLoginResponse(input: StaffLoginRequest): Promise<Resp
   }
 
   // F3: verify against the stored per-cashier hash (sha256(pin + salt)).
-  // Legacy rows without a hash fall back to the plaintext pin column. Only
+  // Hash-less rows can no longer authenticate: migration 076 backfilled every
+  // legacy row via 016's formula and dropped the plaintext pin column. Only
   // cashier rows are eligible — the owner (role 'admin') holds dashboard
   // credentials and never a PIN, so its hash can never unlock a register.
   const cashier = (cashierRows ?? []).find((r) => {
@@ -229,7 +230,7 @@ export async function staffLoginResponse(input: StaffLoginRequest): Promise<Resp
     }
     return r.pin_hash
       ? sha256Hex(pin + (r.pin_salt ?? sha256Hex(`pos:pin-salt:${store.id}`).slice(0, 16))) === r.pin_hash
-      : r.pin != null && r.pin === pin;
+      : false;
   });
   if (!cashier) {
     return Response.json({ error: "بيانات الدخول غير صحيحة" }, { status: 401 });

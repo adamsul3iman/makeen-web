@@ -30,7 +30,7 @@ export default function OpenShiftModal() {
   // so the modal simply reads the active branch/terminal once the registry
   // arrives instead of mirroring it into local state.
   const branchId = activeBranchId ?? branches[0]?.id ?? "";
-  const branchTerminals = terminals.filter((t) => t.branchId === branchId);
+  const branchTerminals = (terminals ?? []).filter((t) => t.branchId === branchId);
   const terminalId =
     activeTerminalId && branchTerminals.some((t) => t.id === activeTerminalId)
       ? activeTerminalId
@@ -44,7 +44,7 @@ export default function OpenShiftModal() {
   const canOpen = startingCash >= 0 && (!hasRegistry || Boolean(branchId && terminalId));
 
   const pickBranch = (id: string) => {
-    const firstTerminal = terminals.find((t) => t.branchId === id)?.id ?? "";
+    const firstTerminal = (terminals ?? []).find((t) => t.branchId === id)?.id ?? "";
     selectTerminal(id, firstTerminal);
   };
 

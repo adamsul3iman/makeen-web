@@ -17,14 +17,64 @@ let mainWindow = null;
 let updateCheckTimer = null;
 
 const DEFAULT_THERMAL_PRINTER = "Rongta RP80";
+const THERMAL_NAME_HINTS = ["rongta", "rp80", "rp326", "80mm", "thermal", "receipt"];
+const A4_NAME_HINTS = ["a4", "laser", "inkjet", "hp", "canon", "epson wf"];
+const PRINT_CALLBACK_TIMEOUT_MS = 20_000;
 
 // ── Silent-print IPC ─────────────────────────────────────────────────
-// Renderer calls window.electronAPI.printSilent({ html, printerName }).
+// Renderer calls window.electronAPI.printSilent({ html, printerName, printerKind }).
 // A hidden BrowserWindow is created, the HTML is loaded, and
 // webContents.print({ silent: true }) sends it straight to the printer.
+//
+// webContents.print() is VOID + callback-based (never a Promise), so the
+// outcome MUST be captured through the (success, failureReason) callback —
+// awaiting its return value always yields undefined.
 
-ipcMain.handle("print:silent", async (_event, { html, printerName }) => {
-  const deviceName = printerName || DEFAULT_THERMAL_PRINTER;
+function resolveDeviceName(printers, requestedName, printerKind) {
+  if (requestedName) {
+    const exact = printers.find((p) => p.name === requestedName);
+    if (exact) return exact.name;
+    const caseInsensitive = printers.find(
+      (p) => p.name.toLowerCase() === requestedName.toLowerCase(),
+    );
+    if (caseInsensitive) return caseInsensitive.name;
+  }
+  const hints = printerKind === "A4" ? A4_NAME_HINTS : THERMAL_NAME_HINTS;
+  for (const hint of hints) {
+    const hit = printers.find((p) => p.name.toLowerCase().includes(hint));
+    if (hit) return hit.name;
+  }
+  const fallback = printers.find((p) => p.isDefault);
+  return fallback?.name ?? null;
+}
+
+function printWithResult(webContents, options) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (outcome) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timeout);
+        resolve(outcome);
+      }
+    };
+    // Safety net: Chromium's callback is documented to always fire, but a
+    // wedged spooler must not hang the renderer invoke forever.
+    const timeout = setTimeout(
+      () => settle({ ok: false, failureReason: "PRINT_TIMED_OUT" }),
+      PRINT_CALLBACK_TIMEOUT_MS,
+    );
+    try {
+      webContents.print(options, (success, failureReason) => {
+        settle({ ok: success !== false, failureReason });
+      });
+    } catch (syncError) {
+      settle({ ok: false, failureReason: String(syncError) });
+    }
+  });
+}
+
+ipcMain.handle("print:silent", async (_event, { html, printerName, printerKind }) => {
   let printWindow = null;
   try {
     printWindow = new BrowserWindow({
@@ -46,13 +96,38 @@ ipcMain.handle("print:silent", async (_event, { html, printerName }) => {
     // Small delay to let the renderer paint before printing.
     await new Promise((r) => setTimeout(r, 300));
 
-    const success = await printWindow.webContents.print({
+    const printers = await printWindow.webContents.getPrintersAsync();
+    const deviceName = resolveDeviceName(
+      printers,
+      printerName || DEFAULT_THERMAL_PRINTER,
+      printerKind,
+    );
+    if (!deviceName) {
+      console.error("[electron] Silent print: no matching printer for", {
+        printerName,
+        printerKind,
+        installed: printers.map((p) => p.name),
+      });
+      return { success: false, error: "NO_MATCHING_PRINTER", installed: printers.map((p) => p.name) };
+    }
+
+    const outcome = await printWithResult(printWindow.webContents, {
       silent: true,
       printBackground: true,
       deviceName,
     });
-
-    return { success: !!success };
+    if (!outcome.ok) {
+      console.error("[electron] Silent print rejected:", {
+        deviceName,
+        reason: outcome.failureReason,
+      });
+      return { success: false, error: outcome.failureReason || "PRINT_FAILED", deviceName };
+    }
+    // Grace period: the Chromium callback fires when the job is handed to the
+    // OS spooler, but some USB thermal drivers abort in-flight jobs if the
+    // source window is destroyed immediately. Let the spooler settle.
+    await new Promise((r) => setTimeout(r, 750));
+    return { success: true, deviceName };
   } catch (err) {
     console.error("[electron] Silent print failed:", err);
     return { success: false, error: err instanceof Error ? err.message : String(err) };
@@ -63,10 +138,11 @@ ipcMain.handle("print:silent", async (_event, { html, printerName }) => {
   }
 });
 
-ipcMain.handle("print:getPrinters", async () => {
-  if (!mainWindow) return [];
+ipcMain.handle("print:getPrinters", async (event) => {
   try {
-    return mainWindow.webContents.getPrintersAsync();
+    const sender = event.sender ?? mainWindow?.webContents;
+    if (!sender) return [];
+    return await sender.getPrintersAsync();
   } catch {
     return [];
   }
@@ -97,7 +173,7 @@ function createMainWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
-      preload: path.join(ELECTRON_DIRECTORY, "preload.js"),
+      preload: path.join(ELECTRON_DIRECTORY, "preload.cjs"),
       webSecurity: false,
     },
   });

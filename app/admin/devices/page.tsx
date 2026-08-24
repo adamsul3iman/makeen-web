@@ -141,7 +141,7 @@ function SoundSettingsSection({
 export default function DevicesPage() {
   const activeTerminalId = usePosStore((state) => state.activeTerminalId);
   const terminals = usePosStore((state) => state.terminals);
-  const terminal = terminals.find((item) => item.id === activeTerminalId);
+  const terminal = (terminals ?? []).find((item) => item.id === activeTerminalId);
   const { settings, updateSettings, resetSettings } = useDeviceHardware(activeTerminalId);
   const [drawerStatus, setDrawerStatus] = useState<CashDrawerStatus>({
     supported: hasCashDrawer(),

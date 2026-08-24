@@ -59,7 +59,7 @@ export default function AdminBranchesPage() {
     return branches.filter(
       (b) =>
         normalizeArabicText(b.name).includes(needle) ||
-        b.terminals.some((t) => normalizeArabicText(t.name).includes(needle)),
+        (b?.terminals ?? []).some((t) => normalizeArabicText(t.name).includes(needle)),
     );
   }, [branches, debouncedQ]);
 
@@ -76,7 +76,10 @@ export default function AdminBranchesPage() {
   }, []);
 
   useEffect(() => {
-    void load();
+    const loadTimer = window.setTimeout(() => {
+      void load();
+    }, 0);
+    return () => window.clearTimeout(loadTimer);
   }, [load]);
 
   const mutate = async (action: () => Promise<unknown>, fallback: string) => {
@@ -136,7 +139,7 @@ export default function AdminBranchesPage() {
     }
   };
 
-  const totalTerminals = branches.reduce((sum, b) => sum + b.terminals.length, 0);
+  const totalTerminals = branches.reduce((sum, b) => sum + (b?.terminals?.length ?? 0), 0);
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
@@ -272,7 +275,7 @@ export default function AdminBranchesPage() {
               </header>
 
               <ul className="divide-y divide-border/60">
-                {branch.terminals.map((terminal) => (
+                {(branch?.terminals ?? []).map((terminal) => (
                   <li key={terminal.id} className="flex items-center justify-between px-4 py-2.5">
                     {editingTerminal[terminal.id] !== undefined && editingTerminal[terminal.id] !== "" ? (
                       <div className="flex flex-1 items-center gap-2">

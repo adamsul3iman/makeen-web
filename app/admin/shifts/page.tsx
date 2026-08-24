@@ -143,7 +143,7 @@ export default function AdminShiftsPage() {
     fetchBranches()
       .then((rows) => {
         setBranches(rows.map(({ id, name }) => ({ id, name })));
-        setTerminals(rows.flatMap((branch) => branch.terminals));
+        setTerminals(rows.flatMap((branch) => branch?.terminals ?? []));
       })
       .catch(() => {});
   }, []);

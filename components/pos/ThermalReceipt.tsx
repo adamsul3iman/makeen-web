@@ -247,7 +247,7 @@ export default function ThermalReceipt({
             <p className={`${META} mt-0.5`}>
               {branches.find((b) => b.id === invoiceBranchId)?.name ?? ""}
               {invoiceBranchId && invoiceTerminalId ? " • " : ""}
-              {terminals.find((t) => t.id === invoiceTerminalId)?.name ?? ""}
+              {(terminals ?? []).find((t) => t.id === invoiceTerminalId)?.name ?? ""}
             </p>
           ) : null}
         </div>

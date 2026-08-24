@@ -408,7 +408,9 @@ export interface IstdState {
 }
 
 const DB_NAME = "pos_local_db";
-const DB_VERSION = 8;
+// v9 (MEM-1/MEM-2): adds `synced_at` on sync_queue and `status`/`store_status`
+// on istd_state for retention sweeps + O(log n) badge counters.
+const DB_VERSION = 9;
 const STORE = "sync_queue";
 const POISON_STORE = "sync_poison";
 const CATALOG_STORE = "catalog_cache";
@@ -423,12 +425,27 @@ const BOOT_CUSTOMER_PREFIX = "pos-customer-boot";
 const POS_PERSIST_KEY = "pos-store";
 const PRICE_MEMORY_MARKER_PREFIX = "built:";
 
+/**
+ * MEM-1: how long SYNCED queue rows stay local after mirror ack. They remain
+ * readable for returns-reference lookup and receipt reprint within this
+ * window; older history lives in `sales_invoices` server-side.
+ */
+const QUEUE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+
+/**
+ * MEM-2: how long terminal-success (SUBMITTED) ISTD rows stay local. The
+ * official QR is printed at clearance time; on-device state past this window
+ * is dead weight scanned by nothing. FAILED rows are kept indefinitely — they
+ * must stay visible until resolved.
+ */
+const ISTD_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+
 let dbPromise: Promise<IDBPDatabase> | null = null;
 
 function getDb(): Promise<IDBPDatabase> {
   if (!dbPromise) {
     dbPromise = openDB(DB_NAME, DB_VERSION, {
-      upgrade(db, oldVersion) {
+      upgrade(db, oldVersion, _newVersion, transaction) {
         if (oldVersion < 1) {
           const store = db.createObjectStore(STORE, { keyPath: "sync_id" });
           store.createIndex("status", "status");
@@ -455,6 +472,46 @@ function getDb(): Promise<IDBPDatabase> {
         if (oldVersion < 8) {
           db.createObjectStore(SHORTAGE_FLAG_STORE, { keyPath: "key" });
         }
+        if (oldVersion < 9) {
+          // MEM-1: index the ack timestamp and backfill rows acknowledged by
+          // pre-v9 builds so the retention sweep can reach them.
+          const queue = transaction.objectStore(STORE);
+          queue.createIndex("synced_at", "synced_at");
+          void (async () => {
+            let cursor = await queue.openCursor();
+            while (cursor) {
+              const record = cursor.value as SyncQueueRecord & { synced_at?: string };
+              if (
+                record.status === ("SYNCED" as SyncStatus) &&
+                !record.synced_at
+              ) {
+                await cursor.update({
+                  ...record,
+                  synced_at: record.created_at ?? new Date().toISOString(),
+                });
+              }
+              cursor = await cursor.continue();
+            }
+          })();
+
+          // MEM-2: status indexes for the retention sweep + O(log n) counters.
+          const istd = transaction.objectStore(ISTD_STORE);
+          istd.createIndex("status", "status");
+          istd.createIndex("store_status", ["storeId", "status"]);
+        }
+      },
+      blocked() {
+        // Another tab holds an old-version connection open. Without this
+        // callback that tab would hang this one's open() forever (MEM-3).
+        console.warn(
+          "[idb] version upgrade blocked by another tab — reload stale register tabs",
+        );
+      },
+      blocking() {
+        // A newer version is waiting: drop the cached connection so the next
+        // call reopens on the upgraded schema instead of serving a stale
+        // handle for the lifetime of the document (MEM-3).
+        dbPromise = null;
       },
     });
   }
@@ -559,6 +616,32 @@ export async function deleteSyncs(syncIds: string | string[]): Promise<void> {
   for (const syncId of ids) {
     await db.delete(STORE, syncId);
   }
+}
+
+/**
+ * MEM-1 retention sweep: drop SYNCED queue rows acknowledged longer than the
+ * retention window ago. Payloads survive server-side (`sales_invoices`);
+ * locally only the recent reprint/returns window is kept. Runs via the
+ * background sync tick (throttled there); safe to call more often — the
+ * `synced_at` index makes an empty sweep a range probe, not a scan.
+ */
+export async function pruneSyncedSyncQueue(
+  maxAgeMs: number = QUEUE_RETENTION_MS,
+): Promise<number> {
+  const db = await getDb();
+  const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+  let deleted = 0;
+  const tx = db.transaction(STORE, "readwrite");
+  let cursor = await tx.store
+    .index("synced_at")
+    .openCursor(IDBKeyRange.upperBound(cutoff));
+  while (cursor) {
+    await cursor.delete();
+    deleted += 1;
+    cursor = await cursor.continue();
+  }
+  await tx.done;
+  return deleted;
 }
 
 /**
@@ -1069,18 +1152,48 @@ export async function getIstdStates(storeId?: string | null): Promise<IstdState[
 }
 
 /**
+ * MEM-2 retention sweep: forget SUBMITTED (terminal-success) ISTD rows older
+ * than the fiscal-noise window. FAILED/PENDING/SUBMITTING rows always stay —
+ * failures must remain visible until resolved.
+ */
+export async function pruneIstdStates(
+  maxAgeMs: number = ISTD_RETENTION_MS,
+): Promise<number> {
+  const db = await getDb();
+  const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+  let deleted = 0;
+  const tx = db.transaction(ISTD_STORE, "readwrite");
+  let cursor = await tx.store
+    .index("status")
+    .openCursor(IDBKeyRange.only("SUBMITTED"));
+  while (cursor) {
+    if ((cursor.value.updated_at ?? "") < cutoff) {
+      await cursor.delete();
+      deleted += 1;
+    }
+    cursor = await cursor.continue();
+  }
+  await tx.done;
+  return deleted;
+}
+
+/**
  * Invoices not yet cleared with JoFotara: PENDING/SUBMITTING (never sent or in
  * flight) plus FAILED (sent but rejected — still visible, never silent).
+ * Indexed counts only — this runs on the 15 s background tick (MEM-2).
  */
 export async function countIstdPending(storeId: string): Promise<number> {
-  const rows = await getIstdStates(storeId);
-  return rows.filter(
-    (r) => r.status === "PENDING" || r.status === "SUBMITTING" || r.status === "FAILED",
-  ).length;
+  const db = await getDb();
+  const [pending, submitting, failed] = await Promise.all([
+    db.countFromIndex(ISTD_STORE, "store_status", [storeId, "PENDING"]),
+    db.countFromIndex(ISTD_STORE, "store_status", [storeId, "SUBMITTING"]),
+    db.countFromIndex(ISTD_STORE, "store_status", [storeId, "FAILED"]),
+  ]);
+  return pending + submitting + failed;
 }
 
 /** Invoices whose ISTD submission was rejected — must be surfaced, not silent. */
 export async function countIstdFailed(storeId: string): Promise<number> {
-  const rows = await getIstdStates(storeId);
-  return rows.filter((r) => r.status === "FAILED").length;
+  const db = await getDb();
+  return db.countFromIndex(ISTD_STORE, "store_status", [storeId, "FAILED"]);
 }

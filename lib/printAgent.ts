@@ -16,7 +16,11 @@ export type PrinterKind = "THERMAL" | "A4" | "LABEL";
 // ── Electron silent-print bridge ────────────────────────────────────
 
 interface ElectronPrintAPI {
-  printSilent(payload: { html: string; printerName?: string }): Promise<{ success: boolean; error?: string }>;
+  printSilent(payload: {
+    html: string;
+    printerName?: string;
+    printerKind?: PrinterKind;
+  }): Promise<{ success: boolean; error?: string }>;
   getPrinters(): Promise<Array<{ name: string }>>;
 }
 
@@ -79,14 +83,19 @@ async function printViaElectron(
         "</html>",
       ].join("\n");
 
-  const deviceName =
-    printerKind === "A4" ? undefined : undefined; // let Electron default to the system thermal printer
-
+  // The main process resolves the actual device by enumerating installed
+  // printers against printerKind (hardcoded names never match drivers like
+  // "RONGTA 80mm Series Printer"). printerName stays reserved for an explicit
+  // user-configured override.
   try {
     const result = await window.electronAPI.printSilent({
       html: fullHtml,
-      printerName: deviceName,
+      printerName: undefined,
+      printerKind,
     });
+    if (!result.success && result.error) {
+      console.warn("[printAgent] Electron silent print rejected:", result.error);
+    }
     return result.success;
   } catch (err) {
     console.warn("[printAgent] Electron IPC print failed:", err);

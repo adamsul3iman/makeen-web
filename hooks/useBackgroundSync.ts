@@ -3,10 +3,37 @@
 import { useEffect } from "react";
 import { usePosStore } from "@/store/usePosStore";
 import { processSyncQueue } from "@/services/syncService";
-import { getSyncsByStatus, isQueueRecordForTenant } from "@/lib/idb";
+import { getSyncsByStatus, isQueueRecordForTenant, pruneIstdStates, pruneSyncedSyncQueue } from "@/lib/idb";
 import { getTenantStoreId } from "@/lib/tenantClient";
 
 const SYNC_INTERVAL_MS = 15_000;
+
+// MEM-1/MEM-2: retention sweeps are cheap when idle (indexed range probes)
+// but there is no reason to run them every tick. Once an hour per tab is
+// plenty; the module-level timestamp also de-duplicates across ticks within
+// the session.
+const RETENTION_INTERVAL_MS = 60 * 60 * 1000;
+let lastRetentionAt = 0;
+
+async function runRetentionSweeps(): Promise<void> {
+  const now = Date.now();
+  if (now - lastRetentionAt < RETENTION_INTERVAL_MS) return;
+  lastRetentionAt = now;
+  // Each sweep is independently guarded: a failure in one must never block
+  // the other, and neither may break the sync tick.
+  try {
+    const pruned = await pruneSyncedSyncQueue();
+    if (pruned > 0) console.info(`[sync] queue retention: pruned ${pruned} SYNCED rows`);
+  } catch (error) {
+    console.warn("[sync] queue retention sweep failed:", error);
+  }
+  try {
+    const pruned = await pruneIstdStates();
+    if (pruned > 0) console.info(`[sync] istd retention: pruned ${pruned} SUBMITTED rows`);
+  } catch (error) {
+    console.warn("[sync] istd retention sweep failed:", error);
+  }
+}
 
 async function refreshPendingCount(): Promise<void> {
   const storeId = getTenantStoreId();
@@ -24,6 +51,9 @@ async function syncIfOnline(): Promise<void> {
   if (!usePosStore.getState().isOnline) return;
   await processSyncQueue();
   await refreshPendingCount();
+  // Post-ack is the ideal sweep point: anything just marked SYNCED ages from
+  // now, and a drained queue makes room before the next burst.
+  await runRetentionSweeps();
 }
 
 /**
@@ -58,6 +88,7 @@ export function useBackgroundSync(): void {
     document.addEventListener("visibilitychange", handleVisibility);
 
     void refreshPendingCount();
+    void runRetentionSweeps();
 
     return () => {
       clearInterval(interval);

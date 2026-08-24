@@ -17,7 +17,6 @@ export interface Cashier {
   storeId: string;
   name: string;
   username?: string | null;
-  pin?: string | null;
   pinSalt?: string | null;
   pinHash?: string | null;
   role?: string | null;
@@ -65,7 +64,7 @@ export async function fetchCashiers(): Promise<Cashier[]> {
 
   const { data, error } = await sb
     .from("cashiers")
-    .select("id,store_id,name,username,pin,pin_salt,pin_hash,role,role_id,is_active,created_at")
+    .select("id,store_id,name,username,pin_salt,pin_hash,role,role_id,is_active,created_at")
     .eq("store_id", storeId)
     .order("created_at", { ascending: true });
   if (error) throw new Error(error.message);
@@ -75,7 +74,6 @@ export async function fetchCashiers(): Promise<Cashier[]> {
     storeId: row.store_id as string,
     name: row.name as string,
     username: (row.username as string | null) ?? null,
-    pin: (row.pin as string | null) ?? null,
     pinSalt: (row.pin_salt as string | null) ?? null,
     pinHash: (row.pin_hash as string | null) ?? null,
     role: (row.role as string | null) ?? null,
@@ -108,7 +106,7 @@ export async function createCashier(input: CreateCashierInput): Promise<Cashier>
       pin_hash: pinHash,
       is_active: true,
     })
-    .select("id,store_id,name,username,pin,pin_salt,pin_hash,role,role_id,is_active,created_at")
+    .select("id,store_id,name,username,pin_salt,pin_hash,role,role_id,is_active,created_at")
     .single();
   if (error || !data) throw new Error(error?.message ?? "تعذر إنشاء الموظف");
 
@@ -118,7 +116,6 @@ export async function createCashier(input: CreateCashierInput): Promise<Cashier>
     storeId: row.store_id as string,
     name: row.name as string,
     username: (row.username as string | null) ?? null,
-    pin: (row.pin as string | null) ?? null,
     pinSalt: (row.pin_salt as string | null) ?? null,
     pinHash: (row.pin_hash as string | null) ?? null,
     role: (row.role as string | null) ?? null,
@@ -156,7 +153,7 @@ export async function updateCashier(
     .update(patch)
     .eq("id", id)
     .eq("store_id", storeId)
-    .select("id,store_id,name,username,pin,pin_salt,pin_hash,role,role_id,is_active,created_at")
+    .select("id,store_id,name,username,pin_salt,pin_hash,role,role_id,is_active,created_at")
     .maybeSingle();
   if (error) throw new Error(error.message);
   if (!data) throw new Error("الموظف غير موجود");
@@ -167,7 +164,6 @@ export async function updateCashier(
     storeId: row.store_id as string,
     name: row.name as string,
     username: (row.username as string | null) ?? null,
-    pin: (row.pin as string | null) ?? null,
     pinSalt: (row.pin_salt as string | null) ?? null,
     pinHash: (row.pin_hash as string | null) ?? null,
     role: (row.role as string | null) ?? null,

@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Tajawal, Geist_Mono } from "next/font/google";
 import { ServiceWorkerRegister } from "@/components/pwa/ServiceWorkerRegister";
+import { StorageGuard } from "@/components/pwa/StorageGuard";
 import AuthGate from "@/components/AuthGate";
 import "./globals.css";
 
@@ -56,6 +57,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     >
       <body className="min-h-full">
         <AuthGate>{children}</AuthGate>
+        <StorageGuard />
         <ServiceWorkerRegister />
       </body>
     </html>
