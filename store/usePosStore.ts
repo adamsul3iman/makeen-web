@@ -37,7 +37,7 @@ import {
   ensurePriceMemoryCache,
   deletePendingShortageFlags,
   findInvoiceById,
-  getIstdStates,
+  getIstdFailedStates,
   getSyncsByStatus,
   isInvoiceReturned,
   loadCatalogBootCacheSync,
@@ -57,6 +57,7 @@ import { sha256Hex } from "@/lib/sha256";
 import { openCashDrawer } from "@/lib/cashDrawer";
 import { loadDeviceHardwareSettings } from "@/lib/deviceHardware";
 import { pushAudit } from "@/lib/audit";
+import { requestPersistentStorage } from "@/lib/storageGuard";
 import { newUuid } from "@/lib/uuid";
 import { getTenantStoreId, setTenantStoreId } from "@/lib/tenantClient";
 import { fetchCatalogSnapshot, fetchCustomersPayload } from "@/lib/clientCatalog";
@@ -1687,8 +1688,9 @@ export const usePosStore = create<PosStore>()(
       retryPendingIstd: async () => {
         const storeId = getTenantStoreId();
         if (!storeId) return { retried: 0 };
-        const states = await getIstdStates(storeId);
-        const failed = states.filter((s) => s.status === "FAILED");
+        // MEM-2: indexed FAILED-only read — the SUBMITTED history is never
+        // deserialized just to find rejections (was a whole-store scan).
+        const failed = await getIstdFailedStates(storeId);
         let retried = 0;
         for (const state of failed) {
           const record = await findInvoiceById(state.sync_id);
@@ -2841,6 +2843,13 @@ export const usePosStore = create<PosStore>()(
           },
         });
         persistDurablePosState(get());
+
+        // SYNC-F2: re-assert persistent storage on every register unlock.
+        // Grants are heuristic and can lapse between OS sessions, and a
+        // register signing in is exactly when eviction of the offline
+        // queue would hurt most. Fire-and-forget — resolves null (no-op)
+        // where the Storage Manager API is unavailable or throws.
+        void requestPersistentStorage();
 
         // Offline unlock remains immediate. When online, verify via the
         // verify_staff_pin RPC and refresh the signed role snapshot (and the

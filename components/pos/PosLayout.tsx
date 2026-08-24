@@ -9,6 +9,7 @@ import {
   Building2,
   CheckCircle2,
   CloudOff,
+  HardDrive,
   LayoutDashboard,
   Lock,
   LogOut,
@@ -59,6 +60,11 @@ import SecondaryAuthModal from "../auth/SecondaryAuthModal";
 import PreviousInvoicesModal from "./PreviousInvoicesModal";
 import AuditLogTimeline from "../admin/AuditLogTimeline";
 import { firstBackofficePath, hasCapability } from "@/lib/permissions";
+import {
+  STORAGE_PRESSURE_EVENT,
+  getStoragePressure,
+  type StoragePressureDetail,
+} from "@/lib/storageGuard";
 import { smartPrint, captureReceiptHtml, isElectron } from "@/lib/printAgent";
 
 export default function PosLayout() {
@@ -258,6 +264,24 @@ export default function PosLayout() {
     window.addEventListener(POS_SOUND_EVENT, onSoundCue);
     return () => window.removeEventListener(POS_SOUND_EVENT, onSoundCue);
   }, [hardwareSettings.soundEnabled, hardwareSettings.soundVolume]);
+
+  // SYNC-F2: surface quota pressure from lib/storageGuard. Initialized from
+  // the module snapshot so a shell mounting after the onset event still
+  // warns immediately; the event's detail is null on the falling edge
+  // (usage back under threshold), which clears the warning.
+  const [storagePressure, setStoragePressure] = useState<StoragePressureDetail | null>(
+    () => getStoragePressure(),
+  );
+  useEffect(() => {
+    const onStoragePressure = (event: Event) => {
+      setStoragePressure(
+        (event as CustomEvent<StoragePressureDetail | null>).detail ?? null,
+      );
+    };
+    window.addEventListener(STORAGE_PRESSURE_EVENT, onStoragePressure);
+    return () =>
+      window.removeEventListener(STORAGE_PRESSURE_EVENT, onStoragePressure);
+  }, []);
 
   // Error notices remain visual and also produce a descending alert. The ref
   // prevents hydration or ordinary re-renders from replaying the same notice.
@@ -598,11 +622,21 @@ export default function PosLayout() {
                     className="ms-1 flex h-7 items-center gap-1 rounded-lg bg-destructive/20 px-2 font-bold text-destructive-bright transition-colors duration-150 hover:bg-destructive/35 focus-visible:focus-ring active:scale-[0.97]"
                   >
                     <RefreshCw className="h-3 w-3" aria-hidden="true" />
-                    إعادة
-                  </button>
-                </span>
-              )}
-            </div>
+                  إعادة
+                </button>
+              </span>
+            )}
+            {storagePressure && (
+              <span
+                title="مساحة تخزين الجهاز ممتلئة تقريباً — حرّر مساحة أو قلّم السجل المحلي؛ الفواتير غير المزامنة معرّضة للحذف"
+                className="flex items-center gap-1 rounded-lg bg-destructive/25 px-1.5 py-0.5 font-bold text-destructive-bright ring-1 ring-destructive-bright/15"
+              >
+                <HardDrive className="h-3 w-3" aria-hidden="true" />
+                مساحة التخزين ·{" "}
+                {Math.round((storagePressure.usage / storagePressure.quota) * 100)}%
+              </span>
+            )}
+          </div>
             {shiftStatus === "OPEN" &&
               hasCapability(currentCashier, "pos.close_shift") && (
                 <>
@@ -689,8 +723,20 @@ export default function PosLayout() {
                         </p>
                       </div>
                     )}
-                    {(poisonSyncCount > 0 || istdPendingCount > 0 || istdFailedCount > 0) && (
+                    {(storagePressure ||
+                      poisonSyncCount > 0 ||
+                      istdPendingCount > 0 ||
+                      istdFailedCount > 0) && (
                       <div className="mt-2 space-y-1 text-xs font-bold">
+                        {storagePressure && (
+                          <p className="text-destructive">
+                            تحذير التخزين:{" "}
+                            {Math.round(
+                              (storagePressure.usage / storagePressure.quota) * 100,
+                            )}
+                            % من مساحة الجهاز — الفواتير غير المزامنة معرّضة للخطر
+                          </p>
+                        )}
                         {poisonSyncCount > 0 && (
                           <p className="text-destructive">حركات خارج المزامنة: {poisonSyncCount}</p>
                         )}

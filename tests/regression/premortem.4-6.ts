@@ -297,7 +297,10 @@ async function poisonQuarantine(): Promise<void> {
   check("poison: idb ships sync_poison store", idbSrc.includes("sync_poison"));
   check("poison: idb exposes quarantineSyncRecord", idbSrc.includes("quarantineSyncRecord"));
   check("poison: idb exposes countPoisonSyncRecords", idbSrc.includes("countPoisonSyncRecords"));
-  check("poison: idb DB_VERSION supports poison store", idbSrc.includes("DB_VERSION = 5"));
+  check(
+    "poison: idb DB_VERSION supports poison store",
+    Number((/DB_VERSION = (\d+)/.exec(idbSrc) ?? [])[1]) >= 5,
+  );
   check("poison: store tracks poisonSyncCount", storeSrc.includes("poisonSyncCount"));
   check("poison: store refreshes poison count", storeSrc.includes("refreshPoisonSyncCount"));
   check(

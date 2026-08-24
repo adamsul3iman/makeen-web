@@ -7,6 +7,7 @@
 | **Working tree note** | 10 pre-existing modified paths from the current fix cycle (sync mirror, silent-print, sales-ledger hardening). Audit ran against that exact tree; nothing was changed by this audit. |
 | **Method** | 4 parallel deep-analysis passes (memory/lifecycle, offline-sync integrity, render performance, security+SQL) + targeted manual verification of every Critical claim against source. All file:line references verified in the working tree. |
 | **Remediation update** | 2026-08-24 — *Remediation Session 1* closed REG-R1 (§1) and F-01/F-04/F-05 (§2.2) via migrations `076`–`079` + the `jofotara` Edge Function (committed through `8cc5fcc`). Closed findings carry inline **Resolved** notes. |
+| **Remediation update 2** | 2026-08-24 — *Remediation Session 2* closed SYNC-F1/F2 (§3.2) and MEM-1/MEM-2/MEM-3 (§4) in the client persistence layer (`lib/storageGuard.ts`, IndexedDB v10 in `lib/idb.ts`, retention sweeps in `hooks/useBackgroundSync.ts`) — no SQL migrations. Guarded by new regression suite `tests/regression/session2.data-lifecycle.ts` (32 checks green; full test battery identical to clean-tree baseline). |
 
 ---
 
@@ -28,9 +29,9 @@ The app's stated security model ("all data protection is delegated to Supabase R
 2. **[SEC]** Revoke anon DML on `cashiers` — one `UPDATE` = full tenant takeover via self-minted admin bcrypt hash. *(§2.2 F-01 — ✅ RESOLVED 2026-08-24 via 076+078)*
 3. **[SEC]** Lock `tenant_tax_settings` (`USING(true)` policies expose every tenant's `istd_client_secret`). *(§2.2 F-04 — ✅ RESOLVED 2026-08-24 via 079+jofotara Edge Function)*
 4. **[SEC]** Drop legacy plaintext `pin` column + stop syncing PIN verifiers to browsers. *(§2.2 F-05 — ✅ RESOLVED 2026-08-24 via 076+078)*
-5. **[SYNC]** Fix post-enqueue failure path in `completeCheckout` — a quota error after the sale is durably queued shows "save failed" with cart intact → cashier re-rings → **duplicate revenue**. *(§3.2 SYNC-F1)*
-6. **[SYNC]** Call `navigator.storage.persist()` — the IndexedDB queue is the only copy of offline sales and Chromium may legally evict it under disk pressure. *(§3.2 SYNC-F2)*
-7. **[MEM]** Prune `SYNCED` rows from `sync_queue` (never deleted today; grows per sale forever) and index/prune `istd_state` (full-table scan into memory every 15 s). *(§4.1 MEM-1/MEM-2)*
+5. **[SYNC]** Fix post-enqueue failure path in `completeCheckout` — a quota error after the sale is durably queued shows "save failed" with cart intact → cashier re-rings → **duplicate revenue**. *(§3.2 SYNC-F1 — ✅ RESOLVED 2026-08-24, Remediation Session 2)*
+6. **[SYNC]** Call `navigator.storage.persist()` — the IndexedDB queue is the only copy of offline sales and Chromium may legally evict it under disk pressure. *(§3.2 SYNC-F2 — ✅ RESOLVED 2026-08-24, Remediation Session 2)*
+7. **[MEM]** Prune `SYNCED` rows from `sync_queue` (never deleted today; grows per sale forever) and index/prune `istd_state` (full-table scan into memory every 15 s). *(§4.1 MEM-1/MEM-2 — ✅ RESOLVED 2026-08-24, Remediation Session 2)*
 8. **[PERF]** Wire up or port the dead virtualized grid — `QuickKeysGrid` (`@tanstack/react-virtual`) ships to zero screens while `CategoryDrawer` renders entire categories unvirtualized on checkout hardware. *(§6.2 PERF-1)*
 9. **[ELECTRON]** Remove `webSecurity:false`, add `will-navigate`/`openExternal` allowlists, sanitize `print_jobs.rendered_html`. *(§2.4)*
 10. **[SQL]** Wrap migrations in transactions; resolve the 062→070→072 schema churn; rename duplicate `071_*` files. *(§7)*
@@ -180,9 +181,13 @@ Static export ⇒ no middleware. Gate = `AdminGuard` reading persisted Zustand s
 *Scenario:* quota throw → cashier re-rings → second INVOICE_CREATED with fresh sync_id → both mirror → duplicated revenue + double stock deduction. Server cannot dedupe (different sync_ids by design).
 *Fix:* once the enqueue put resolves, outcome must be success-only — move everything after :1760 out of the try or wrap in swallow-errors guard.
 
+> **✅ Resolved (2026-08-24, Remediation Session 2):** `await enqueueSync(record)` is now the explicit durability point (`store/usePosStore.ts:1868`); shift-total derivation was moved to pure synchronous code (cannot throw), and the remaining post-enqueue bookkeeping (pending recount + `upsertPriceMemoryFromPayload`) runs in its own try/catch that logs `"Post-enqueue bookkeeping failed; invoice stays durably queued"` and still calls the success settlement (:1966–1986). A quota/closed-DB error can no longer flip a saved sale into "save failed". Regression-tested with simulated `QuotaExceededError` injections on both `sync_queue` and `price_memory` puts (`tests/regression/session2.data-lifecycle.ts` → exactly one invoice row, success outcome).
+
 **SYNC-F2 [CRITICAL] Queue evictable — no `navigator.storage.persist()` anywhere**
 Zero call sites repo-wide. Queue-as-archive design (see MEM-1) means Chromium eviction under disk pressure destroys unsynced PENDING sales — true money loss on long-running kiosks.
 *Fix:* request `persist()` at bootstrap; watch `storage.estimate()`; alert >90%.
+
+> **✅ Resolved (2026-08-24, Remediation Session 2):** new `lib/storageGuard.ts` — `requestPersistentStorage()` resolves `true/false/null` (null = Storage Manager unavailable/throws; never rejects), `initStorageGuard()` requests persist at boot and runs a 5-minute `estimate()` watchdog that fires `STORAGE_PRESSURE_EVENT` (`{usage, quota}`) at ≥90% quota with a falling-edge `null` event to clear it, plus `getStoragePressure()` for late-mounting shells. Wired: `components/pwa/StorageGuard.tsx` boots the guard app-wide, register login re-asserts the grant (`usePosStore.ts:2852`, grants are heuristic per-session), and `PosLayout` renders a live `مساحة التخزين · NN%` header chip + overflow-menu warning while over threshold.
 
 **SYNC-F3 [WARNING] Drain order is UUID-random, not FIFO**
 `getSyncsByStatus` returns PK (UUID) order within status (`idb.ts:511-516`); no sort before slicing (`syncService.ts:80-85`); the mirror engine documents it (`syncMirror.ts:1892-1894`). Returns can precede originals across batches; aggregates degrade (feeds F4/F5).
@@ -219,6 +224,12 @@ Badge surfaces counts (`PosLayout.tsx:547-575,692-708`) but no component offers 
 **MEM-1 [CRITICAL] `sync_queue` SYNCED rows are never deleted**
 `services/syncService.ts:108-111` → `markSyncCompleted` (`idb.ts:533-548`) flips `PENDING→SYNCED` and keeps the full payload (entire invoice incl. items) on disk forever. `deleteSyncs` deliberately unused; `clearSyncQueue` test-only. Compounding: `isInvoiceReturned()` (`idb.ts:658`) and `listInvoices()` (:684) run `db.getAll(STORE)` — deserializing **the whole sales history** on every return attempt and every open of PreviousInvoicesModal (`PreviousInvoicesModal.tsx:64`). Latency/heap grow linearly with business history.
 *Fix:* retention sweep after mirror-ack (keep N-day recent window for returns lookup); compact `invoices_index` store (sync_id/date/totals) for `getAll` replacements.
+
+> **✅ Resolved (2026-08-24, Remediation Session 2):** IDB **v10** (`lib/idb.ts`) adds composite indexes `invoice_return ["action_type","originalInvoiceId"]` and `tenant_invoices ["storeId","action_type"]`, with an atomic in-upgrade backfill promoting each return's `payload.originalInvoiceId` to a top-level key (enqueue keeps it in lockstep; upgrade failure aborts cleanly to v9). `pruneSyncedSyncQueue()` now deletes SYNCED rows acked &gt;14 days (`QUEUE_RETENTION_MS`), run hourly post-ack from the sync tick (`useBackgroundSync.runRetentionSweeps`, independently guarded per sweep). Return lookups are indexed: `isInvoiceReturned` = single-key probe, new batched `findReturnedOriginals()` replaces PreviousInvoicesModal's N×whole-queue scans, and `listInvoices` reads the tenant index instead of `getAll` + JS sort/filter. Accepted scope decision: local history window is 14 days (older receipts live server-side); S3 cursor iteration intentionally deferred.
+
+> **✅ Resolved (2026-08-24, Remediation Session 2):** v9's `store_status ["storeId","status"]` index is now used everywhere: `getIstdStates(storeId)` = four per-status range probes (no whole-store `getAll`), new `getIstdFailedStates()` powers the retry path, badge counts use `countFromIndex` on the 15 s tick. `pruneIstdStates()` deletes terminal-success SUBMITTED rows &gt;90 days (`ISTD_RETENTION_MS`) hourly from the same sweep point; FAILED/PENDING/SUBMITTING rows always survive so rejections stay visible until resolved.
+
+**MEM-3 note:** the `versionchange`/`blocked` deadlock risk was closed en passant while bumping to v10 — `blocked()` warns to reload stale tabs, `blocking()` drops the cached connection (`dbPromise = null`), and a rejected open clears its cache entry so callers retry instead of failing forever (`lib/idb.ts:544–564`).
 
 **MEM-2 [CRITICAL] `istd_state` grows per invoice; scanned into memory every 15 s**
 `setIstdState` writes one row/invoice; SUBMITTED rows never deleted; `countIstdPending/Failed` → `getIstdStates` → `db.getAll(ISTD_STORE)` (`idb.ts:1065-1067`) executed by `refreshIstdCounts()` on the 15 s background tick (`hooks/useBackgroundSync.ts`). ~50k rows/year × alloc+filter ×2 per tick per tab.
@@ -345,11 +356,11 @@ Electron IPC registration/updater/window lifecycle; preload bridge minimality; p
 | # | Action | Effort |
 |---|---|---|
 | 1 | ✅ DONE (2026-08-24) — 075 was already applied, so corrective `077` granted the RPCs to `anon, authenticated` (REG-R1) | done |
-| 2 | SYNC-F1 guard: success-only after `enqueueSync` resolves | 30 min |
-| 3 | `navigator.storage.persist()` + usage watchdog (SYNC-F2) | 1 h |
+| 2 | ✅ DONE (2026-08-24, Session 2) — success-only settlement after `enqueueSync` in `completeCheckout` (§3.2 SYNC-F1) | done |
+| 3 | ✅ DONE (2026-08-24, Session 2) — `lib/storageGuard.ts`: persist() at boot+login, 90%-quota watchdog, PosLayout pressure UI (§3.2 SYNC-F2) | done |
 | 4 | ✅ DONE (2026-08-24) — SQL stop-the-bleeding shipped as `076`+`078`+`079`: anon DML on `cashiers` revoked + RLS deny-all, `tenant_tax_settings` locked behind the `jofotara` Edge Function; staged claim-based RLS rollout remains P0/P1 for the rest of the schema | done |
 | 5 | ◐ HALF-DONE (2026-08-24) — `cashiers.pin` column dropped via `076`; `.env` secret rotation still pending | 0.25 day left |
-| 6 | MEM-1/MEM-2 retention sweeps (queue + istd_state) | 0.5 day |
+| 6 | ✅ DONE (2026-08-24, Session 2) — IDB v10 indexed return lookups + 14-day SYNCED sweep (MEM-1), `store_status` index reads + 90-day SUBMITTED prune (MEM-2), hourly post-ack sweeps in `useBackgroundSync` | done |
 
 ### P1 — next sprint
 Z-report integrity cluster (SYNC-F3/F4/F5) · poison requeue UI (F7) · Electron allowlists+CSP+rendered_html sanitization (E-1..3, F-08) · CSV formula guards (F-10) · global-error.tsx + AdminGuard catch (ERR-1/2) · print serialization (MEM-5) · shifts afterprint fix (MEM-7) · camera churn fix (MEM-8) · idb blocking/blocked (MEM-3) · QuickKeysGrid wiring / CategoryDrawer virtualization (PERF-1) · omnibar extraction (PERF-2) · normalized search indexes (PERF-3).

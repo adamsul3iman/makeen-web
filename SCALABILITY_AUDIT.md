@@ -6,6 +6,12 @@
 
 ---
 
+## 0. Remediation Update (2026-08-24 — Remediation Session 2)
+
+Two client-persistence findings are closed (no SQL migrations): **S5** via the new `lib/storageGuard.ts` (`navigator.storage.persist()` requested at boot and re-asserted at register login + a 5-minute `estimate()` watchdog that surfaces a ≥90%-quota warning chip in the POS shell), and **S4** via IndexedDB **v10** (`lib/idb.ts`): SYNCED queue rows are pruned past a 14-day window and terminal SUBMITTED `istd_state` rows past 90 days, hourly post-ack from the sync tick (`hooks/useBackgroundSync.ts`); return lookups (`isInvoiceReturned`, PreviousInvoicesModal void checks) moved from whole-queue scans to composite-index probes (`invoice_return`/`tenant_invoices`) with an atomic backfill of promoted `originalInvoiceId` keys. The checkout settle path was made success-only after the durable enqueue (double-billing guard, NIGHT_AUDIT §3.2 SYNC-F1). Guarded by `tests/regression/session2.data-lifecycle.ts` (32 checks green); full test battery identical to clean-tree baseline. **S3 remains open by decision** — cursor-based PENDING iteration is deferred; the 15 s badge tick still materializes PENDING payloads.
+
+---
+
 ## 1. Severity Summary
 
 | # | Finding | Impact at scale | Severity |
@@ -13,8 +19,8 @@
 | S1 | Whole catalog stored as **one IndexedDB row** + mirrored into **localStorage** (5 MB quota) | Silent loss of boot cache ≳6–8k SKUs; full-rewrite cost per change | 🔴 Critical |
 | S2 | Sync drain mirrors events **one-by-one over HTTPS** (~10–15 round trips/event) | 10k invoices ≈ **100k+ HTTP requests**, multi-hour drain | 🔴 Critical |
 | S3 | `getSyncsByStatus("PENDING")` deserializes the **entire queue** every round *and* every 15 s badge tick | Tens–hundreds of MB churn → GC jank/OOM on low-end terminals | 🔴 Critical |
-| S4 | SYNCED records are **never purged** from `sync_queue` | Unbounded IDB growth; queue doubles as invoice history | 🟠 High |
-| S5 | No `navigator.storage.persist()` anywhere | Browser may **evict `pos_local_db`** under disk pressure → silent loss of unsynced sales | 🔴 Critical |
+| S4 | SYNCED records are **never purged** from `sync_queue` | Unbounded IDB growth; queue doubles as invoice history | 🟠 High — ✅ RESOLVED 2026-08-24 (14-day retention sweep + indexed listings/return lookups, IDB v10) |
+| S5 | No `navigator.storage.persist()` anywhere | Browser may **evict `pos_local_db`** under disk pressure → silent loss of unsynced sales | 🔴 Critical — ✅ RESOLVED 2026-08-24 (`lib/storageGuard.ts` + POS pressure UI) |
 | S6 | Quarantine counter counts **transient** server errors (deadlock/timeout) toward the 8-attempt cap | Mass false-quarantine exactly when post-outage load peaks | 🟠 High |
 | S7 | `assessShiftLedgerCompleteness` fetches **unbounded** `sync_events` slice, filters `payload->>shiftId` in JS, no composite index | Z-report finalization scans grow forever; PostgREST `max-rows` truncation can corrupt the completeness decision | 🟠 High |
 | S8 | Missing SQL indexes: `sales_invoices(store_id, shift_id)`, `expenses(store_id, shift_id)`, `sync_events(store_id, action_type, client_created_at)`, `products(store_id, name)` | Slow reporting/Z-reports; O(n²)-ish catalog pagination | 🟠 High |
@@ -118,7 +124,7 @@ Every invoice payload is stored **three times**: locally until purge, in `sync_e
 | Priority | Action | Effect |
 |---|---|---|
 | **P0** | **Server-side bulk-mirror RPC**: `mirror_events(p_store_id, p_events jsonb)` processing a whole batch transactionally in PL/pgSQL (reuse existing handler logic). One round trip per 50–200 events instead of ~600. | 10k-invoice drain: from ~120k requests to ~50–200; hours → minutes |
-| P0 | `navigator.storage.persist()` + purge `SYNCED` rows older than N days (keep receipt-reprint window locally; older history reads go to `sales_invoices` via RPC). | Bounded IDB; removes S4 |
+| P0 | `navigator.storage.persist()` + purge `SYNCED` rows older than N days (keep receipt-reprint window locally; older history reads go to `sales_invoices` via RPC). | Bounded IDB; removes S4 — ✅ **DONE 2026-08-24 (Session 2)**: persist guard shipped; 14-day SYNCED sweep live. The "older history via RPC" read path is future work if operators need &gt;14-day on-device lookups. |
 | P1 | Iterate the queue with an **IDB cursor** over the status index (`openCursor(limit)`) instead of `getAllFromIndex`; write acks in one transaction. | Removes the 21× full-deserialization pattern (S3) |
 | P1 | Split quarantine aging: count only **deterministic** errors (validation, FK/P0002, 22023); reset counters on 40P01 deadlock / timeout / 5xx, with jittered backoff. | Prevents quarantine storms (S6) |
 | P1 | Composite index `(store_id, action_type, client_created_at)` on `sync_events`; replace the completeness probe with a SQL `EXISTS`-per-expected-event check (or maintain `shift_event_counts`); move `computeShiftLedgerSums` aggregation into SQL `SUM()`s. | Fixes S7; unblocks shift closes during drains |
@@ -180,10 +186,10 @@ CREATE INDEX CONCURRENTLY idx_products_store_name
 ## 7. Suggested Roadmap
 
 **Week 1 (no-schema-change quick wins)**
-1. `navigator.storage.persist()` + storage-health indicator.
+1. ✅ DONE (2026-08-24, Session 2) — `navigator.storage.persist()` + storage-health indicator (`lib/storageGuard.ts`, PosLayout chip).
 2. Size-guard the localStorage boot mirrors.
-3. Cursor-based PENDING iteration + transactional acks in `syncService`.
-4. Purge `SYNCED` rows past retention window.
+3. Cursor-based PENDING iteration + transactional acks in `syncService` *(still open — deferred from Session 2; see §0)*.
+4. ✅ DONE (2026-08-24, Session 2) — Purge `SYNCED` rows past retention window (14-day queue sweep + 90-day istd SUBMITTED prune).
 5. Add the five missing indexes above (CONCURRENTLY).
 
 **Weeks 2–6 (structural)**

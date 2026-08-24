@@ -254,6 +254,12 @@ export type SyncQueueRecord =
       cashierName?: string;
       /** Consecutive server-side processing failures (see syncService cap). */
       sync_attempts?: number;
+      /**
+       * MEM-1: return reference promoted from `payload.originalInvoiceId` at
+       * enqueue time so the v10 `invoice_return` index can answer
+       * double-return checks without deserializing payloads.
+       */
+      originalInvoiceId?: string;
     }
   | {
       sync_id: string;
@@ -410,7 +416,10 @@ export interface IstdState {
 const DB_NAME = "pos_local_db";
 // v9 (MEM-1/MEM-2): adds `synced_at` on sync_queue and `status`/`store_status`
 // on istd_state for retention sweeps + O(log n) badge counters.
-const DB_VERSION = 9;
+// v10 (MEM-1): promotes `originalInvoiceId` onto queue records and adds the
+// `invoice_return`/`tenant_invoices` composite indexes so double-return
+// checks and invoice listings stop scanning/deserializing the whole store.
+const DB_VERSION = 10;
 const STORE = "sync_queue";
 const POISON_STORE = "sync_poison";
 const CATALOG_STORE = "catalog_cache";
@@ -499,6 +508,38 @@ function getDb(): Promise<IDBPDatabase> {
           istd.createIndex("status", "status");
           istd.createIndex("store_status", ["storeId", "status"]);
         }
+        if (oldVersion < 10) {
+          // MEM-1: composite indexes for double-return checks and per-tenant
+          // invoice listings. IndexedDB omits records missing any key part
+          // from a composite index, so legacy/unbound rows simply stay out —
+          // no data is rewritten by index creation itself.
+          const queue = transaction.objectStore(STORE);
+          queue.createIndex("invoice_return", ["action_type", "originalInvoiceId"]);
+          queue.createIndex("tenant_invoices", ["storeId", "action_type"]);
+
+          // Backfill the promoted return reference for rows written by
+          // pre-v10 builds. Each write is a same-record clone plus one
+          // derived field. The whole upgrade runs inside the atomic version
+          // transaction: if anything fails here the database stays at its
+          // previous version with every row intact, and getDb() clears its
+          // cache so the next call retries the upgrade from scratch.
+          void (async () => {
+            let cursor = await queue.openCursor();
+            while (cursor) {
+              const record = cursor.value as SyncQueueRecord & {
+                originalInvoiceId?: string;
+              };
+              const reference =
+                record.action_type === "INVOICE_CREATED"
+                  ? record.payload.originalInvoiceId
+                  : undefined;
+              if (reference && !record.originalInvoiceId) {
+                await cursor.update({ ...record, originalInvoiceId: reference });
+              }
+              cursor = await cursor.continue();
+            }
+          })();
+        }
       },
       blocked() {
         // Another tab holds an old-version connection open. Without this
@@ -513,7 +554,14 @@ function getDb(): Promise<IDBPDatabase> {
         // handle for the lifetime of the document (MEM-3).
         dbPromise = null;
       },
-    });
+    })
+      // Never cache a rejected open (e.g. an aborted upgrade): clear the
+      // cached handle so the next caller retries from scratch instead of
+      // every call failing forever.
+      .catch((error: unknown) => {
+        dbPromise = null;
+        throw error;
+      });
   }
   return dbPromise;
 }
@@ -522,7 +570,18 @@ function getDb(): Promise<IDBPDatabase> {
 export async function enqueueSync(record: SyncQueueRecord): Promise<void> {
   const db = await getDb();
   const tenantId = getTenantStoreId();
-  await db.put(STORE, tenantId ? { ...record, storeId: tenantId } : record);
+  const stamped = tenantId ? { ...record, storeId: tenantId } : record;
+  // MEM-1: promote the return reference to a top-level key so the v10
+  // `invoice_return` composite index can resolve double-return checks via a
+  // key lookup instead of a whole-queue deserialization.
+  const originalInvoiceId =
+    stamped.action_type === "INVOICE_CREATED"
+      ? stamped.payload.originalInvoiceId
+      : undefined;
+  await db.put(
+    STORE,
+    originalInvoiceId ? { ...stamped, originalInvoiceId } : stamped,
+  );
 }
 
 /**
@@ -692,10 +751,17 @@ export async function patchSyncRecordPayload(
   const db = await getDb();
   const record = await db.get(STORE, syncId);
   if (!record) return;
-  await db.put(STORE, {
+  const next: SyncQueueRecord = {
     ...record,
     payload: { ...(record.payload as Record<string, unknown>), ...patch },
-  });
+  } as SyncQueueRecord;
+  // Keep the promoted index key in lockstep if a patch ever carries the
+  // return reference (defensive: current callers only stamp ISTD fields).
+  if (typeof patch.originalInvoiceId === "string") {
+    (next as { originalInvoiceId?: string }).originalInvoiceId =
+      patch.originalInvoiceId;
+  }
+  await db.put(STORE, next);
 }
 
 /**
@@ -730,20 +796,44 @@ export async function findInvoiceById(
 }
 
 /**
+ * MEM-1: which of the given invoices already have a queued return document?
+ * One readonly transaction of composite-index key lookups (`invoice_return`)
+ * — no payload is ever deserialized. Semantics are identical to the old
+ * full-queue scan: any queued INVOICE_CREATED record (any tenant, PENDING or
+ * SYNCED) referencing an id through its promoted `originalInvoiceId` marks
+ * that id as returned.
+ */
+export async function findReturnedOriginals(
+  originalSyncIds: string[],
+): Promise<Set<string>> {
+  const returned = new Set<string>();
+  if (originalSyncIds.length === 0) return returned;
+  const db = await getDb();
+  const tx = db.transaction(STORE, "readonly");
+  const invoiceReturn = tx.store.index("invoice_return");
+  await Promise.all(
+    originalSyncIds.map(async (originalSyncId) => {
+      const match = await invoiceReturn.getKey([
+        "INVOICE_CREATED",
+        originalSyncId,
+      ]);
+      if (match !== undefined) returned.add(originalSyncId);
+    }),
+  );
+  await tx.done;
+  return returned;
+}
+
+/**
  * True when the invoice identified by `originalSyncId` has already been
  * returned: any queued INVOICE_CREATED record that references it as its
  * `originalInvoiceId` counts as a processed return (double-return guard).
+ * Indexed key lookup since DB v10 — O(log n), never a queue scan.
  */
 export async function isInvoiceReturned(
   originalSyncId: string,
 ): Promise<boolean> {
-  const db = await getDb();
-  const records = await db.getAll(STORE);
-  return records.some(
-    (r) =>
-      r.action_type === "INVOICE_CREATED" &&
-      r.payload?.originalInvoiceId === originalSyncId,
-  );
+  return (await findReturnedOriginals([originalSyncId])).size > 0;
 }
 
 /** Wipe the queue (used by sync services after server reconciliation). */
@@ -755,24 +845,47 @@ export async function clearSyncQueue(): Promise<void> {
 /** Type guard narrowing a queue record to an INVOICE_CREATED document. */
 function isInvoiceRecord(
   r: SyncQueueRecord,
-): r is Extract<SyncQueueRecord, { action_type: "INVOICE_CREATED" }> {
+): r is InvoiceQueueRecord {
   return r.action_type === "INVOICE_CREATED";
 }
 
-/** All settled INVOICE_CREATED documents for one tenant, newest first. */
+type InvoiceQueueRecord = Extract<
+  SyncQueueRecord,
+  { action_type: "INVOICE_CREATED" }
+>;
+
+function invoiceNewestFirst(a: InvoiceQueueRecord, b: InvoiceQueueRecord): number {
+  return (b.payload?.completed_at ?? b.created_at).localeCompare(
+    a.payload?.completed_at ?? a.created_at,
+  );
+}
+
+/**
+ * All settled INVOICE_CREATED documents for one tenant, newest first.
+ * MEM-1: served from the v10 `tenant_invoices` composite index, so shift/
+ * expense/print events and other tenants' payloads are never deserialized —
+ * callers only pay for the tenant's own invoice rows (bounded by the SYNCED
+ * retention window).
+ */
 export async function listInvoices(
   storeId?: string | null,
 ): Promise<SyncQueueRecord[]> {
   const db = await getDb();
-  const records = (await db.getAll(STORE)) as SyncQueueRecord[];
-  return records
-    .filter(isInvoiceRecord)
-    .filter((r) => r.storeId === storeId)
-    .sort((a, b) =>
-      (b.payload?.completed_at ?? b.created_at).localeCompare(
-        a.payload?.completed_at ?? a.created_at,
-      ),
-    );
+  if (!storeId) {
+    // No tenant bound (fixtures/legacy calls): keep the historical
+    // unbound-row semantics; production callers always pass an active id.
+    const records = (await db.getAll(STORE)) as SyncQueueRecord[];
+    return records
+      .filter(isInvoiceRecord)
+      .filter((r) => r.storeId === storeId)
+      .sort(invoiceNewestFirst);
+  }
+  const tx = db.transaction(STORE, "readonly");
+  const records = (await tx.store
+    .index("tenant_invoices")
+    .getAll(IDBKeyRange.only([storeId, "INVOICE_CREATED"]))) as InvoiceQueueRecord[];
+  await tx.done;
+  return records.sort(invoiceNewestFirst);
 }
 
 function catalogKeyFor(storeId?: string | null): string {
@@ -1147,8 +1260,36 @@ export async function getIstdState(syncId: string): Promise<IstdState | undefine
 /** All ISTD state rows for one tenant. */
 export async function getIstdStates(storeId?: string | null): Promise<IstdState[]> {
   const db = await getDb();
-  const rows = (await db.getAll(ISTD_STORE)) as IstdState[];
-  return storeId ? rows.filter((r) => r.storeId === storeId) : rows;
+  if (!storeId) {
+    // No tenant bound (fixtures/legacy calls): whole-store read, as before.
+    return (await db.getAll(ISTD_STORE)) as IstdState[];
+  }
+  // MEM-2: indexed per-status reads instead of deserializing every row on
+  // every call. The status enum is closed, so four range probes over the
+  // `store_status` index cover all of the tenant's rows.
+  const [pending, submitting, submitted, failed] = await Promise.all([
+    db.getAllFromIndex(ISTD_STORE, "store_status", IDBKeyRange.only([storeId, "PENDING"])),
+    db.getAllFromIndex(ISTD_STORE, "store_status", IDBKeyRange.only([storeId, "SUBMITTING"])),
+    db.getAllFromIndex(ISTD_STORE, "store_status", IDBKeyRange.only([storeId, "SUBMITTED"])),
+    db.getAllFromIndex(ISTD_STORE, "store_status", IDBKeyRange.only([storeId, "FAILED"])),
+  ]);
+  return [...pending, ...submitting, ...submitted, ...failed] as IstdState[];
+}
+
+/**
+ * MEM-2: FAILED ISTD rows for one tenant via the `store_status` index —
+ * O(failed) reads with no scan. The retry path uses this so a large
+ * SUBMITTED history is never materialized just to find the rejections.
+ */
+export async function getIstdFailedStates(
+  storeId: string,
+): Promise<IstdState[]> {
+  const db = await getDb();
+  return (await db.getAllFromIndex(
+    ISTD_STORE,
+    "store_status",
+    IDBKeyRange.only([storeId, "FAILED"]),
+  )) as IstdState[];
 }
 
 /**

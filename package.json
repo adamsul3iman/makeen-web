@@ -21,6 +21,7 @@
     "verify:hardware": "tsx tests/hardware.workflows.ts",
     "verify:stress": "tsx tests/stress.stress.ts",
     "verify:store": "tsx tests/store.workflows.ts",
+    "verify:data-lifecycle": "tsx tests/regression/session2.data-lifecycle.ts",
     "verify:receiving": "tsx tests/receiving.workflows.ts",
     "verify:customer-memory": "tsx tests/customer-memory.workflows.ts",
     "verify:shortages": "tsx tests/shortages.workflows.ts",

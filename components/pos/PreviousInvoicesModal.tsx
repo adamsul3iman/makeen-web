@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { Ban, ReceiptText, RefreshCw, X } from "lucide-react";
 import { usePosStore } from "@/store/usePosStore";
-import { isInvoiceReturned, listInvoices, type SyncQueueRecord } from "@/lib/idb";
+import { findReturnedOriginals, listInvoices, type SyncQueueRecord } from "@/lib/idb";
 import { getTenantStoreId } from "@/lib/tenantClient";
 import { formatMoney } from "@/lib/format";
 import { useModalEscape } from "@/hooks/useModalEscape";
@@ -62,14 +62,21 @@ export default function PreviousInvoicesModal() {
 
   const loadRows = async (): Promise<InvoiceRow[]> => {
     const records = await listInvoices(getTenantStoreId());
-    return Promise.all(
-      records.map(async (r) => {
-        const base = toRow(r);
-        if (base.isReversal) return base;
-        base.voided = await isInvoiceReturned(r.sync_id).catch(() => false);
-        return base;
-      }),
-    );
+    // MEM-1: one readonly transaction resolves every void status, replacing
+    // the per-row IndexedDB lookups (a whole-queue scan per row pre-v10).
+    let returnedIds = new Set<string>();
+    try {
+      returnedIds = await findReturnedOriginals(records.map((r) => r.sync_id));
+    } catch {
+      // Same degradation as the old per-row catch: surface the list with
+      // "not returned" rather than blocking it.
+    }
+    return records.map((r) => {
+      const base = toRow(r);
+      if (base.isReversal) return base;
+      base.voided = returnedIds.has(r.sync_id);
+      return base;
+    });
   };
 
   const refresh = async () => {
