@@ -6,6 +6,7 @@
 | **Scope** | 221 TS/TSX files (~50,300 LOC), 76 SQL migrations, Electron shell (`main.js`, `preload.cjs`), print-agent service |
 | **Working tree note** | 10 pre-existing modified paths from the current fix cycle (sync mirror, silent-print, sales-ledger hardening). Audit ran against that exact tree; nothing was changed by this audit. |
 | **Method** | 4 parallel deep-analysis passes (memory/lifecycle, offline-sync integrity, render performance, security+SQL) + targeted manual verification of every Critical claim against source. All file:line references verified in the working tree. |
+| **Remediation update** | 2026-08-24 — *Remediation Session 1* closed REG-R1 (§1) and F-01/F-04/F-05 (§2.2) via migrations `076`–`079` + the `jofotara` Edge Function (committed through `8cc5fcc`). Closed findings carry inline **Resolved** notes. |
 
 ---
 
@@ -24,9 +25,9 @@ The app's stated security model ("all data protection is delegated to Supabase R
 ### Top 10 actions, ranked (full detail in sections below)
 
 1. **[REGRESSION]** Migration `075` grants Sales-Ledger RPCs to `authenticated` only — but **no Supabase Auth sign-in exists anywhere in the codebase** (verified by grep). Every client is permanently `anon` → the admin Sales Ledger will get permission-denied at runtime. One-line fix before applying 075. *(§1)*
-2. **[SEC]** Revoke anon DML on `cashiers` — one `UPDATE` = full tenant takeover via self-minted admin bcrypt hash. *(§2.2 F-01)*
-3. **[SEC]** Lock `tenant_tax_settings` (`USING(true)` policies expose every tenant's `istd_client_secret`). *(§2.2 F-04)*
-4. **[SEC]** Drop legacy plaintext `pin` column + stop syncing PIN verifiers to browsers. *(§2.2 F-05)*
+2. **[SEC]** Revoke anon DML on `cashiers` — one `UPDATE` = full tenant takeover via self-minted admin bcrypt hash. *(§2.2 F-01 — ✅ RESOLVED 2026-08-24 via 076+078)*
+3. **[SEC]** Lock `tenant_tax_settings` (`USING(true)` policies expose every tenant's `istd_client_secret`). *(§2.2 F-04 — ✅ RESOLVED 2026-08-24 via 079+jofotara Edge Function)*
+4. **[SEC]** Drop legacy plaintext `pin` column + stop syncing PIN verifiers to browsers. *(§2.2 F-05 — ✅ RESOLVED 2026-08-24 via 076+078)*
 5. **[SYNC]** Fix post-enqueue failure path in `completeCheckout` — a quota error after the sale is durably queued shows "save failed" with cart intact → cashier re-rings → **duplicate revenue**. *(§3.2 SYNC-F1)*
 6. **[SYNC]** Call `navigator.storage.persist()` — the IndexedDB queue is the only copy of offline sales and Chromium may legally evict it under disk pressure. *(§3.2 SYNC-F2)*
 7. **[MEM]** Prune `SYNCED` rows from `sync_queue` (never deleted today; grows per sale forever) and index/prune `istd_state` (full-table scan into memory every 15 s). *(§4.1 MEM-1/MEM-2)*
@@ -52,6 +53,8 @@ The app's stated security model ("all data protection is delegated to Supabase R
 >   ```
 >   This restores the pre-041 posture exactly (functions take client-supplied `p_store_id`; see §2.3 for why that trust model itself needs replacing).
 > - **Fix (strategic):** adopt real Supabase Auth sessions (even anonymous-per-device identities) so `authenticated` means something, then add membership assertions inside the functions (§2.2 F-06).
+>
+> **✅ RESOLVED (2026-08-24, Remediation Session 1):** applied migrations are immutable, so corrective migration **`077_fix_sales_ledger_anon_grants.sql`** re-granted EXECUTE on all three RPCs to `anon, authenticated`. The Sales Ledger is functional again for every client. The strategic fix above remains open (§9 P2).
 
 ---
 
@@ -99,6 +102,8 @@ Legend: RLS ✅ enabled / ⚠️ on-but-open (`USING(true)`) / ❌ off.
 *Attack:* holder of the public anon key runs `UPDATE cashiers SET role='admin', password_hash=<self-made bcrypt> WHERE id=...` → logs into the dashboard as the owner.
 *Fix:* revoke anon/authenticated DML on `cashiers`; move staff management behind SECURITY DEFINER RPCs that verify admin credential internally; BEFORE trigger blocking `role`/hash changes outside definer context.
 
+**✅ Resolved (2026-08-24, Remediation Session 1):** `078_staff_security_rpc.sql` — all role grants revoked on `cashiers`; RLS enabled with zero policies (deny-all for client roles). Staff management moved to SECURITY DEFINER RPCs (`admin_create/update/delete_cashier`, `admin_update_owner_email`) requiring per-call admin email+password proof, throttled server-side via `staff_pin_throttle` (5 fails → 15 min lock). The BEFORE-trigger idea became unnecessary: no client role can touch the table at all.
+
 **F-02 [CRITICAL] No RLS on ~30 business tables; broad anon DML**
 Umbrella finding — matrix above. Root cause: the serverless migration rebuilt transport but never rebuilt the trust model (033's blanket lockdown fully undone by 071×2/072/074).
 *Fix:* enable RLS everywhere with `store_id = auth_store_id()` claim-based policies backed by real sessions (§9 Phase B).
@@ -112,10 +117,14 @@ Umbrella finding — matrix above. Root cause: the serverless migration rebuilt 
 *Attack:* dump/redirect every tenant's JoFotara credentials.
 *Fix:* per-tenant scoped policies; serve secrets masked through definer RPC only.
 
+**✅ Resolved (2026-08-24, Remediation Session 1):** `079_lock_tenant_tax_settings.sql` dropped the three `USING(true)` policies and revoked all grants from `anon`/`authenticated` (RLS deny-all re-asserted; **verified post-state:** anon SELECT = `false`, policy count = `0`). Secrets moved into the deployed `jofotara` Edge Function: `config_get` returns masked status only, `config_save` requires admin email+password proof, `invoice_submit` reads credentials server-side — the secret never leaves the function.
+
 **F-05 [CRITICAL] Staff PIN material synced to browsers; plaintext column still alive**
 `lib/clientCatalog.ts:142` selects `pin` alongside hashes; fallback `sha256(c.pin + pinSalt)` at :98; salt deterministic from public store id (`pinSaltFor` :92-94, predates 016's intent); combined with anon SELECT on `cashiers`.
 *Attack:* download roster → instant crack of 10k PIN space → register unlock/drawer/debt impersonation.
 *Fix:* `ALTER TABLE cashiers DROP COLUMN pin` after verifying `pin_hash` coverage; random salts; longer-term verify PINs via definer RPC instead of shipping verifiers.
+
+**✅ Resolved (2026-08-24, Remediation Session 1):** `076_stop_the_bleeding_lockdown.sql` backfilled `pin_hash` for every legacy row (byte-exact with the 016 formula, logins unaffected) and dropped the plaintext `pin` column. `078` then stopped verifier syncing: `verify_staff_pin` returns only safe columns, plus the matched cashier's own verifier on a successful check (active-shift offline re-unlock); the full roster/hash set is no longer readable by any client role (`lib/clientCatalog.ts` rewired accordingly). Residual (P2): sha256 verifiers remain brute-forceable offline — migrate to bcrypt/PBKDF2 when the offline-unlock strategy allows.
 
 **F-06 [WARNING] SECURITY DEFINER RPCs accept arbitrary `p_store_id`**
 `list_sales_ledger` family (025:85), `apply_customer_ledger_event` (073), `record_inventory_movement` (024), `claim_print_job` (068/072), `approve_shift_variance`/`review_risk_event`/`resolve_stale_shift` (re-granted anon in 072:1380-85 despite 046's revocation), `merge_into_variant_parent` (072:1390). None assert caller membership; client-side re-auth (`shiftsClient.ts:534-550`) binds to nothing server-side.
@@ -335,11 +344,11 @@ Electron IPC registration/updater/window lifecycle; preload bridge minimality; p
 ### P0 — this week (money & takeover)
 | # | Action | Effort |
 |---|---|---|
-| 1 | Edit unapplied 075: grant RPCs to `anon, authenticated` (REG-R1) | 10 min |
+| 1 | ✅ DONE (2026-08-24) — 075 was already applied, so corrective `077` granted the RPCs to `anon, authenticated` (REG-R1) | done |
 | 2 | SYNC-F1 guard: success-only after `enqueueSync` resolves | 30 min |
 | 3 | `navigator.storage.persist()` + usage watchdog (SYNC-F2) | 1 h |
-| 4 | SQL stop-the-bleeding: REVOKE anon DML on `cashiers`, lock `tenant_tax_settings` policies, plan staged RLS rollout (deliberate schedule — breaks offline-write until claims exist) | 0.5 day |
-| 5 | Drop `cashiers.pin` column + rotate `.env` secrets | 0.5 day |
+| 4 | ✅ DONE (2026-08-24) — SQL stop-the-bleeding shipped as `076`+`078`+`079`: anon DML on `cashiers` revoked + RLS deny-all, `tenant_tax_settings` locked behind the `jofotara` Edge Function; staged claim-based RLS rollout remains P0/P1 for the rest of the schema | done |
+| 5 | ◐ HALF-DONE (2026-08-24) — `cashiers.pin` column dropped via `076`; `.env` secret rotation still pending | 0.25 day left |
 | 6 | MEM-1/MEM-2 retention sweeps (queue + istd_state) | 0.5 day |
 
 ### P1 — next sprint

@@ -4,6 +4,8 @@
 **Scope:** Financial math precision, checkout/idempotency double-billing safety, Supabase RLS/grant posture (`db/migrations/0*.sql`), client state-tampering surface (`store/`, `lib/idb.ts`, `services/syncService.ts`).
 **Method:** Static source review only (read-only; no runtime or penetration testing). Line numbers refer to the current working tree, which contains uncommitted modifications (see `git status`).
 
+**Remediation update (2026-08-24):** C1/C5 and NIGHT-AUDIT F-01/F-04/F-05/REG-R1 were fixed in *Remediation Session 1* (migrations `076`–`079` + the `jofotara` Edge Function; work committed through `8cc5fcc`). Closed findings carry an inline **Resolution** note, and the full closure log sits in "Remediation Session 1 — closure log" above the Appendix.
+
 ---
 
 ## Architecture context (drives every finding below)
@@ -38,6 +40,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE cashiers TO anon, authenticated;
 This is a complete authentication-plane compromise, cross-tenant, with zero credentials.
 
 **Fix:** Revoke all anon DML on `cashiers`. PIN/password verification must happen inside SECURITY DEFINER RPCs that return only safe columns (`name`, `role_id`, capabilities). Enable RLS with policies bound to an authenticated store membership.
+
+**Resolution (Remediation Session 1, 2026-08-24): CLOSED.** Migration `078_staff_security_rpc.sql` revoked all privileges on `cashiers` from `anon`/`authenticated` and enabled RLS with **zero policies** (deny-all for client roles; service_role/definer unaffected). Staff CRUD and owner-email changes moved into SECURITY DEFINER RPCs (`admin_create/update/delete_cashier`, `admin_update_owner_email`) that re-prove the acting admin's email+password per call and throttle failures server-side (5 fails → 15 min lock via `staff_pin_throttle`). The takeover chain — self-minted `role='admin'` via direct DML — is dead: no client role can read or write the table.
 
 ### C2. No tenant isolation on the entire financial ledger — cross-store read/write for anyone
 `db/migrations/074_client_sync_mirror_grants.sql:14–31`, `071_grant_anon_browser_access.sql:19–31`, `074:47–50`
@@ -95,6 +99,8 @@ Attack/failure scenarios: two registers return the same invoice before sync; a c
 - Legacy plaintext: `pin` was made nullable in 016:38 and nulled for owners in `017_owner_cashier_separation.sql:97`, but legacy staff rows may still carry the old plaintext `pin` column value, equally readable by anonymous SELECT until verified otherwise.
 
 **Fix:** Move PIN verification into a SECURITY DEFINER RPC using `crypt(p_pin, pin_hash)`/bcrypt or PBKDF2 ≥ 100k iterations; revoke anon SELECT on `cashiers`; force PIN rotation on first login; drop the legacy `pin` column after auditing for residual plaintext.
+
+**Resolution (Remediation Session 1, 2026-08-24): CLOSED** (with one P2 residual). Migration `076_stop_the_bleeding_lockdown.sql` backfilled `pin_hash` for every legacy row (byte-exact with the 016 formula, so logins kept working) and **dropped the plaintext `pin` column**. `078` then eliminated anonymous roster/hash access: `verify_staff_pin` returns only safe columns plus the matched cashier's own verifier (issued post-success over TLS, so the active shift can re-unlock offline) — hash material is no longer downloadable in bulk. Residual (roadmap P2): the verifier is still `sha256(pin‖salt)`; migrate to bcrypt/PBKDF2 when the offline-unlock strategy allows, and force rotation of weak PINs.
 
 ---
 
@@ -185,9 +191,9 @@ Retries with the same `sync_id` are handled well (PK conflict → treat as mirro
 ## Prioritized remediation roadmap
 
 **P0 — stop the bleeding (database-only changes, no app rewrite)**
-1. `REVOKE ALL ON cashiers FROM anon` (C1) + enable RLS on `cashiers`.
+1. ✅ **DONE (078):** `REVOKE ALL ON cashiers FROM anon` (C1) + enable RLS on `cashiers` — RLS enabled with zero policies (deny-all).
 2. Make the return-guard index UNIQUE (C4) and map its 23505 in `syncMirror.ts`.
-3. Move PIN + password verification into guarded SECURITY DEFINER RPCs; strip hash/salt columns from grants (C5, part of C1).
+3. ✅ **DONE (076+078):** Move PIN + password verification into guarded SECURITY DEFINER RPCs; strip hash/salt columns from grants (C5, part of C1).
 4. Add caller→store authorization assertions to every anon-callable RPC; namespace idempotency keys by caller (C3).
 5. Replace `USING(true)` on `cash_movements` with a real policy or fold movements into an RPC (C2 minimal containment).
 
@@ -200,7 +206,24 @@ Retries with the same `sync_id` are handled well (PK conflict → treat as mirro
 **P2 — hygiene**
 10. Business-fingerprint dedupe key on `sales_invoices` (H5).
 11. Turn `ignoreBuildErrors` off; make column probes fail closed (W2, W5).
-12. Retention policy for `SYNCED` queue rows (W4); confirm delivery-fee VAT treatment (W3); initialize `isCompleting` from localStorage on mount (W1); audit and null legacy plaintext `pin` values, then drop the column (C5 residue).
+12. Retention policy for `SYNCED` queue rows (W4); confirm delivery-fee VAT treatment (W3); initialize `isCompleting` from localStorage on mount (W1); audit and null legacy plaintext `pin` values, then drop the column (C5 residue) — ✅ plaintext-`pin` portion DONE via 076 (backfilled, then column dropped).
+
+---
+
+## Remediation Session 1 — closure log (2026-08-24)
+
+All four migrations were applied to production and the post-states below were confirmed by verification queries. Work is committed through `8cc5fcc`.
+
+| Finding | Resolution | Post-state |
+|---|---|---|
+| REG-R1 (NIGHT_AUDIT §1) — sales-ledger RPCs dead-on-arrival after 075 | `077_fix_sales_ledger_anon_grants.sql`: EXECUTE on `list_sales_ledger` / `sales_ledger_summary` / `sales_ledger_quality` restored to `anon, authenticated` (applied migrations stay immutable; 075 left untouched in history) | Sales Ledger renders for all clients again; strategic fix (real auth sessions + membership assertions) remains a P2 item |
+| C1 / F-01 — anonymous `cashiers` takeover chain | `078_staff_security_rpc.sql`: all grants revoked from `anon`/`authenticated`; RLS enabled with zero policies (deny-all); staff CRUD + owner-email change behind per-call admin-proof SECURITY DEFINER RPCs with server-side throttling (`staff_pin_throttle`, 5 fails → 15 min); PIN login via `verify_staff_pin` returning safe columns only | No client role can read or write `cashiers`; roster/hash material no longer downloadable |
+| F-04 — tenant tax secrets exposed via `USING(true)` policies | `079_lock_tenant_tax_settings.sql`: the three open policies dropped, all grants revoked from `anon`/`authenticated`, RLS deny-all re-asserted. Secrets moved into the deployed `jofotara` Edge Function (`config_get` masked status only / `config_save` requires admin proof / `invoice_submit` reads credentials server-side) | **Verified:** `anon` SELECT privilege on `tenant_tax_settings` = `false`; policy count = `0`. The secret never leaves the function |
+| F-05 / C5 residue — plaintext `pin` + synced hash material | `076_stop_the_bleeding_lockdown.sql`: legacy plaintext backfilled into `pin_hash` (byte-exact 016 formula), then plaintext column dropped; `078` removed bulk hash exposure | `cashiers.pin` no longer exists; only the matched cashier's own verifier is ever returned |
+
+Client rewiring shipped with the same commit family: staff CRUD → RPCs (`lib/staffClient.ts`), settings/ISTD → edge function (`lib/settingsClient.ts`, `lib/istdIntegration.ts`, `lib/clientIstd.ts`), active-cashier offline cache (`lib/cashierSessionCache.ts`).
+
+Still open from this report: C2/C3/C4 architectural items, H1–H6, W1–W8 — see the roadmap above.
 
 ---
 
