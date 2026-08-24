@@ -5,6 +5,8 @@ import { usePosStore } from "@/store/usePosStore";
 import { processSyncQueue } from "@/services/syncService";
 import { getSyncsByStatus, isQueueRecordForTenant, pruneIstdStates, pruneSyncedSyncQueue } from "@/lib/idb";
 import { getTenantStoreId } from "@/lib/tenantClient";
+import { hasCatalogDrifted } from "@/lib/catalogInvalidation";
+import { useOrdersStore } from "@/store/useOrdersStore";
 
 const SYNC_INTERVAL_MS = 15_000;
 
@@ -47,6 +49,23 @@ async function refreshPendingCount(): Promise<void> {
   await usePosStore.getState().refreshIstdCounts();
 }
 
+/**
+ * Guaranteed catalog-convergence floor: one cheap stamp read per tick.
+ * Realtime/BroadcastChannel usually win the race; this catches devices
+ * whose socket dropped, tables without realtime membership, and deletes.
+ */
+async function pollCatalogDrift(): Promise<void> {
+  const storeId = usePosStore.getState().currentStore?.id ?? getTenantStoreId();
+  if (!storeId) return;
+  try {
+    if (await hasCatalogDrifted(storeId)) {
+      await usePosStore.getState().hydrateCatalog();
+    }
+  } catch {
+    /* offline or table not migrated yet — cache stays authoritative */
+  }
+}
+
 async function syncIfOnline(): Promise<void> {
   if (!usePosStore.getState().isOnline) return;
   await processSyncQueue();
@@ -54,6 +73,28 @@ async function syncIfOnline(): Promise<void> {
   // Post-ack is the ideal sweep point: anything just marked SYNCED ages from
   // now, and a drained queue makes room before the next burst.
   await runRetentionSweeps();
+}
+
+/**
+ * Manual sync trigger (Phase 3 "ليونة" quick-actions drawer). Runs the same
+ * pipeline as a background tick on demand: drain the queue, refresh badges,
+ * sweep retention, poll catalog drift, and retry parked-order mirrors.
+ * Never throws — the drawer renders the outcome.
+ */
+export async function runManualSync(): Promise<{
+  ok: boolean;
+  pending: number;
+}> {
+  try {
+    await processSyncQueue();
+    await refreshPendingCount();
+    await runRetentionSweeps();
+    await pollCatalogDrift();
+    void useOrdersStore.getState().retryPending();
+    return { ok: true, pending: usePosStore.getState().pendingSyncCount };
+  } catch {
+    return { ok: false, pending: usePosStore.getState().pendingSyncCount };
+  }
 }
 
 /**
@@ -70,17 +111,22 @@ export function useBackgroundSync(): void {
     const handleOnline = () => {
       usePosStore.getState().setOnline(true);
       void syncIfOnline();
+      void pollCatalogDrift();
     };
     const handleOffline = () => {
       usePosStore.getState().setOnline(false);
     };
     const handleVisibility = () => {
-      if (document.visibilityState === "visible") void syncIfOnline();
+      if (document.visibilityState === "visible") {
+        void syncIfOnline();
+        void pollCatalogDrift();
+      }
     };
 
     const interval = setInterval(() => {
       void refreshPendingCount();
       void syncIfOnline();
+      void pollCatalogDrift();
     }, SYNC_INTERVAL_MS);
 
     window.addEventListener("online", handleOnline);

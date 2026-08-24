@@ -1,9 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeftRight, Banknote, Check, CreditCard, Send, Truck, User } from "lucide-react";
+import { ArrowLeftRight, Banknote, Building2, Check, CreditCard, Send, Truck, User } from "lucide-react";
 import { ModalShell } from "@/components/ui/ModalShell";
 import { usePosStore } from "@/store/usePosStore";
+import { useB2BStore } from "@/store/useB2BStore";
 import { formatMoney } from "@/lib/format";
 import { isValidMoneyInput, parseMoneyInput } from "@/lib/moneyInput";
 import type { PaymentMethod } from "@/types/pos.types";
@@ -60,6 +61,34 @@ export default function CheckoutModal() {
   const amountRef = useRef<HTMLInputElement>(null);
   const lastTotalRef = useRef(totals.total);
   const { customers, loading: customersLoading, createCustomer } = useCustomerOptions(isOpen);
+
+  // Phase 4 (B2B application): stable selectors only — the accounts array is
+  // a stable reference from the B2B store and the scalar fields are
+  // primitives, so none of these allocate during render.
+  const b2bAccounts = useB2BStore((s) => s.accounts);
+  const b2bHydrated = useB2BStore((s) => s.hydrated);
+  const hydrateB2B = useB2BStore((s) => s.hydrate);
+  const activeB2BAccountId = usePosStore((s) => s.activeB2BAccountId);
+  const b2bMarkupPct = usePosStore((s) => s.b2bMarkupPct);
+  const setActiveB2BAccount = usePosStore((s) => s.setActiveB2BAccount);
+
+  // Sellable B2B accounts (stable derived list; recomputed only when the
+  // underlying array identity changes).
+  const b2bOptions = useMemo(
+    () =>
+      b2bAccounts
+        .filter((a) => a.isActive)
+        .map((a) => ({ id: a.id, name: a.name, description: a.accountType === "WHOLESALE" ? "جملة" : "شريحة توصيل" })),
+    [b2bAccounts],
+  );
+  const selectedB2BAccount = useMemo(
+    () => b2bAccounts.find((a) => a.id === activeB2BAccountId),
+    [b2bAccounts, activeB2BAccountId],
+  );
+
+  useEffect(() => {
+    if (isOpen && !b2bHydrated) void hydrateB2B();
+  }, [isOpen, b2bHydrated, hydrateB2B]);
 
   useEffect(() => {
     if (isOpen) {
@@ -381,6 +410,49 @@ export default function CheckoutModal() {
                     </>
                   ) : null}{" "}
                   على الإيصال
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* ── Phase 4: B2B account pricing ── */}
+          {!isReturn && (
+            <div className="rounded-xl border border-border bg-surface p-2.5">
+              <div className="flex items-center gap-2 mb-2">
+                <Building2 className="h-4 w-4 shrink-0 text-primary" />
+                <p className="flex-1 text-sm font-bold text-muted">حساب أعمال (تسعير جملة)</p>
+                {selectedB2BAccount && b2bMarkupPct > 0 && (
+                  <span className="rounded-lg bg-primary/10 px-2 py-0.5 text-xs font-black tabular-nums text-primary">
+                    +{b2bMarkupPct}% على السلة
+                  </span>
+                )}
+              </div>
+              <EntityCombobox
+                id="checkout-b2b"
+                label=""
+                value={activeB2BAccountId ?? ""}
+                options={b2bOptions}
+                placeholder={
+                  b2bAccounts.length === 0 && !b2bHydrated
+                    ? "جارٍ تحميل الحسابات..."
+                    : "بيع بأسعار التجزئة (بدون حساب)"
+                }
+                emptyLabel="لا يوجد حساب مطابق"
+                onChange={(id) => {
+                  const account = b2bAccounts.find((a) => a.id === id);
+                  setActiveB2BAccount(
+                    account ? { id: account.id, name: account.name, defaultMarkupPct: account.defaultMarkupPct } : null,
+                  );
+                }}
+              />
+              {selectedB2BAccount ? (
+                <p className="mt-1.5 text-xs font-semibold text-muted">
+                  فُتح حساب <span className="font-black text-primary">{selectedB2BAccount.name}</span> — تُسعّر كل
+                  الأسطر بسعر التجزئة + {b2bMarkupPct}% ويُطبع الاسم على الإيصال
+                </p>
+              ) : (
+                <p className="mt-1.5 text-xs font-semibold text-muted">
+                  اختياري — اختر حساباً (مثل طلبات) لتطبيق هامش الحساب تلقائياً على الفاتورة كاملة
                 </p>
               )}
             </div>

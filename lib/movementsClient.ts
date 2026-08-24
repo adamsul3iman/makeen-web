@@ -1,5 +1,6 @@
 import { getSupabaseBrowser } from "./supabaseBrowser";
 import { getTenantStoreId } from "./tenantClient";
+import { notifyLocalCatalogWrite } from "./catalogInvalidation";
 
 export interface InventoryMovement {
   id: string;
@@ -182,5 +183,6 @@ export async function createMovement(opts: {
     },
   });
 
+  notifyLocalCatalogWrite(storeId);
   return { movement: movement as unknown as InventoryMovement };
 }

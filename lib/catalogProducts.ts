@@ -1,4 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { notifyLocalCatalogWrite } from "./catalogInvalidation";
+import { getSupabaseBrowser, isSupabaseBrowserConfigured } from "./supabaseBrowser";
 
 /**
  * Store-scoped barcode conflict rule: a barcode may exist in other stores
@@ -445,6 +447,7 @@ export async function createCatalogProduct(
     }
   }
 
+  notifyLocalCatalogWrite(storeId);
   return toDto(productId, payload);
 }
 
@@ -530,6 +533,7 @@ export async function updateCatalogProduct(
   );
   if (upserted.error) throw new CatalogProductError(upserted.error.message, 500);
 
+  notifyLocalCatalogWrite(storeId);
   return toDto(productId, { ...payload, stock: Number(existingProduct.data.total_stock) || 0 });
 }
 
@@ -559,4 +563,45 @@ export async function deleteCatalogProduct(
 
   const removed = await client.from("products").delete().eq("id", productId).eq("store_id", storeId);
   if (removed.error) throw new CatalogProductError(removed.error.message, 500);
+
+  notifyLocalCatalogWrite(storeId);
+}
+
+/**
+ * Quick price update (Phase 3 "ليونة" drawer). Sets the product's retail
+ * selling price on the parent row and every variant (variants carry a
+ * denormalized copy of the same parent price by invariant). Guarded result
+ * object — the drawer surfaces the failure without throwing.
+ */
+export async function quickUpdateProductPrice(
+  storeId: string,
+  productId: string,
+  salePrice: number,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const sb = getSupabaseBrowser();
+  if (!sb || !isSupabaseBrowserConfigured()) return { ok: false, error: "offline" };
+  if (!Number.isFinite(salePrice) || salePrice < 0) {
+    return { ok: false, error: "سعر غير صالح" };
+  }
+  try {
+    const updated = await sb
+      .from("products")
+      .update({ selling_price: salePrice })
+      .eq("id", productId)
+      .eq("store_id", storeId);
+    if (updated.error) return { ok: false, error: updated.error.message };
+
+    const variants = await sb
+      .from("product_variants")
+      .update({ selling_price: salePrice })
+      .eq("product_id", productId)
+      .eq("store_id", storeId);
+    if (variants.error) return { ok: false, error: variants.error.message };
+
+    // Converge every device/tab onto the new price immediately.
+    notifyLocalCatalogWrite(storeId);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "network" };
+  }
 }

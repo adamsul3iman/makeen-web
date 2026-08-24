@@ -18,6 +18,7 @@ import type {
   PaymentMethod,
   PosCustomer,
   ProductMap,
+  ProductUnitsMap,
   QuickKeyItem,
   SaleItem,
   ShiftClosedPayload,
@@ -25,6 +26,8 @@ import type {
   ShortageFlag,
   ShortageFlaggedPayload,
 } from "../types/pos.types";
+import type { LocalOrder } from "../types/orders.types";
+import type { B2BAccount, B2BTransaction } from "../types/b2b.types";
 
 export type SyncStatus = "PENDING" | "SYNCED";
 
@@ -59,6 +62,13 @@ export interface InvoiceCreatedPayload {
   originalInvoiceId?: string;
   /** Set when the document is an admin void of the referenced invoice. */
   isCancellation?: boolean;
+  /**
+   * Phase 4 (B2B application): the B2B account the sale was priced for and
+   * the markup percent that was applied to every line. Audit/reporting only —
+   * line prices already carry the markup.
+   */
+  b2bAccountName?: string;
+  b2bMarkupPct?: number;
   /** Branch/terminal that settled the invoice (set when selected). */
   cashierId?: string;
   cashierName?: string;
@@ -371,6 +381,8 @@ export interface CatalogCache {
   products: ProductMap;
   barcodes: BarcodeMap;
   barcodeIndex: BarcodeIndex;
+  /** UoM tiers per product id (absent in pre-v11 caches). */
+  productUnits?: ProductUnitsMap;
   quickKeys: QuickKeyItem[];
   cashiers: Cashier[];
   pinSalt: string;
@@ -400,6 +412,25 @@ export interface CustomerCache {
   updatedAt: string;
 }
 
+/**
+ * Offline cache of parked orders for one tenant. Orders are cross-device
+ * shared: the server table is authoritative when reachable, this cache keeps
+ * them readable (and restorable) while offline.
+ */
+export interface OrdersCache {
+  storeId?: string | null;
+  orders: LocalOrder[];
+  updatedAt: string;
+}
+
+/** Offline cache of B2B accounts + recent ledger transactions for one tenant. */
+export interface B2BCache {
+  storeId?: string | null;
+  accounts: B2BAccount[];
+  transactions: B2BTransaction[];
+  updatedAt: string;
+}
+
 /** Per-invoice ISTD/JoFotara submission state (Risk 9: no invisible failures). */
 export type IstdStatus = "PENDING" | "SUBMITTING" | "SUBMITTED" | "FAILED";
 
@@ -419,7 +450,9 @@ const DB_NAME = "pos_local_db";
 // v10 (MEM-1): promotes `originalInvoiceId` onto queue records and adds the
 // `invoice_return`/`tenant_invoices` composite indexes so double-return
 // checks and invoice listings stop scanning/deserializing the whole store.
-const DB_VERSION = 10;
+// v11 (Orders/B2B): adds `orders_cache` and `b2b_accounts_cache` — offline
+// mirrors of the parked-orders and B2B ledger domains.
+const DB_VERSION = 11;
 const STORE = "sync_queue";
 const POISON_STORE = "sync_poison";
 const CATALOG_STORE = "catalog_cache";
@@ -428,9 +461,13 @@ const ISTD_STORE = "istd_state";
 const RECEIVING_STORE = "receiving_cache";
 const PRICE_MEMORY_STORE = "price_memory";
 const SHORTAGE_FLAG_STORE = "shortage_flags";
+const ORDERS_STORE = "orders_cache";
+const B2B_STORE = "b2b_accounts_cache";
 const CATALOG_KEY = "main";
 const BOOT_CATALOG_PREFIX = "pos-catalog-boot";
 const BOOT_CUSTOMER_PREFIX = "pos-customer-boot";
+const BOOT_ORDERS_PREFIX = "pos-orders-boot";
+const BOOT_B2B_PREFIX = "pos-b2b-boot";
 const POS_PERSIST_KEY = "pos-store";
 const PRICE_MEMORY_MARKER_PREFIX = "built:";
 
@@ -539,6 +576,11 @@ function getDb(): Promise<IDBPDatabase> {
               cursor = await cursor.continue();
             }
           })();
+        }
+        if (oldVersion < 11) {
+          // Orders/B2B offline mirrors (see DB_VERSION comment).
+          db.createObjectStore(ORDERS_STORE, { keyPath: "key" });
+          db.createObjectStore(B2B_STORE, { keyPath: "key" });
         }
       },
       blocked() {
@@ -959,6 +1001,7 @@ export async function loadCatalogCache(storeId?: string | null): Promise<Catalog
     products: cached.products ?? {},
     barcodes: cached.barcodes ?? {},
     barcodeIndex: cached.barcodeIndex ?? {},
+    productUnits: cached.productUnits ?? {},
     quickKeys: cached.quickKeys ?? [],
     cashiers: cached.cashiers ?? [],
     pinSalt: cached.pinSalt ?? "",
@@ -976,6 +1019,7 @@ export function loadCatalogBootCacheSync(storeId?: string | null): CatalogCache 
     products: cached.products ?? {},
     barcodes: cached.barcodes ?? {},
     barcodeIndex: cached.barcodeIndex ?? {},
+    productUnits: cached.productUnits ?? {},
     quickKeys: cached.quickKeys ?? [],
     cashiers: cached.cashiers ?? [],
     pinSalt: cached.pinSalt ?? "",
@@ -1013,6 +1057,76 @@ export function loadCustomersBootCacheSync(storeId?: string | null): CustomerCac
   return {
     storeId: cached.storeId ?? storeId ?? readPersistedStoreId(),
     customers: Array.isArray(cached.customers) ? cached.customers : [],
+    updatedAt: cached.updatedAt ?? "",
+  };
+}
+
+/** Persist the parked-orders cache for offline hydration. */
+export async function saveOrdersCache(cache: OrdersCache, storeId?: string | null): Promise<void> {
+  const db = await getDb();
+  const scopedStoreId = storeId ?? cache.storeId ?? null;
+  const key = catalogKeyFor(scopedStoreId);
+  const row = { key, ...cache, storeId: scopedStoreId };
+  await db.put(ORDERS_STORE, row);
+  writeBootCacheSync(BOOT_ORDERS_PREFIX, row, scopedStoreId);
+}
+
+/** Load the cached parked orders, or null when never hydrated. */
+export async function loadOrdersCache(storeId?: string | null): Promise<OrdersCache | null> {
+  const db = await getDb();
+  const row = await db.get(ORDERS_STORE, catalogKeyFor(storeId));
+  if (!row) return null;
+  const cached = row as OrdersCache & { key: string };
+  return {
+    storeId: cached.storeId ?? storeId ?? null,
+    orders: Array.isArray(cached.orders) ? cached.orders : [],
+    updatedAt: cached.updatedAt ?? "",
+  };
+}
+
+/** Synchronous boot mirror of the parked-orders cache (localStorage-backed). */
+export function loadOrdersBootCacheSync(storeId?: string | null): OrdersCache | null {
+  const cached = readBootCacheSync<(OrdersCache & { key?: string })>(BOOT_ORDERS_PREFIX, storeId);
+  if (!cached) return null;
+  return {
+    storeId: cached.storeId ?? storeId ?? readPersistedStoreId(),
+    orders: Array.isArray(cached.orders) ? cached.orders : [],
+    updatedAt: cached.updatedAt ?? "",
+  };
+}
+
+/** Persist the B2B accounts/ledger cache for offline hydration. */
+export async function saveB2BCache(cache: B2BCache, storeId?: string | null): Promise<void> {
+  const db = await getDb();
+  const scopedStoreId = storeId ?? cache.storeId ?? null;
+  const key = catalogKeyFor(scopedStoreId);
+  const row = { key, ...cache, storeId: scopedStoreId };
+  await db.put(B2B_STORE, row);
+  writeBootCacheSync(BOOT_B2B_PREFIX, row, scopedStoreId);
+}
+
+/** Load the cached B2B accounts + ledger rows, or null when never hydrated. */
+export async function loadB2BCache(storeId?: string | null): Promise<B2BCache | null> {
+  const db = await getDb();
+  const row = await db.get(B2B_STORE, catalogKeyFor(storeId));
+  if (!row) return null;
+  const cached = row as B2BCache & { key: string };
+  return {
+    storeId: cached.storeId ?? storeId ?? null,
+    accounts: Array.isArray(cached.accounts) ? cached.accounts : [],
+    transactions: Array.isArray(cached.transactions) ? cached.transactions : [],
+    updatedAt: cached.updatedAt ?? "",
+  };
+}
+
+/** Synchronous boot mirror of the B2B cache (localStorage-backed). */
+export function loadB2BBootCacheSync(storeId?: string | null): B2BCache | null {
+  const cached = readBootCacheSync<(B2BCache & { key?: string })>(BOOT_B2B_PREFIX, storeId);
+  if (!cached) return null;
+  return {
+    storeId: cached.storeId ?? storeId ?? readPersistedStoreId(),
+    accounts: Array.isArray(cached.accounts) ? cached.accounts : [],
+    transactions: Array.isArray(cached.transactions) ? cached.transactions : [],
     updatedAt: cached.updatedAt ?? "",
   };
 }

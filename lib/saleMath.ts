@@ -197,3 +197,24 @@ export function computeSaleTotals(
     itemCount: roundMoney(items.reduce((sum, item) => sum + item.qty, 0)),
   };
 }
+
+/**
+ * Phase 4 (B2B application): derive the cart priced for a B2B account.
+ *
+ * Cart items stay canonical at BASE prices; the markup is applied at the
+ * choke points that consume them — totals computation, checkout payload and
+ * the receipt line display. This keeps the transform idempotent (no
+ * double-apply on qty edits), park/restore-safe and ledger-consistent
+ * (Σ marked-up lines always equals the marked-up invoice total).
+ *
+ * A 0/negative/NaN pct is a no-op returning the same array reference, so
+ * non-B2B carts never allocate.
+ */
+export function withB2BMarkup(items: SaleItem[], markupPct: number): SaleItem[] {
+  if (!Number.isFinite(markupPct) || markupPct <= 0) return items;
+  const factor = 1 + markupPct / 100;
+  return items.map((item) => {
+    const unitPrice = roundMoney(item.unitPrice * factor);
+    return { ...item, unitPrice, lineTotal: roundMoney(unitPrice * item.qty) };
+  });
+}

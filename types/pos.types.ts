@@ -117,6 +117,8 @@ export interface LocalBarcode {
   wholesalePrice?: Money;
   isDefaultSale?: boolean;
   isDefaultPurchase?: boolean;
+  /** Set when this entry is a package unit (product_units row). */
+  unitId?: string;
 }
 
 /** O(1) barcode metadata lookup, keyed by barcode string. */
@@ -133,6 +135,12 @@ export interface BarcodeLookup {
   name: string;
   price: number;
   variantLabel: string;
+  /** Selling unit label for the scanned code (base unit when absent). */
+  unitName?: string;
+  /** Pieces per scanned unit (1/undefined = base unit). */
+  qtyMultiplier?: QtyMultiplier;
+  /** Owning product_units row for package barcodes (absent for variants). */
+  unitId?: string;
 }
 
 /**
@@ -140,6 +148,31 @@ export interface BarcodeLookup {
  * This is the primary structure consumed by the barcode-input handler.
  */
 export type BarcodeIndex = Record<string, BarcodeLookup>;
+
+/**
+ * A sellable packaging unit (UoM tier) of a product, mirrored from the
+ * `product_units` table (migration 080). Stock stays on variants in base
+ * pieces; a unit only re-prices and re-scales the sold quantity.
+ */
+export interface LocalUnit {
+  id: string;
+  productId: string;
+  /** Display label, e.g. "حبة", "كرتون", "علبة". */
+  unitName: UnitName;
+  /** Pieces per one of this unit (>0). Base piece = 1. */
+  qtyMultiplier: QtyMultiplier;
+  costPrice: Money;
+  sellingPrice: Money;
+  wholesalePrice?: Money;
+  /** Barcode of the package itself (unique per store when present). */
+  barcode?: string;
+  isDefaultSale: boolean;
+  isActive: boolean;
+  sortOrder: number;
+}
+
+/** O(1) units lookup keyed by product id. */
+export type ProductUnitsMap = Record<string, LocalUnit[]>;
 
 /** Scope of a discount entry: the whole invoice or a single line item. */
 export type DiscountScope = "TOTAL" | "ITEM";
@@ -156,7 +189,7 @@ export interface DiscountInput {
   value: number;
 }
 
-/** A line item on the current sale. Qty/lineTotal may be negative in Return Mode. */
+  /** A line item on the current sale. Qty/lineTotal may be negative in Return Mode. */
 export interface SaleItem {
   productId: string;
   name: string;
@@ -165,6 +198,13 @@ export interface SaleItem {
   variantLabel?: string;
   qty: number;
   unitName: UnitName;
+  /**
+   * Pieces per sold unit (pack/carton multiplier relative to the base unit).
+   * Base units are 1 / undefined; stock is always consumed in base pieces.
+   */
+  unitMultiplier?: QtyMultiplier;
+  /** The packaging unit this line is priced in (product_units.id). */
+  unitId?: string;
   unitPrice: Money;
   lineTotal: Money;
   /** Fixed-money discount applied to this line (0 when none). lineTotal is net of it. */
@@ -351,6 +391,12 @@ export interface CompletedInvoice {
   invoiceNumber?: string;
   /** Invoice id this document reverses (secure returns). Printed on the receipt. */
   originalInvoiceId?: string;
+  /**
+   * Phase 4 (B2B application): the B2B account this sale was priced for.
+   * Line prices already include the markup; these are printed for clarity.
+   */
+  b2bAccountName?: string;
+  b2bMarkupPct?: number;
   /** Branch/terminal that settled this invoice (printed on receipts). */
   branchId?: string;
   terminalId?: string;
@@ -623,6 +669,8 @@ export interface PosSnapshot {
   barcodes: BarcodeMap;
   /** Derived from barcodes/variants, kept in sync on every mutation. */
   barcodeIndex: BarcodeIndex;
+  /** UoM tiers per product id (absent in pre-units snapshots). */
+  productUnits?: ProductUnitsMap;
   /** Derived from `categories` where isQuickKey is true, sorted. */
   quickKeys: QuickKeyItem[];
   /** Cashier accounts used to unlock the register (PINs as salted hashes). */

@@ -1767,7 +1767,7 @@ async function applyInvoiceStock(
 ): Promise<{ applied: boolean; error?: string }> {
   if (event.action_type !== "INVOICE_CREATED") return { applied: false };
   const payload = event.payload as {
-    items?: Array<{ productId?: string; barcode?: string; qty?: number; unitName?: string; variantLabel?: string }>;
+    items?: Array<{ productId?: string; barcode?: string; qty?: number; unitName?: string; variantLabel?: string; unitMultiplier?: number }>;
     branchId?: string;
     terminalId?: string;
     cashierId?: string;
@@ -1791,18 +1791,15 @@ async function applyInvoiceStock(
       typeof item.qty === "number" && Number.isFinite(item.qty) ? item.qty : 0;
     if (qty === 0 || !productId) continue;
 
-    let multiplier = 1;
+    // Phase 2: sale lines are priced in a packaging unit, so stock is
+    // consumed in base pieces: qty × multiplier. Legacy lines without a
+    // multiplier are base-unit sales and stay exactly as before.
+    const rawMultiplier = item.unitMultiplier;
+    const multiplier =
+      typeof rawMultiplier === "number" && Number.isFinite(rawMultiplier) && rawMultiplier > 0
+        ? rawMultiplier
+        : 1;
     const barcode = (item.barcode ?? "").trim();
-    if (barcode) {
-      const { data, error } = await db
-        .from("product_variants")
-        .select("barcode")
-        .eq("barcode", barcode)
-        .eq("store_id", storeId)
-        .maybeSingle();
-      if (error) return { applied: false, error: error.message };
-      multiplier = data ? 1 : 1;
-    }
 
     const delta = Number((-qty * multiplier).toFixed(3));
     if (delta === 0) continue;
@@ -1824,7 +1821,7 @@ async function applyInvoiceStock(
       p_actor_name: text(payload.cashierName ?? event.cashierName),
       p_reason: movementType === "SALE" ? "بيع" : "مرتجع بيع",
       p_occurred_at: text(payload.completed_at) || new Date().toISOString(),
-      p_metadata: { line: index + 1, unitName: item.unitName, variantLabel: item.variantLabel },
+      p_metadata: { line: index + 1, unitName: item.unitName, variantLabel: item.variantLabel, unitMultiplier: multiplier },
       // A sale must never be blocked by 0/negative stock: allow total_stock
       // to decrement into negative integers (e.g. -5).
       p_allow_negative: true,

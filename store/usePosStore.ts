@@ -15,8 +15,9 @@ import type {
   PaymentMethod,
   PosCustomer,
   PosSnapshot,
-  ProductMap,
-  QuickKeyItem,
+   ProductMap,
+   ProductUnitsMap,
+   QuickKeyItem,
   SaleItem,
   SaleTotals,
   ShiftState,
@@ -48,6 +49,7 @@ import {
   loadShortageFlagCache,
   saveCatalogCache,
   saveCustomersCache,
+  saveOrdersCache,
   saveShortageFlagCache,
   upsertPriceMemoryFromPayload,
   type SyncQueueRecord,
@@ -60,9 +62,10 @@ import { pushAudit } from "@/lib/audit";
 import { requestPersistentStorage } from "@/lib/storageGuard";
 import { newUuid } from "@/lib/uuid";
 import { getTenantStoreId, setTenantStoreId } from "@/lib/tenantClient";
+import { fetchCatalogStamp, rememberCatalogStamp } from "@/lib/catalogInvalidation";
 import { fetchCatalogSnapshot, fetchCustomersPayload } from "@/lib/clientCatalog";
 import { effectiveTaxPercent } from "@/lib/qr";
-import { computeFiscalBreakdown, computeSaleTotals } from "@/lib/saleMath";
+import { computeFiscalBreakdown, computeSaleTotals, withB2BMarkup } from "@/lib/saleMath";
 import { derivePaymentBuckets } from "@/lib/paymentBuckets";
 import {
   createPosPersistStorage,
@@ -71,6 +74,8 @@ import {
 } from "@/lib/persistStorage";
 import { emitPosSound } from "@/lib/posSound";
 import { getSupabaseBrowser, isSupabaseBrowserConfigured } from "@/lib/supabaseBrowser";
+import { useOrdersStore } from "@/store/useOrdersStore";
+import { heldInvoiceToOrder } from "@/types/orders.types";
 import {
   clearCachedCashierSession,
   findCachedCashierSessionByCode,
@@ -385,6 +390,28 @@ interface PosStoreState {
    * cache; `flagShortage` persists both here and to the sync queue.
    */
   shortageFlags: Record<string, ShortageFlag>;
+  /**
+   * UoM tiers per product id (Phase 2). Carried by the catalog snapshot and
+   * always synthesized to at least one base unit per product, so unit-aware
+   * cart paths never need existence checks.
+   */
+  productUnits: ProductUnitsMap;
+  /**
+   * Parked order currently restored into the cart (Phase 2). Closed against
+   * `pos_orders` when its checkout completes; null for a fresh cart.
+   */
+  activeOrderId: string | null;
+  /**
+   * Phase 4 (B2B application): the B2B account currently driving cart
+   * pricing. When set, every totals/checkout path prices the cart through
+   * `withB2BMarkup` using `b2bMarkupPct`; items stay canonical at base
+   * prices. Cleared after a completed checkout.
+   */
+  activeB2BAccountId: string | null;
+  /** Display name of the active B2B account (receipt + chip). */
+  activeB2BAccountName: string;
+  /** Markup percent applied to the whole cart while a B2B account is active. */
+  b2bMarkupPct: number;
 }
 
 interface PosStoreActions {
@@ -409,6 +436,17 @@ interface PosStoreActions {
   closeHoldModal: () => void;
   holdInvoice: () => void;
   restoreInvoice: (id: string) => void;
+  /**
+   * Swap the packaging unit of a cart line (Phase 2 unit chips). Converts the
+   * quantity so the physical amount (and roughly the line total) is preserved.
+   */
+  setLineUnit: (index: number, unitId: string) => void;
+  /**
+   * Phase 4 (B2B application): attach/detach a B2B account to the cart.
+   * Selecting an account applies its default markup to the live totals;
+   * detaching reverts them. Pass null to clear.
+   */
+  setActiveB2BAccount: (account: { id: string; name: string; defaultMarkupPct: number } | null) => void;
   completeCheckout: (
     paymentMethod: PaymentMethod,
     amountPaid: number,
@@ -526,7 +564,9 @@ export type PosStore = PosStoreState & PosStoreActions;
 
 type ShallowEntity = object;
 const POS_PERSIST_NAME = "pos-store";
-const POS_PERSIST_VERSION = 1;
+// v2 (Phase 2): held invoices migrate from the device-local `heldInvoices`
+// array into the parked-orders domain (`useOrdersStore` + IDB orders cache).
+const POS_PERSIST_VERSION = 2;
 
 const catalogHydrationJobs = new Map<string, Promise<void>>();
 
@@ -605,6 +645,7 @@ function bootCatalogState(cache: ReturnType<typeof loadCatalogBootCacheSync>) {
       products: {} as ProductMap,
       barcodes: {} as BarcodeMap,
       barcodeIndex: {} as BarcodeIndex,
+      productUnits: {} as ProductUnitsMap,
       quickKeys: [] as QuickKeyItem[],
       cashiers: [] as Cashier[],
       pinSalt: "",
@@ -618,6 +659,7 @@ function bootCatalogState(cache: ReturnType<typeof loadCatalogBootCacheSync>) {
     products: cache.products,
     barcodes: cache.barcodes,
     barcodeIndex: cache.barcodeIndex,
+    productUnits: cache.productUnits ?? {},
     quickKeys: [...cache.quickKeys].sort((a, b) => a.sortOrder - b.sortOrder),
     cashiers: cache.cashiers,
     pinSalt: cache.pinSalt,
@@ -639,6 +681,7 @@ function applyCatalogState(
     | "products"
     | "barcodes"
     | "barcodeIndex"
+    | "productUnits"
     | "quickKeys"
     | "cashiers"
     | "pinSalt"
@@ -653,6 +696,10 @@ function applyCatalogState(
     products: mergeEntityMap(state.products, snapshot.products),
     barcodes: mergeEntityMap(state.barcodes, snapshot.barcodes),
     barcodeIndex: mergeEntityMap(state.barcodeIndex, snapshot.barcodeIndex),
+    // Units are always a full per-product replacement (not a merge): the
+    // snapshot is synthesized to cover every product, so stale tiers can
+    // never linger after a unit is deleted server-side.
+    productUnits: snapshot.productUnits ?? state.productUnits ?? {},
     quickKeys: mergeEntityArray(
       state.quickKeys,
       [...snapshot.quickKeys].sort((a, b) => a.sortOrder - b.sortOrder),
@@ -672,6 +719,7 @@ function snapshotFromCatalogCache(
     products: cache.products,
     barcodes: cache.barcodes,
     barcodeIndex: cache.barcodeIndex,
+    productUnits: cache.productUnits ?? {},
     quickKeys: cache.quickKeys,
     cashiers: cache.cashiers,
     pinSalt: cache.pinSalt,
@@ -792,6 +840,7 @@ function partializePosState(state: PosStore) {
     pinFailCount: state.pinFailCount,
     pinLockedUntil: state.pinLockedUntil,
     pinLockoutLevel: state.pinLockoutLevel,
+    activeOrderId: state.activeOrderId,
   };
 }
 
@@ -926,8 +975,11 @@ function computeTotals(
   invoiceDiscount: DiscountInput | null = null,
   taxPercent: number = TAX_RATE,
   deliveryFee = 0,
+  b2bMarkupPct = 0,
 ): SaleTotals {
-  return computeSaleTotals(items, invoiceDiscount, taxPercent, deliveryFee);
+  // Phase 4 (B2B application): totals are always computed from the
+  // markup-adjusted view so the header, checkout and sync payload agree.
+  return computeSaleTotals(withB2BMarkup(items, b2bMarkupPct), invoiceDiscount, taxPercent, deliveryFee);
 }
 
 function emptyTotals(): SaleTotals {
@@ -1038,6 +1090,11 @@ function resetTransactionalRuntime(state: PosStoreState) {
     activeCustomerId: null,
     priceMemory: {},
     shortageFlags: {},
+    productUnits: {},
+    activeOrderId: null,
+    activeB2BAccountId: null,
+    activeB2BAccountName: "",
+    b2bMarkupPct: 0,
   };
 }
 
@@ -1433,6 +1490,11 @@ export const usePosStore = create<PosStore>()(
       activeCustomerId: null,
       priceMemory: {},
       shortageFlags: {},
+      productUnits: {},
+      activeOrderId: null,
+      activeB2BAccountId: null,
+      activeB2BAccountName: "",
+      b2bMarkupPct: 0,
 
       loadSnapshot: (snapshot) =>
         set((state) => {
@@ -1496,7 +1558,12 @@ export const usePosStore = create<PosStore>()(
         }
 
         const sign = get().isReturnMode ? -1 : 1;
-        const unitName = get().barcodes[barcode]?.unitName ?? "حبة";
+        const scannedMeta = get().barcodes[barcode];
+        const unitName = scannedMeta?.unitName ?? "حبة";
+        const unitMultiplier =
+          typeof scannedMeta?.qtyMultiplier === "number" && scannedMeta.qtyMultiplier > 0
+            ? scannedMeta.qtyMultiplier
+            : 1;
         const product = get().products[lookup.product_id];
         const items = addLine(
           get().items,
@@ -1504,9 +1571,11 @@ export const usePosStore = create<PosStore>()(
             productId: lookup.product_id,
             name: lookup.name,
             barcode,
-            variantLabel: lookup.variantLabel ?? get().barcodes[barcode]?.variantLabel,
+            variantLabel: lookup.variantLabel ?? scannedMeta?.variantLabel,
             qty: sign,
             unitName,
+            unitMultiplier,
+            unitId: scannedMeta?.unitId,
             unitPrice: lookup.price,
             taxPercent: product?.taxPercent ?? effectiveTaxPercent(get().currentStore),
             taxIncluded: product?.taxIncluded ?? false,
@@ -1514,7 +1583,7 @@ export const usePosStore = create<PosStore>()(
           sign,
         );
 
-        set({ items, totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee) });
+        set({ items, totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee, get().b2bMarkupPct) });
         emitPosSound("SCAN_ACCEPTED");
       },
 
@@ -1527,6 +1596,11 @@ export const usePosStore = create<PosStore>()(
         const sign = get().isReturnMode ? -1 : 1;
         const unitPrice = key.price ?? 0;
         const code = key.barcode ?? "";
+        const keyMeta = code ? get().barcodes[code] : undefined;
+        const keyMultiplier =
+          typeof keyMeta?.qtyMultiplier === "number" && keyMeta.qtyMultiplier > 0
+            ? keyMeta.qtyMultiplier
+            : 1;
         const items = addLine(
           get().items,
           {
@@ -1536,6 +1610,8 @@ export const usePosStore = create<PosStore>()(
             variantLabel: key.variantLabel,
             qty: sign,
             unitName: key.unitName ?? "",
+            unitMultiplier: keyMultiplier,
+            unitId: keyMeta?.unitId,
             unitPrice,
             taxPercent: key.taxPercent ?? get().products[key.productId]?.taxPercent ?? effectiveTaxPercent(get().currentStore),
             taxIncluded: key.taxIncluded ?? get().products[key.productId]?.taxIncluded ?? false,
@@ -1543,7 +1619,7 @@ export const usePosStore = create<PosStore>()(
           sign,
         );
 
-        set({ items, totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee) });
+        set({ items, totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee, get().b2bMarkupPct) });
       },
 
       addSearchItem: (productId, qty = 1, barcode) => {
@@ -1553,13 +1629,34 @@ export const usePosStore = create<PosStore>()(
         const code = (barcode ?? "").trim();
         let unitPrice = product.price ?? 0;
         let unitName = product.baseUnit ?? "";
+        let unitMultiplier = 1;
+        let unitId: string | undefined;
         let variantLabel = "";
         if (code) {
           const meta = get().barcodes[code];
           if (meta) {
             unitName = meta.unitName || unitName;
             unitPrice = meta.price ?? unitPrice;
+            unitMultiplier =
+              typeof meta.qtyMultiplier === "number" && meta.qtyMultiplier > 0
+                ? meta.qtyMultiplier
+                : 1;
+            unitId = meta.unitId;
             variantLabel = meta.variantLabel ?? "";
+          }
+        }
+
+        // No explicit code: price the line in the product's default-sale unit
+        // so the chip row shows a meaningful active tier from the first tap.
+        if (!code) {
+          const defaultUnit = (get().productUnits[productId] ?? []).find(
+            (u) => u.isActive && u.isDefaultSale,
+          );
+          if (defaultUnit) {
+            unitName = defaultUnit.unitName;
+            unitPrice = round2(defaultUnit.sellingPrice);
+            unitMultiplier = defaultUnit.qtyMultiplier;
+            unitId = defaultUnit.id;
           }
         }
 
@@ -1574,6 +1671,8 @@ export const usePosStore = create<PosStore>()(
             variantLabel,
             qty: q,
             unitName,
+            unitMultiplier,
+            unitId,
             unitPrice,
             taxPercent: product.taxPercent ?? effectiveTaxPercent(get().currentStore),
             taxIncluded: product.taxIncluded ?? false,
@@ -1581,7 +1680,7 @@ export const usePosStore = create<PosStore>()(
           q,
         );
 
-        set({ items, totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee) });
+        set({ items, totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee, get().b2bMarkupPct) });
       },
 
       updateQty: (index, qty) => {
@@ -1595,12 +1694,12 @@ export const usePosStore = create<PosStore>()(
         const items = get().items.map((it, i) =>
           i !== index ? it : applyQtyToLine(it, qty),
         );
-        set({ items, totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee) });
+        set({ items, totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee, get().b2bMarkupPct) });
       },
 
       removeItem: (index) => {
         const items = get().items.filter((_, i) => i !== index);
-        set({ items, totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee) });
+        set({ items, totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee, get().b2bMarkupPct) });
       },
 
       addQuickItem: (name, price, barcode) => {
@@ -1628,7 +1727,7 @@ export const usePosStore = create<PosStore>()(
         );
         set({
           items,
-          totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee),
+          totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee, get().b2bMarkupPct),
           notice: { message: `تمت إضافة صنف سريع: ${trimmed}`, tone: "success" },
         });
       },
@@ -1637,7 +1736,7 @@ export const usePosStore = create<PosStore>()(
         const value = Number.isFinite(fee) ? round2(Math.max(0, fee)) : 0;
         set({
           deliveryFee: value,
-          totals: computeTotals(get().items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), value),
+          totals: computeTotals(get().items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), value, get().b2bMarkupPct),
         });
       },
 
@@ -1652,6 +1751,9 @@ export const usePosStore = create<PosStore>()(
           invoiceDiscount: null,
           deliveryFee: 0,
           returnReference: null,
+          // A discarded cart leaves the parked order OPEN (visible again on
+          // the board); only checkout closes it.
+          activeOrderId: null,
           notice: { message: "تم إلغاء الفاتورة", tone: "success" },
         });
       },
@@ -1731,21 +1833,27 @@ export const usePosStore = create<PosStore>()(
           set({ notice: { message: "هذا الدور لا يملك صلاحية تعليق الفواتير", tone: "error" } });
           return;
         }
-        const { items, totals } = get();
+        const { items } = get();
         if (items.length === 0) {
           set({ notice: { message: "الفاتورة فارغة، لا يمكن تعليقها", tone: "error" } });
           return;
         }
-        const held: HeldInvoice = {
-          id: newUuid(),
-          created_at: new Date().toISOString(),
+        // Phase 2: parking creates a cross-device LocalOrder (offline-first,
+        // mirrored to pos_orders best-effort). The legacy heldInvoices array
+        // is no longer written; it stays in persist only for rollback safety.
+        const state = get();
+        useOrdersStore.getState().createOrder({
           items,
-          total: totals.total,
-          invoiceDiscount: get().invoiceDiscount,
-          deliveryFee: get().deliveryFee,
-        };
+          invoiceDiscount: state.invoiceDiscount,
+          deliveryFee: state.deliveryFee,
+          customerId: state.activeCustomerId ?? undefined,
+          customerName: state.customers.find((c) => c.id === state.activeCustomerId)?.name?.trim() || undefined,
+          cashierId: state.currentCashier?.id,
+          cashierName: state.currentCashier?.name,
+          branchId: state.activeBranchId ?? null,
+          terminalId: state.activeTerminalId ?? null,
+        });
         set({
-          heldInvoices: [...get().heldInvoices, held],
           items: [],
           totals: emptyTotals(),
           invoiceDiscount: null,
@@ -1755,16 +1863,80 @@ export const usePosStore = create<PosStore>()(
       },
 
       restoreInvoice: (id) => {
-        const held = get().heldInvoices.find((h) => h.id === id);
-        if (!held) return;
+        // Phase 2: restore pulls a parked order back into the cart. The order
+        // stays OPEN on other devices until this register's checkout closes
+        // it — `activeOrderId` links cart and order for that lifecycle.
+        const ordersState = useOrdersStore.getState();
+        const order = ordersState.orders.find((o) => o.id === id && o.status === "OPEN");
+        if (!order) return;
+        if (get().activeOrderId && get().activeOrderId !== id) {
+          set({ notice: { message: "توجد فاتورة مستعادة بالفعل في السلة", tone: "error" } });
+          return;
+        }
         set({
-          heldInvoices: get().heldInvoices.filter((h) => h.id !== id),
-          items: held.items,
-          invoiceDiscount: held.invoiceDiscount ?? null,
-          deliveryFee: held.deliveryFee ?? 0,
-          totals: computeTotals(held.items, held.invoiceDiscount ?? null, effectiveTaxPercent(get().currentStore), held.deliveryFee ?? 0),
+          activeOrderId: order.id,
+          activeCustomerId: order.customerId ?? null,
+          items: order.items,
+          invoiceDiscount: order.invoiceDiscount ?? null,
+          deliveryFee: order.deliveryFee ?? 0,
+          totals: computeTotals(order.items, order.invoiceDiscount ?? null, effectiveTaxPercent(get().currentStore), order.deliveryFee ?? 0, get().b2bMarkupPct),
           isHoldModalOpen: false,
           notice: { message: "تمت استعادة الفاتورة", tone: "success" },
+        });
+      },
+
+      setLineUnit: (index, unitId) => {
+        const item = get().items[index];
+        if (!item) return;
+        const unit = (get().productUnits[item.productId] ?? []).find((u) => u.id === unitId);
+        if (!unit || !unit.isActive) return;
+
+        // Convert the quantity so the physical amount of product on the line
+        // stays constant across the swap (3 cartons ⇄ 36 pieces), then
+        // re-price at the target unit. Discount percentage carries over.
+        const fromMultiplier =
+          typeof item.unitMultiplier === "number" && item.unitMultiplier > 0
+            ? item.unitMultiplier
+            : 1;
+        const toMultiplier =
+          typeof unit.qtyMultiplier === "number" && unit.qtyMultiplier > 0
+            ? unit.qtyMultiplier
+            : 1;
+        const convertedQty = round2(
+          Math.round(((item.qty * fromMultiplier) / toMultiplier) * 1000) / 1000,
+        );
+        if (!Number.isFinite(convertedQty) || convertedQty === 0) return;
+
+        const next: SaleItem = {
+          ...item,
+          qty: convertedQty,
+          unitName: unit.unitName,
+          unitMultiplier: toMultiplier,
+          unitId: unit.id,
+          unitPrice: round2(unit.sellingPrice),
+        };
+        // Reuse the qty-change math so line discounts re-derive identically.
+        const items = get().items.map((it, i) =>
+          i !== index ? it : applyQtyToLine(next, convertedQty),
+        );
+        set({ items, totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee, get().b2bMarkupPct) });
+      },
+
+      setActiveB2BAccount: (account) => {
+        const pct =
+          account && Number.isFinite(account.defaultMarkupPct)
+            ? Math.max(0, Math.min(500, account.defaultMarkupPct))
+            : 0;
+        set({
+          activeB2BAccountId: account ? account.id : null,
+          activeB2BAccountName: account ? account.name : "",
+          b2bMarkupPct: pct,
+        });
+        // Re-price the live cart immediately so the cashier sees the markup
+        // land on the header total before checkout opens.
+        const { items, invoiceDiscount } = get();
+        set({
+          totals: computeTotals(items, invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee, pct),
         });
       },
 
@@ -1829,11 +2001,21 @@ export const usePosStore = create<PosStore>()(
         const cliqPortion = buckets.cliq;
         const debtPortion = buckets.debt;
 
+        // Phase 4 (B2B application): the persisted invoice carries the
+        // MARKED-UP line prices so Σ lines == total on the server ledger and
+        // the receipt prints what the customer was actually charged. Cart
+        // items themselves stay canonical at base prices.
+        const b2bMarkupPct = get().b2bMarkupPct;
+        const b2bAccountName = get().activeB2BAccountName;
+        const saleItems = withB2BMarkup(items, b2bMarkupPct);
+
         const record: SyncQueueRecord = {
           sync_id: newUuid(),
           action_type: "INVOICE_CREATED",
           payload: {
-            items,
+            items: saleItems,
+            b2bAccountName: b2bAccountName || undefined,
+            b2bMarkupPct: b2bMarkupPct > 0 ? b2bMarkupPct : undefined,
             subtotal: totals.subtotal,
             tax: totals.tax,
             discount: totals.discount,
@@ -1871,6 +2053,19 @@ export const usePosStore = create<PosStore>()(
           // cashier re-rings the sale and both copies mirror (duplicated
           // revenue + double stock deduction).
           await enqueueSync(record);
+
+          // Phase 2: if this checkout settles a restored parked order, close
+          // it against pos_orders (best-effort mirror; pendingSync covers
+          // offline). Detached from the durability point on purpose — the
+          // sale is already saved above no matter what happens here.
+          const parkedOrderId = get().activeOrderId;
+          if (parkedOrderId) {
+            try {
+              useOrdersStore.getState().closeWithInvoice(parkedOrderId, record.sync_id);
+            } catch (orderCloseError) {
+              console.error("Parked-order close failed:", orderCloseError);
+            }
+          }
 
           // Pure synchronous derivation first: cannot throw, so the success
           // settlement always has complete data even if a later IDB read/write
@@ -1926,7 +2121,7 @@ export const usePosStore = create<PosStore>()(
           const completedInvoice: CompletedInvoice = {
             syncId: record.sync_id,
             shiftId: get().shiftState.shiftId ?? "",
-            items,
+            items: saleItems,
             subtotal: totals.subtotal,
             tax: totals.tax,
             discount: totals.discount,
@@ -1940,6 +2135,8 @@ export const usePosStore = create<PosStore>()(
             customerPhone: record.payload.customerPhone,
             cashierName,
             originalInvoiceId,
+            b2bAccountName: b2bAccountName || undefined,
+            b2bMarkupPct: b2bMarkupPct > 0 ? b2bMarkupPct : undefined,
             branchId: branchId ?? undefined,
             terminalId: terminalId ?? undefined,
             completed_at: record.payload.completed_at,
@@ -1958,6 +2155,12 @@ export const usePosStore = create<PosStore>()(
               returnReference: null,
               isReturnMode: false,
               activeCustomerId: null,
+              activeOrderId: null,
+              // The B2B pricing context ends with the sale; the next customer
+              // starts at base prices.
+              activeB2BAccountId: null,
+              activeB2BAccountName: "",
+              b2bMarkupPct: 0,
               priceMemory: {},
               notice: { message: "تم حفظ الفاتورة محلياً وستتم المزامنة", tone: "success" },
             });
@@ -2620,11 +2823,11 @@ export const usePosStore = create<PosStore>()(
                   lineTotal: round2(gross - discount),
                 },
           );
-          set({ items, totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee) });
+          set({ items, totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee, get().b2bMarkupPct) });
         } else {
           set({
             invoiceDiscount: { ...input },
-            totals: computeTotals(get().items, { ...input }, effectiveTaxPercent(get().currentStore), get().deliveryFee),
+            totals: computeTotals(get().items, { ...input }, effectiveTaxPercent(get().currentStore), get().deliveryFee, get().b2bMarkupPct),
           });
         }
         set({ notice: { message: "تم تطبيق الخصم", tone: "success" } });
@@ -2639,7 +2842,7 @@ export const usePosStore = create<PosStore>()(
         set({
           items,
           invoiceDiscount: null,
-          totals: computeTotals(items, null, effectiveTaxPercent(get().currentStore), get().deliveryFee),
+          totals: computeTotals(items, null, effectiveTaxPercent(get().currentStore), get().deliveryFee, get().b2bMarkupPct),
           notice: { message: "تم إلغاء الخصم", tone: "success" },
         });
       },
@@ -2710,7 +2913,7 @@ export const usePosStore = create<PosStore>()(
           items,
           invoiceDiscount: null,
           deliveryFee: 0,
-          totals: computeTotals(items, null, effectiveTaxPercent(get().currentStore), 0),
+          totals: computeTotals(items, null, effectiveTaxPercent(get().currentStore), 0, get().b2bMarkupPct),
           isReturnMode: true,
           returnReference: {
             originalSyncId: id,
@@ -2745,7 +2948,7 @@ export const usePosStore = create<PosStore>()(
         set({
           items,
           invoiceDiscount: null,
-          totals: computeTotals(items, null, effectiveTaxPercent(get().currentStore), 0),
+          totals: computeTotals(items, null, effectiveTaxPercent(get().currentStore), 0, get().b2bMarkupPct),
           notice: { message: "تم تحديث كميات المرتجع", tone: "success" },
         });
       },
@@ -3345,6 +3548,12 @@ export const usePosStore = create<PosStore>()(
               if (!matchesStore()) return;
               get().loadSnapshot(snapshot);
             }
+            // Remember the server's change stamp for whichever snapshot we
+            // just converged on, so stamp polling only re-hydrates on real
+            // drift (never on our own echo). Best-effort; failure is fine.
+            void fetchCatalogStamp(storeId)
+              .then((version) => rememberCatalogStamp(storeId, version))
+              .catch(() => undefined);
           }
 
           if (remoteCustomers.status === "fulfilled" && remoteCustomers.value) {
@@ -3722,6 +3931,7 @@ export const usePosStore = create<PosStore>()(
             get().invoiceDiscount,
             effectiveTaxPercent(get().currentStore),
             get().deliveryFee,
+            get().b2bMarkupPct,
           ),
           notice: { message: "تم تعديل سعر الصنف", tone: "success" },
         });
@@ -3928,6 +4138,7 @@ export const usePosStore = create<PosStore>()(
             get().invoiceDiscount,
             effectiveTaxPercent(get().currentStore),
             get().deliveryFee,
+            get().b2bMarkupPct,
           ),
           notice: {
             message: `تم تطبيق آخر سعر للزبون: ${round2(price).toFixed(2)}`,
@@ -4029,7 +4240,9 @@ export const usePosStore = create<PosStore>()(
           items: target.items,
           invoiceDiscount: target.invoiceDiscount,
           deliveryFee: target.deliveryFee,
-          totals: computeTotals(target.items, target.invoiceDiscount, taxPercent, target.deliveryFee),
+          // The B2B pricing context is register-scoped: it survives tab
+          // switches and re-prices whichever cart becomes active.
+          totals: computeTotals(target.items, target.invoiceDiscount, taxPercent, target.deliveryFee, get().b2bMarkupPct),
         });
       },
 
@@ -4049,7 +4262,7 @@ export const usePosStore = create<PosStore>()(
           items: [],
           invoiceDiscount: null,
           deliveryFee: 0,
-          totals: computeTotals([], null, effectiveTaxPercent(currentStore), 0),
+          totals: computeTotals([], null, effectiveTaxPercent(currentStore), 0, get().b2bMarkupPct),
         });
       },
 
@@ -4076,7 +4289,7 @@ export const usePosStore = create<PosStore>()(
           items: target.items,
           invoiceDiscount: target.invoiceDiscount,
           deliveryFee: target.deliveryFee,
-          totals: computeTotals(target.items, target.invoiceDiscount, taxPercent, target.deliveryFee),
+          totals: computeTotals(target.items, target.invoiceDiscount, taxPercent, target.deliveryFee, get().b2bMarkupPct),
         });
       },
     }),
@@ -4085,6 +4298,31 @@ export const usePosStore = create<PosStore>()(
       version: POS_PERSIST_VERSION,
       storage: createPosPersistStorage<ReturnType<typeof partializePosState>>(),
       partialize: partializePosState,
+      migrate: async (persisted, version) => {
+        const state = persisted as ReturnType<typeof partializePosState>;
+        if (!state || version >= POS_PERSIST_VERSION) return state;
+        // v1→v2 (Phase 2): device-local held invoices migrate into the
+        // parked-orders domain as OPEN LocalOrders seeded into the IDB
+        // orders cache. The legacy array is emptied so the two systems can
+        // never double-show the same cart.
+        const legacy = state.heldInvoices;
+        if (Array.isArray(legacy) && legacy.length > 0) {
+          const storeId = state.currentStore?.id ?? getTenantStoreId();
+          if (storeId) {
+            const orders = legacy.map((held) => heldInvoiceToOrder(held, storeId));
+            try {
+              await saveOrdersCache(
+                { storeId, orders, updatedAt: new Date().toISOString() },
+                storeId,
+              );
+            } catch {
+              // Cache unavailable — the sweep below still returns the drained
+              // state; orders re-seed on the next successful cache write.
+            }
+          }
+        }
+        return { ...state, heldInvoices: [] };
+      },
       onRehydrateStorage: () => (state) => {
         if (state?.currentStore?.id) setTenantStoreId(state.currentStore.id);
       },

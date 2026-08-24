@@ -3,7 +3,9 @@ import type {
   BarcodeMap,
   Cashier,
   CategoryMap,
+  LocalUnit,
   ProductMap,
+  ProductUnitsMap,
   QuickKeyItem,
   PosSnapshot,
 } from "@/types/pos.types";
@@ -78,6 +80,21 @@ interface CashierRow {
   is_active: boolean | null;
 }
 
+/** Row shape of `product_units` (migration 080). */
+interface ProductUnitRow {
+  id: string;
+  product_id: string;
+  unit_name: string;
+  qty_multiplier: number | string;
+  cost_price: number | null;
+  selling_price: number | null;
+  wholesale_price: number | null;
+  barcode: string | null;
+  is_default_sale: boolean;
+  is_active: boolean;
+  sort_order: number;
+}
+
 interface StaffRoleRow {
   id: string;
   code: string;
@@ -88,6 +105,122 @@ interface StaffRoleRow {
 
 function catalogVersionOf(value: unknown): string {
   return sha256Hex(JSON.stringify(value));
+}
+
+/**
+ * Fetch the UoM tier (`product_units`, migration 080). Guarded separately:
+ * a store whose migrations have not been applied yet (or an offline device)
+ * must still get a full snapshot — units then fall back to per-product
+ * synthesis below.
+ */
+async function fetchProductUnitRows(
+  sb: NonNullable<ReturnType<typeof getSupabaseBrowser>>,
+  storeId: string,
+): Promise<ProductUnitRow[]> {
+  try {
+    return await fetchAllRows<ProductUnitRow>(
+      sb,
+      "product_units",
+      "id,product_id,unit_name,qty_multiplier,cost_price,selling_price,wholesale_price,barcode,is_default_sale,is_active,sort_order",
+      storeId,
+      "sort_order",
+    );
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Safe staff roster via the `list_cashiers_public` SECURITY DEFINER RPC.
+ * Migration 078 made `cashiers` deny-all for the browser anon key, so a
+ * direct REST select fails with 401 and would take the whole snapshot
+ * Promise.all down with it.
+ */
+async function fetchCashierRowsPublic(
+  sb: NonNullable<ReturnType<typeof getSupabaseBrowser>>,
+  storeId: string,
+): Promise<CashierRow[]> {
+  const { data, error } = await sb.rpc("list_cashiers_public", {
+    p_store_id: storeId,
+    p_include_inactive: true,
+  });
+  if (error) throw error;
+  return ((data ?? []) as Array<Record<string, unknown>>).map((row) => ({
+    id: String(row.id),
+    name: String(row.name ?? ""),
+    role: String(row.role ?? ""),
+    role_id: (row.role_id as string | null) ?? null,
+    is_active: row.is_active !== false,
+  }));
+}
+
+const BASE_UNIT_FALLBACK = "حبة";
+
+/**
+ * Build the per-product UoM map from server rows with a synthesis fallback.
+ * Every product always ends up with at least one sellable unit (the base
+ * piece at the product's own prices), so unit-aware cart paths never need
+ * existence checks. Exactly one active unit per product is flagged as the
+ * default-sale unit.
+ */
+export function buildProductUnits(
+  products: ProductMap,
+  rows: ProductUnitRow[],
+): ProductUnitsMap {
+  const byProduct = new Map<string, ProductUnitRow[]>();
+  for (const row of rows) {
+    if (!byProduct.has(row.product_id)) byProduct.set(row.product_id, []);
+    byProduct.get(row.product_id)!.push(row);
+  }
+
+  const unitsMap: ProductUnitsMap = {};
+  for (const product of Object.values(products)) {
+    const rowsForProduct = (byProduct.get(product.id) ?? [])
+      .filter((r) => r.is_active !== false)
+      .sort(
+        (a, b) =>
+          Number(a.sort_order ?? 0) - Number(b.sort_order ?? 0) ||
+          String(a.unit_name).localeCompare(String(b.unit_name)),
+      );
+
+    let units: LocalUnit[] = rowsForProduct.map((r) => ({
+      id: r.id,
+      productId: product.id,
+      unitName: String(r.unit_name ?? "").trim() || BASE_UNIT_FALLBACK,
+      qtyMultiplier: Math.max(Number(r.qty_multiplier) || 1, 0.001),
+      costPrice: Number(r.cost_price ?? 0) || product.costPrice,
+      sellingPrice: Number(r.selling_price ?? 0) || product.price,
+      wholesalePrice: Number(r.wholesale_price ?? 0) || product.wholesalePrice,
+      barcode: r.barcode?.trim() || undefined,
+      isDefaultSale: !!r.is_default_sale,
+      isActive: true,
+      sortOrder: Number(r.sort_order ?? 0),
+    }));
+
+    if (units.length === 0) {
+      units = [
+        {
+          id: `${product.id}:base`,
+          productId: product.id,
+          unitName: product.baseUnit?.trim() || BASE_UNIT_FALLBACK,
+          qtyMultiplier: 1,
+          costPrice: product.costPrice,
+          sellingPrice: product.price,
+          wholesalePrice: product.wholesalePrice,
+          isDefaultSale: true,
+          isActive: true,
+          sortOrder: 0,
+        },
+      ];
+    }
+
+    if (!units.some((u) => u.isDefaultSale)) {
+      units[0] = { ...units[0], isDefaultSale: true };
+    }
+
+    unitsMap[product.id] = units;
+  }
+  return unitsMap;
 }
 
 /**
@@ -108,7 +241,7 @@ export async function fetchCatalogSnapshot(storeId: string): Promise<PosSnapshot
       ? "id,name,parent_id,bg_color,is_quick_key,sort_order,show_in_pos"
       : "id,name,parent_id,bg_color,is_quick_key,sort_order";
 
-    const [categories, brands, suppliers, products, variants, cashierRows, staffRoles] = await Promise.all([
+    const [categories, brands, suppliers, products, variants, cashierRows, staffRoles, unitRows] = await Promise.all([
       fetchAllRows<CategoryRow>(sb, "categories", categorySelect, storeId, "name"),
       fetchAllRows<BrandRow>(sb, "product_brands", "id,name", storeId, "name"),
       fetchAllRows<SupplierRow>(sb, "suppliers", "id,name", storeId, "name"),
@@ -126,8 +259,9 @@ export async function fetchCatalogSnapshot(storeId: string): Promise<PosSnapshot
         storeId,
         "variant_label",
       ),
-      fetchAllRows<CashierRow>(sb, "cashiers", "id,name,role,role_id,is_active", storeId, "name"),
+      fetchCashierRowsPublic(sb, storeId),
       fetchAllRows<StaffRoleRow>(sb, "staff_roles", "id,code,name,capabilities,limits", storeId, "sort_order"),
+      fetchProductUnitRows(sb, storeId),
     ]);
 
     const roleById = new Map(staffRoles.map((role) => [role.id, role]));
@@ -231,6 +365,41 @@ export async function fetchCatalogSnapshot(storeId: string): Promise<PosSnapshot
       if (!defaultVariant.has(v.product_id)) defaultVariant.set(v.product_id, v);
     }
 
+    // UoM tier: per-product units with synthesis fallback, plus package
+    // barcodes indexed alongside variant codes (variant codes win collisions).
+    const productUnits = buildProductUnits(productMap, unitRows);
+    for (const units of Object.values(productUnits)) {
+      for (const unit of units) {
+        const code = unit.barcode?.trim();
+        if (!code || barcodeMap[code]) continue;
+        barcodeMap[code] = {
+          barcode: code,
+          productId: unit.productId,
+          // Units are not variants; the synthetic id keeps provenance.
+          variantId: `${unit.id}:unit`,
+          variantLabel: "",
+          unitName: unit.unitName,
+          qtyMultiplier: unit.qtyMultiplier,
+          price: unit.sellingPrice,
+          costPrice: unit.costPrice,
+          wholesalePrice: unit.wholesalePrice,
+          isDefaultSale: false,
+          isDefaultPurchase: false,
+          unitId: unit.id,
+        };
+        barcodeIndex[code] = {
+          product_id: unit.productId,
+          variantId: `${unit.id}:unit`,
+          name: productMap[unit.productId]?.name ?? "",
+          price: unit.sellingPrice,
+          variantLabel: "",
+          unitName: unit.unitName,
+          qtyMultiplier: unit.qtyMultiplier,
+          unitId: unit.id,
+        };
+      }
+    }
+
     const quickKeys: QuickKeyItem[] = products
       .filter((p) => p.is_active && p.show_in_pos && p.is_sellable)
       .map((p, i) => {
@@ -259,6 +428,7 @@ export async function fetchCatalogSnapshot(storeId: string): Promise<PosSnapshot
       products: productMap,
       barcodes: barcodeMap,
       barcodeIndex,
+      productUnits,
       quickKeys,
       cashiers,
     });
@@ -272,6 +442,7 @@ export async function fetchCatalogSnapshot(storeId: string): Promise<PosSnapshot
       products: productMap,
       barcodes: barcodeMap,
       barcodeIndex,
+      productUnits,
       quickKeys,
       cashiers,
       pinSalt: "",

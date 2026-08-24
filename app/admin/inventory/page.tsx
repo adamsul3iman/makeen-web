@@ -16,6 +16,7 @@ import {
   Trash2,
   X,
   Package,
+  PackageOpen,
   Tag,
   Barcode,
 } from "lucide-react";
@@ -32,6 +33,7 @@ import {
   mergeVariants,
 } from "@/lib/inventoryClient";
 import { normalizeArabicText } from "@/lib/arabic";
+import { getTenantStoreId } from "@/lib/tenantClient";
 import { usePosStore } from "@/store/usePosStore";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import {
@@ -51,6 +53,7 @@ import ProductModal, {
   type ProductFormPayload,
   type ProductSaveOptions,
 } from "@/components/admin/ProductModal";
+import UnitsEditorModal from "@/components/admin/UnitsEditorModal";
 import type { EntityOption } from "@/components/shared/EntityCombobox";
 import EntityCombobox from "@/components/shared/EntityCombobox";
 
@@ -306,6 +309,8 @@ export default function AdminInventoryPage() {
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<InventoryProduct | null>(null);
+  // Phase 4 (UoM setup): parent product whose packaging tiers are being edited.
+  const [unitsProduct, setUnitsProduct] = useState<{ id: string; name: string; baseUnit: string } | null>(null);
   const [entryDefaults, setEntryDefaults] = useState<ProductEntryDefaults | null>(null);
   const [newProductSequence, setNewProductSequence] = useState(0);
   const [importing, setImporting] = useState(false);
@@ -715,24 +720,37 @@ export default function AdminInventoryPage() {
       id: "actions",
       header: "إجراءات",
       action: true,
-      cell: ({ product }) => (
+      cell: (row) => (
         <AdminTableActions>
           <button
             type="button"
-            aria-label={`تعديل ${product.name}`}
-            onClick={() => openEdit(product)}
+            aria-label={`تعديل ${row.product.name}`}
+            onClick={() => openEdit(row.product)}
             className="grid h-9 w-9 place-items-center rounded-lg text-primary transition hover:bg-primary/10"
           >
             <Pencil className="h-4 w-4" />
           </button>
+          {row.isParent && (
+            <button
+              type="button"
+              aria-label={`وحدات التغليف — ${row.product.name}`}
+              title="وحدات التغليف (كرتون / قطعة)"
+              onClick={() =>
+                setUnitsProduct({ id: row.product.id, name: row.product.name, baseUnit: row.product.baseUnit })
+              }
+              className="grid h-9 w-9 place-items-center rounded-lg text-primary transition hover:bg-primary/10"
+            >
+              <PackageOpen className="h-4 w-4" />
+            </button>
+          )}
           <button
             type="button"
-            aria-label={`حذف ${product.name}`}
-            onClick={() => handleDelete(product.id)}
-            disabled={deletingId === product.id}
+            aria-label={`حذف ${row.product.name}`}
+            onClick={() => handleDelete(row.product.id)}
+            disabled={deletingId === row.product.id}
             className="grid h-9 w-9 place-items-center rounded-lg text-destructive transition hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {deletingId === product.id ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-destructive border-t-transparent" /> : <Trash2 className="h-4 w-4" />}
+            {deletingId === row.product.id ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-destructive border-t-transparent" /> : <Trash2 className="h-4 w-4" />}
           </button>
         </AdminTableActions>
       ),
@@ -1198,6 +1216,22 @@ export default function AdminInventoryPage() {
           onCreateReference={createReference}
           onClose={closeProductModal}
           onSave={handleSave}
+        />
+      )}
+
+      {unitsProduct && (
+        <UnitsEditorModal
+          key={unitsProduct.id}
+          productId={unitsProduct.id}
+          productName={unitsProduct.name}
+          baseUnit={unitsProduct.baseUnit}
+          storeId={getTenantStoreId() ?? ""}
+          onClose={() => {
+            setUnitsProduct(null);
+            // Unit chips in POS re-price from the catalog snapshot; converge.
+            void hydrateCatalog();
+            void refetch();
+          }}
         />
       )}
     </div>

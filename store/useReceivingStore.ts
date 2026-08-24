@@ -15,6 +15,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { usePosStore } from "./usePosStore";
+import { notifyLocalCatalogWrite } from "../lib/catalogInvalidation";
 import { enqueueSync, getSyncsByStatus, saveReceivingCache, loadReceivingCache, loadCatalogCache, loadCatalogBootCacheSync } from "../lib/idb";
 import { getTenantStoreId } from "../lib/tenantClient";
 import { fetchPriceHistory, fetchReceivingSuppliers } from "../lib/receivingClient";
@@ -197,7 +198,7 @@ interface ReceivingStoreActions {
   setInvoiceMeta: (patch: Partial<Pick<ReceivingDraft, "invoiceNumber" | "invoiceDate" | "dueDate" | "notes" | "taxPercent">>) => void;
   loadSuppliers: () => Promise<void>;
   addSupplier: (input: { name: string; phone?: string }) => Promise<{ ok: boolean; error?: string; supplierId?: string }>;
-  scanBarcode: (raw: string) => Promise<void>;
+  scanBarcode: (raw: string, qty?: number) => Promise<void>;
   loadPriceHistory: (barcode: string) => Promise<void>;
   updateLineCost: (key: string, unitCost: number) => void;
   updateLineQuantity: (key: string, quantity: number) => void;
@@ -386,9 +387,15 @@ export const useReceivingStore = create<ReceivingStore>()(
         return { ok: true, supplierId: id };
       },
 
-      scanBarcode: async (raw) => {
+      /**
+       * Phase 4: quantity-first scanning. `qty` is how many of the scanned
+       * code arrived (default 1 = classic scan-per-piece). A cashier who
+       * knows the carton count can type the quantity once and burst-scan.
+       */
+      scanBarcode: async (raw, qty = 1) => {
         const barcode = (raw ?? "").trim();
         if (!barcode) return;
+        const safeQty = Number.isFinite(qty) ? Math.max(1, Math.round(qty)) : 1;
         const resolved = await findProductByBarcode(barcode);
         if (!resolved) {
           set({ quickAddTarget: barcode, notice: { tone: "info", message: "باركود غير معروف — أضف الصنف أو امسح رمزاً آخر" } });
@@ -415,7 +422,7 @@ export const useReceivingStore = create<ReceivingStore>()(
           draft = {
             ...get().draft,
             lines: get().draft.lines.map((l) =>
-              l.key === barcode ? { ...l, quantity: round2(l.quantity + 1) } : l,
+              l.key === barcode ? { ...l, quantity: round2(l.quantity + safeQty) } : l,
             ),
           };
         } else {
@@ -428,7 +435,7 @@ export const useReceivingStore = create<ReceivingStore>()(
                 productId: product.id,
                 barcode,
                 description,
-                quantity: 1,
+                quantity: safeQty,
                 unitCost: catalogCost,
                 taxPercent,
                 baseUnit,
@@ -696,6 +703,9 @@ export const useReceivingStore = create<ReceivingStore>()(
         try {
           const record = buildReceivingSyncRecord(draft, ctx);
           await enqueueSync(record);
+          // Quick-Add may have created new products/variants locally; nudge
+          // sibling tabs (register) to converge as soon as the mirror lands.
+          notifyLocalCatalogWrite(pos.currentStore?.id ?? getTenantStoreId());
 
           if (draft.cashPaid > 0) {
             const prev = pos.shiftTotals;

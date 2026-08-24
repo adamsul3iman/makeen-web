@@ -1,5 +1,6 @@
 import { getSupabaseBrowser } from "./supabaseBrowser";
 import { getTenantStoreId } from "./tenantClient";
+import { notifyLocalCatalogWrite } from "./catalogInvalidation";
 
 export interface CategoryReferenceItem {
   id: string;
@@ -122,6 +123,7 @@ export async function saveCategory(payload: {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new Error("التصنيف غير موجود");
+    notifyLocalCatalogWrite(storeId);
     return {
       id: data.id, name: data.name, productCount: 0, parentId: data.parent_id, childCount: 0,
       bgColor: data.bg_color, sortOrder: data.sort_order, showInPos: data.show_in_pos ?? true,
@@ -151,6 +153,7 @@ export async function saveCategory(payload: {
     .select("id,name,parent_id,bg_color,sort_order,show_in_pos")
     .single();
   if (error || !created) throw new Error(error?.message ?? "تعذر إنشاء التصنيف");
+  notifyLocalCatalogWrite(storeId);
   return {
     id: created.id, name: created.name, productCount: 0, parentId: created.parent_id, childCount: 0,
     bgColor: created.bg_color, sortOrder: created.sort_order, showInPos: created.show_in_pos ?? true,
@@ -171,6 +174,7 @@ export async function reorderCategories(items: { id: string; sortOrder: number }
       .eq("store_id", storeId);
     if (error) throw new Error(error.message);
   }
+  notifyLocalCatalogWrite(storeId);
 }
 
 export async function deleteCategory(id: string): Promise<void> {
@@ -188,6 +192,7 @@ export async function deleteCategory(id: string): Promise<void> {
 
   const { error } = await sb.from("categories").delete().eq("id", id).eq("store_id", storeId);
   if (error) throw new Error(error.message);
+  notifyLocalCatalogWrite(storeId);
 }
 
 export async function toggleCategoryVisibility(item: CategoryReferenceItem): Promise<boolean> {
@@ -202,6 +207,7 @@ export async function toggleCategoryVisibility(item: CategoryReferenceItem): Pro
     .eq("id", item.id)
     .eq("store_id", storeId);
   if (error) throw new Error(error.message);
+  notifyLocalCatalogWrite(storeId);
   return newShowInPos;
 }
 
@@ -221,11 +227,13 @@ export async function saveBrand(payload: { name: string }, editingId?: string): 
     const { data, error } = await sb.from("product_brands").update({ name: payload.name.trim() }).eq("id", editingId).eq("store_id", storeId).select("id,name").maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new Error("العلامة التجارية غير موجودة");
+    notifyLocalCatalogWrite(storeId);
     return { id: data.id, name: data.name, productCount: 0 };
   }
 
   const { data: created, error } = await sb.from("product_brands").insert({ store_id: storeId, name: payload.name.trim() }).select("id,name").single();
   if (error || !created) throw new Error(error?.message ?? "تعذر إنشاء العلامة التجارية");
+  notifyLocalCatalogWrite(storeId);
   return { id: created.id, name: created.name, productCount: 0 };
 }
 
@@ -241,4 +249,5 @@ export async function deleteBrand(id: string): Promise<void> {
 
   const { error } = await sb.from("product_brands").delete().eq("id", id).eq("store_id", storeId);
   if (error) throw new Error(error.message);
+  notifyLocalCatalogWrite(storeId);
 }

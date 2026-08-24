@@ -309,6 +309,16 @@ export default function ThermalReceipt({
         </section>
       )}
 
+      {/* B2B pricing strip (Phase 4) — the account the sale was priced for */}
+      {!isSettlement && invoice.b2bAccountName && (
+        <section className="mt-1 rounded-sm border border-dashed border-black px-2 py-1 text-[10px] font-black leading-4 text-black">
+          حساب أعمال: {invoice.b2bAccountName}
+          {typeof invoice.b2bMarkupPct === "number" && invoice.b2bMarkupPct > 0
+            ? ` — تسعير خاص +${invoice.b2bMarkupPct}%`
+            : ""}
+        </section>
+      )}
+
       {/* ---------------------------------------------------------------- */}
       {/* Body */}
       {/* ---------------------------------------------------------------- */}

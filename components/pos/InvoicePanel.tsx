@@ -1,10 +1,12 @@
 "use client";
 
-import { memo, useEffect, useRef, useState, useCallback } from "react";
-import { BadgePercent, Barcode, CreditCard, Pause, Pencil, ReceiptText, X, XCircle, Zap } from "lucide-react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { BadgePercent, Barcode, Building2, ClipboardList, CreditCard, Pause, Pencil, ReceiptText, X, XCircle, Zap } from "lucide-react";
 import { anyPosModalOpen, usePosStore } from "@/store/usePosStore";
+import { useOrdersStore } from "@/store/useOrdersStore";
 import { formatMoney } from "@/lib/format";
-import type { DiscountScope, SaleItem } from "@/types/pos.types";
+import { withB2BMarkup } from "@/lib/saleMath";
+import type { DiscountScope, LocalUnit, SaleItem } from "@/types/pos.types";
 import { useDeviceHardware } from "@/hooks/useDeviceHardware";
 import { scannerAcceptsSubmitKey } from "@/lib/deviceHardware";
 import DiscountModal from "./DiscountModal";
@@ -13,6 +15,52 @@ import AdminLineEditModal from "./AdminLineEditModal";
 import EntityCombobox from "@/components/shared/EntityCombobox";
 import QuickCreateEntityModal from "@/components/shared/QuickCreateEntityModal";
 import { useCustomerOptions } from "@/components/pos/useCustomerOptions";
+
+/**
+ * Unit chips (Phase 2): tap to re-price a cart line in another packaging
+ * tier (حبة ⇄ كرتون). Quantity converts so the physical amount on the line
+ * stays constant. Rendered only when the product has more than one active
+ * unit, keeping single-unit products visually unchanged.
+ */
+const UnitChips = memo(function UnitChips({
+  units,
+  item,
+  index,
+  onSetLineUnit,
+}: {
+  units: LocalUnit[];
+  item: SaleItem;
+  index: number;
+  onSetLineUnit: (index: number, unitId: string) => void;
+}) {
+  const activeId =
+    item.unitId ??
+    (units.find((u) => u.isDefaultSale) ?? units[0])?.id;
+  return (
+    <div className="mt-0.5 flex w-fit flex-wrap items-center gap-1">
+      {units.map((unit) => {
+        const isActive = unit.id === activeId;
+        return (
+          <button
+            key={unit.id}
+            type="button"
+            onClick={() => {
+              if (!isActive) onSetLineUnit(index, unit.id);
+            }}
+            className={`rounded-md px-1.5 py-0.5 text-[10px] font-black leading-4 transition ${
+              isActive
+                ? "bg-primary text-primary-foreground"
+                : "border border-slate-200 bg-slate-50 text-slate-500 hover:border-primary/40 hover:text-primary"
+            }`}
+            title={`${unit.unitName} — ${formatMoney(unit.sellingPrice)}`}
+          >
+            {unit.unitName}
+          </button>
+        );
+      })}
+    </div>
+  );
+});
 
 /**
  * A single cart line rendered as a semantic <tr>. Memoized and keyed by
@@ -31,6 +79,11 @@ const CartRow = memo(function CartRow({
   const setLineEditTarget = usePosStore((s) => s.setLineEditTarget);
   const updateQty = usePosStore((s) => s.updateQty);
   const removeItem = usePosStore((s) => s.removeItem);
+  // Stable refs: raw arrays are selected, filtering happens in render.
+  const units = usePosStore((s) => s.productUnits[item.productId]);
+  const setLineUnit = usePosStore((s) => s.setLineUnit);
+
+  const activeUnits = (units ?? []).filter((u) => u.isActive);
 
   return (
     <tr className="border-b border-slate-100/80 transition-colors duration-100 hover:bg-slate-50/80">
@@ -44,6 +97,14 @@ const CartRow = memo(function CartRow({
           </div>
           {item.variantLabel && (
             <span className="text-xs font-bold text-primary">{item.variantLabel}</span>
+          )}
+          {activeUnits.length > 1 && (
+            <UnitChips
+              units={activeUnits}
+              item={item}
+              index={index}
+              onSetLineUnit={setLineUnit}
+            />
           )}
           {item.discount ? (
             <span className="inline-flex w-fit items-center rounded bg-primary/10 px-1.5 py-0.5 text-xs font-black text-primary">
@@ -156,12 +217,21 @@ const CustomerPickerBar = memo(function CustomerPickerBar() {
 export default function InvoicePanel() {
   const items = usePosStore((s) => s.items);
   const totals = usePosStore((s) => s.totals);
+  // Phase 4 (B2B application): primitives/stable refs only — no allocating
+  // selectors. The marked-up view of the cart is derived in render via
+  // useMemo, keeping base prices canonical in the store.
+  const b2bMarkupPct = usePosStore((s) => s.b2bMarkupPct);
+  const activeB2BAccountName = usePosStore((s) => s.activeB2BAccountName);
   const scanBarcode = usePosStore((s) => s.scanBarcode);
   const clearDiscount = usePosStore((s) => s.clearDiscount);
   const isReturnMode = usePosStore((s) => s.isReturnMode);
   const adminSession = usePosStore((s) => s.adminSession);
   const lineEditTarget = usePosStore((s) => s.lineEditTarget);
-  const heldInvoices = usePosStore((s) => s.heldInvoices);
+  // Parked carts now live in the orders store (Phase 2); the badge counts
+  // OPEN orders across devices for this store.
+  const openOrdersCount = useOrdersStore(
+    (s) => s.orders.filter((o) => o.status === "OPEN").length,
+  );
   const openCheckout = usePosStore((s) => s.openCheckout);
   const openHoldModal = usePosStore((s) => s.openHoldModal);
   const holdInvoice = usePosStore((s) => s.holdInvoice);
@@ -186,6 +256,11 @@ export default function InvoicePanel() {
   const confirmClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const empty = items.length === 0;
+
+  // Display-only markup view (Phase 4): same order/length as the store items
+  // so index-based actions (updateQty/removeItem) stay valid. With no B2B
+  // account this returns the original array — zero allocation on the happy path.
+  const displayItems = useMemo(() => withB2BMarkup(items, b2bMarkupPct), [items, b2bMarkupPct]);
 
   // Auto-reset confirm state after 2s or when cart empties
   useEffect(() => {
@@ -367,7 +442,7 @@ export default function InvoicePanel() {
               </tr>
             </thead>
             <tbody>
-              {items.map((item, i) => (
+              {displayItems.map((item, i) => (
                 <CartRow
                   key={item.barcode || `p:${item.productId}`}
                   item={item}
@@ -381,6 +456,13 @@ export default function InvoicePanel() {
       </div>
 
       <footer className="space-y-1 border-t border-slate-200 bg-slate-50/80 px-3 py-1.5">
+        {activeB2BAccountName && b2bMarkupPct > 0 && (
+          <div className="flex items-center gap-1.5 rounded-lg bg-primary/10 px-2.5 py-1.5 text-xs font-black text-primary">
+            <Building2 className="h-3.5 w-4 shrink-0" />
+            <span className="flex-1 truncate">تسعير {activeB2BAccountName}</span>
+            <span className="tabular-nums">+{b2bMarkupPct}%</span>
+          </div>
+        )}
         <div className="flex items-center gap-1.5">
           <button
             type="button"
@@ -439,7 +521,7 @@ export default function InvoicePanel() {
           )}
         </button>
 
-        <div className="grid grid-cols-2 gap-1.5">
+        <div className="grid grid-cols-3 gap-1.5">
           <button
             type="button"
             onClick={handleHoldClick}
@@ -447,11 +529,21 @@ export default function InvoicePanel() {
           >
             <Pause className="h-4 w-4 shrink-0" />
             تعليق
-            {heldInvoices.length > 0 && (
+            {openOrdersCount > 0 && (
               <span className="absolute -top-1 -end-1 grid h-5 min-w-5 place-items-center rounded-full bg-rose-600 px-1 text-xs font-black text-white">
-                {heldInvoices.length}
+                {openOrdersCount}
               </span>
             )}
+          </button>
+          <button
+            type="button"
+            disabled={empty}
+            onClick={handleHoldClick}
+            title="تسجيل الطلب كمفتوح لاستكماله لاحقاً من صفحة الطلبات"
+            className="flex h-11 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-primary/30 bg-primary/5 text-xs font-bold text-primary transition hover:border-primary/50 hover:bg-primary/10 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <ClipboardList className="h-4 w-4 shrink-0" />
+            طلب مفتوح
           </button>
           <button
             type="button"

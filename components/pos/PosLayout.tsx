@@ -8,6 +8,7 @@ import {
   Banknote,
   Building2,
   CheckCircle2,
+  ClipboardList,
   CloudOff,
   HardDrive,
   LayoutDashboard,
@@ -20,6 +21,7 @@ import {
   RefreshCw,
   Settings2,
   X,
+  Zap,
 } from "lucide-react";
 import { usePosStore } from "@/store/usePosStore";
 import { usePosHotkeys } from "@/hooks/usePosHotkeys";
@@ -27,6 +29,8 @@ import { useCrossTabSync } from "@/hooks/useCrossTabSync";
 import { useBackgroundSync } from "@/hooks/useBackgroundSync";
 import { useBarcodeScanner } from "@/hooks/useBarcodeScanner";
 import { useDeviceHardware } from "@/hooks/useDeviceHardware";
+import { useCatalogWatch } from "@/hooks/useCatalogWatch";
+import { useOrdersBoot } from "@/hooks/useOrdersBoot";
 import {
   acquireRegisterLease,
   releaseRegisterLease,
@@ -43,6 +47,7 @@ import {
 import { DropdownMenu } from "@/components/ui/DropdownMenu";
 import SpeedDock from "./SpeedDock";
 import InvoicePanel from "./InvoicePanel";
+import QuickActionsDrawer from "./QuickActionsDrawer";
 import CheckoutModal from "./CheckoutModal";
 import HeldInvoicesModal from "./HeldInvoicesModal";
 import EndShiftModal from "./EndShiftModal";
@@ -73,6 +78,8 @@ export default function PosLayout() {
   useCrossTabSync();
   useBackgroundSync();
   useBarcodeScanner();
+  useCatalogWatch();
+  useOrdersBoot();
 
   const notice = usePosStore((s) => s.notice);
   const dismissNotice = usePosStore((s) => s.dismissNotice);
@@ -115,6 +122,7 @@ export default function PosLayout() {
 
   const [overflowOpen, setOverflowOpen] = useState(false);
   const overflowAnchorRef = useRef<HTMLButtonElement>(null);
+  const [quickActionsOpen, setQuickActionsOpen] = useState(false);
   const [confirmLock, setConfirmLock] = useState(false);
   const confirmLockTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lockScreen = usePosStore((s) => s.lockScreen);
@@ -665,6 +673,23 @@ export default function PosLayout() {
           </div>
 
           <div className="relative flex h-11 shrink-0 items-center gap-1 rounded-xl border border-surface/10 bg-surface/[0.04] p-0.5 shadow-card">
+            <Link
+              href="/orders"
+              aria-label="صفحة الطلبات"
+              title="صفحة الطلبات"
+              className="grid h-10 w-10 place-items-center rounded-lg text-header-muted transition-colors duration-150 hover:bg-surface/10 hover:text-primary-foreground focus-visible:focus-ring active:scale-[0.97]"
+            >
+              <ClipboardList className="h-4 w-4" />
+            </Link>
+            <button
+              type="button"
+              onClick={() => setQuickActionsOpen(true)}
+              aria-label="الإجراءات السريعة (ليونة)"
+              title="الإجراءات السريعة (ليونة)"
+              className="grid h-10 w-10 place-items-center rounded-lg text-header-muted transition-colors duration-150 hover:bg-surface/10 hover:text-primary-foreground focus-visible:focus-ring active:scale-[0.97]"
+            >
+              <Zap className="h-4 w-4" />
+            </button>
             {lastCompletedInvoice && (
               <button
                 type="button"
@@ -805,6 +830,18 @@ export default function PosLayout() {
                       لوحة الإدارة
                     </Link>
                   )}
+                  <Link
+                    href="/orders"
+                    role="menuitem"
+                    onClick={() => setOverflowOpen(false)}
+                    className="flex h-10 w-full items-center gap-2 rounded-lg px-3 text-sm font-bold text-foreground transition-colors duration-150 hover:bg-surface-muted focus-visible:focus-ring active:scale-[0.98]"
+                  >
+                    <ClipboardList
+                      className="h-4 w-4 shrink-0 text-muted"
+                      aria-hidden="true"
+                    />
+                    صفحة الطلبات
+                  </Link>
             </DropdownMenu>
             <button
               type="button"
@@ -855,6 +892,11 @@ export default function PosLayout() {
 
         <CheckoutModal key={`checkout-${checkoutSession}`} />
         <HeldInvoicesModal key={`held-${modalSession}`} />
+        <QuickActionsDrawer
+          key={quickActionsOpen ? "qa-open" : "qa-closed"}
+          open={quickActionsOpen}
+          onClose={() => setQuickActionsOpen(false)}
+        />
         <EndShiftModal key={`close-${modalSession}`} />
         <ShiftDetailsModal key={`details-${modalSession}`} />
         <CashMovementModal key={`cash-movement-${modalSession}`} />

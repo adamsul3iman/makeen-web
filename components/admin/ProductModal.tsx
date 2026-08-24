@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Barcode,
   Building2,
+  Grid3x3,
   Package,
   Percent,
   Plus,
@@ -259,6 +260,74 @@ export default function ProductModal({
       if (removed?.isDefaultSale && next[0]) next[0] = { ...next[0], isDefaultSale: true };
       return next;
     });
+  };
+
+  /* ── Phase 4: Variant Matrix Generator ──────────────────────────────── */
+  // One attribute list (colors) or a cartesian product of two (color ×
+  // size) becomes fully-priced variant rows with unique generated barcodes,
+  // inheriting prices from the first row. Existing labels are never duplicated.
+  const MAX_MATRIX_VARIANTS = 30;
+
+  const [matrixOpen, setMatrixOpen] = useState(false);
+  const [matrixDim1, setMatrixDim1] = useState("");
+  const [matrixDim2, setMatrixDim2] = useState("");
+  const [matrixBusy, setMatrixBusy] = useState(false);
+
+  const parseDims = (raw: string): string[] =>
+    raw.split(/[,،\n]/).map((v) => v.trim()).filter(Boolean).slice(0, 30);
+
+  const generateMatrix = async () => {
+    const dim1 = parseDims(matrixDim1);
+    const dim2 = parseDims(matrixDim2);
+    if (dim1.length === 0 && dim2.length === 0) {
+      setSaveError("أدخل قيمة واحدة على الأقل (مثال: أحمر، أزرق، أسود)");
+      return;
+    }
+    const combos: string[] = [];
+    if (dim1.length > 0 && dim2.length > 0) {
+      for (const a of dim1) for (const b of dim2) combos.push(`${a} - ${b}`);
+    } else {
+      combos.push(...(dim1.length > 0 ? dim1 : dim2));
+    }
+
+    const existingLabels = new Set(rows.map((row) => row.variantLabel.trim()));
+    const room = Math.max(0, MAX_MATRIX_VARIANTS - rows.length);
+    const fresh = combos.filter((c) => !existingLabels.has(c)).slice(0, room);
+    if (fresh.length === 0) {
+      setSaveError("كل التوليفات موجودة مسبقاً أو تم بلوغ الحد الأقصى للوحدات");
+      return;
+    }
+
+    setMatrixBusy(true);
+    setSaveError(null);
+    try {
+      const { generateEan13 } = await import("@/lib/inventoryClient");
+      const template = rows.find((row) => row.costPrice.trim() || row.price.trim());
+      const usedBarcodes = new Set(rows.map((row) => row.barcode.trim()).filter(Boolean));
+      const stamp = Date.now().toString(36);
+      const generated: RowDraft[] = fresh.map((label, i) => {
+        let barcode = generateEan13();
+        while (usedBarcodes.has(barcode)) barcode = generateEan13();
+        usedBarcodes.add(barcode);
+        return {
+          key: `${stamp}-${i}`,
+          barcode,
+          variantLabel: label,
+          costPrice: template?.costPrice ?? "",
+          price: template?.price ?? "",
+          wholesalePrice: template?.wholesalePrice ?? "",
+          isDefaultSale: false,
+        };
+      });
+      setRows((current) => [...current, ...generated]);
+      setMatrixOpen(false);
+      setMatrixDim1("");
+      setMatrixDim2("");
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "تعذر توليد الوحدات");
+    } finally {
+      setMatrixBusy(false);
+    }
   };
 
   const validRows = rows.filter((row) => row.barcode.trim().length > 0);
@@ -605,6 +674,63 @@ export default function ProductModal({
                 <Plus className="h-4 w-4" /> إضافة باركود / وحدة
               </button>
             </div>
+
+            {/* ── Variant Matrix Generator (Phase 4) ── */}
+            {matrixOpen ? (
+              <div className="mb-3 rounded-lg border border-primary/30 bg-primary/5 p-3">
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <label className="text-xs font-bold text-muted">
+                    البعد الأول (مفصولة بفاصلة)
+                    <input
+                      value={matrixDim1}
+                      onChange={(event) => setMatrixDim1(event.target.value)}
+                      placeholder="أحمر، أزرق، أسود"
+                      autoFocus
+                      className={`${fieldClass} mt-1`}
+                    />
+                  </label>
+                  <label className="text-xs font-bold text-muted">
+                    البعد الثاني — اختياري
+                    <input
+                      value={matrixDim2}
+                      onChange={(event) => setMatrixDim2(event.target.value)}
+                      placeholder="كبير، وسط، صغير"
+                      className={`${fieldClass} mt-1`}
+                    />
+                  </label>
+                </div>
+                <p className="mt-1.5 text-[11px] font-bold text-muted">
+                  يولّد صفّاً لكل قيمة (أو كل تقاطع بين البعدين) مع باركود فريد وأسعار منسوخة من أول صف مُسعّر.
+                </p>
+                <div className="mt-2 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void generateMatrix()}
+                    disabled={matrixBusy}
+                    className="flex h-9 items-center gap-1.5 rounded-lg bg-primary px-3 text-xs font-black text-primary-foreground transition hover:bg-primary-hover disabled:opacity-40"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${matrixBusy ? "animate-spin" : ""}`} />
+                    توليد الوحدات
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setMatrixOpen(false); setSaveError(null); }}
+                    className="flex h-9 items-center rounded-lg border border-border bg-white px-3 text-xs font-black text-muted transition hover:text-foreground"
+                  >
+                    إلغاء
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setMatrixOpen(true)}
+                className="mb-3 flex h-9 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-primary/40 bg-primary/5 text-xs font-black text-primary transition hover:bg-primary/10"
+              >
+                <Grid3x3 className="h-4 w-4" />
+                توليد مصفوفة وحدات (ألوان / مقاسات) دفعة واحدة
+              </button>
+            )}
 
             <div className="space-y-3">
               {rows.map((row, index) => (

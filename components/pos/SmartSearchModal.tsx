@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import Fuse from "fuse.js";
 import { Barcode, Minus, PackageSearch, Plus, Search, X } from "lucide-react";
 import { usePosStore } from "@/store/usePosStore";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
@@ -16,6 +17,7 @@ interface SearchEntry {
   price: number;
   unitName: string;
   categoryName?: string;
+  brandName?: string;
   barcodes: Array<{ code: string; price: number; unitName: string; variantLabel?: string }>;
 }
 
@@ -26,14 +28,64 @@ interface ScoredResult {
   matchedBarcode?: SearchEntry["barcodes"][number];
 }
 
-/** Rank the (name/barcode/variant) hits for a query. Pure + standalone so the
- * debounced results list and a forced synchronous search share one code path. */
-function searchEntries(entries: SearchEntry[], query: string): ScoredResult[] {
+/**
+ * Fuzzy index document: one pre-normalized haystack per product covering
+ * name + brand + category + every variant label. Arabic normalization runs
+ * at INDEX BUILD time, so per-keystroke cost is pure Fuse matching.
+ */
+interface FuseDoc {
+  entry: SearchEntry;
+  text: string;
+}
+
+/** Tier boundary between exact hits (legacy scorer) and fuzzy hits. */
+const EXACT_TIER_SCORE = 10;
+
+function buildFuseIndex(entries: SearchEntry[]): Fuse<FuseDoc> | null {
+  if (entries.length === 0) return null;
+  const docs: FuseDoc[] = entries.map((entry) => ({
+    entry,
+    text: normalizeArabicText(
+      [
+        entry.name,
+        entry.brandName ?? "",
+        entry.categoryName ?? "",
+        ...entry.barcodes.map((b) => b.variantLabel ?? ""),
+      ]
+        .filter(Boolean)
+        .join(" "),
+    ),
+  }));
+  return new Fuse(docs, {
+    keys: ["text"],
+    // Space-separated tokens are AND-ed independently, so "علامة صنف" and
+    // "صنف علامة" match identically — order-free brand+category lookup.
+    useExtendedSearch: true,
+    ignoreLocation: true,
+    threshold: 0.4,
+    minMatchCharLength: 2,
+  });
+}
+
+/**
+ * Hybrid ranking:
+ *   Tier 0 — exact barcode hit (the scan path must stay O(1) and absolute);
+ *   Tier 1 — legacy startsWith/includes scoring on name/barcode/variant;
+ *   Tier 2 — Fuse fuzzy matches over the concatenated haystack.
+ * Results stay capped at LIMIT with exact tiers always ahead of fuzzy.
+ */
+function searchEntries(
+  entries: SearchEntry[],
+  fuse: Fuse<FuseDoc> | null,
+  query: string,
+): ScoredResult[] {
   const q = normalizeArabicText(query.trim());
   if (!q) {
     return entries.slice(0, LIMIT).map((entry) => ({ entry, score: 0 }));
   }
   const scored: ScoredResult[] = [];
+  const seen = new Set<string>();
+
   for (const entry of entries) {
     const name = normalizeArabicText(entry.name);
     const nameScore =
@@ -57,19 +109,37 @@ function searchEntries(entries: SearchEntry[], query: string): ScoredResult[] {
       }
       score = best;
     }
-    if (score >= 0) scored.push({ entry, score, matchedBarcode });
+    if (score >= 0 && scored.length < LIMIT) {
+      scored.push({ entry, score, matchedBarcode });
+      seen.add(entry.productId);
+    }
   }
-  scored.sort(
-    (a, b) => a.score - b.score || a.entry.name.localeCompare(b.entry.name, "ar"),
-  );
-  return scored.slice(0, LIMIT);
+
+  if (fuse) {
+    const fuzzyHits = fuse.search(q);
+    for (const { item } of fuzzyHits) {
+      if (scored.length >= LIMIT) break;
+      if (seen.has(item.entry.productId)) continue;
+      seen.add(item.entry.productId);
+      scored.push({ entry: item.entry, score: EXACT_TIER_SCORE });
+    }
+  }
+
+  return scored
+    .sort((a, b) => a.score - b.score || a.entry.name.localeCompare(b.entry.name, "ar"))
+    .slice(0, LIMIT);
 }
 
 /**
  * Global keyboard-first product search (Ctrl+K / ⌘K).
  *
- * Type-ahead over product names (Arabic-safe) and barcodes. Keyboard
- * model mirrors the top-tier registers:
+ * Hybrid ranking over product names (Arabic-safe), barcodes, brands,
+ * categories and variant labels:
+ *  - exact/prefix hits win (barcodes stay an O(1) absolute path)
+ *  - Fuse.js fuzzy tier matches tokens in ANY order — typing the brand and
+ *    category out of order still finds the item
+ *
+ * Keyboard model mirrors the top-tier registers:
  *  - ArrowUp/ArrowDown: move the selection
  *  - Enter: add the selected item (closes the overlay, barcode input regains focus)
  *  - "/": enter quantity mode, digits build "×N", Enter adds N units
@@ -93,7 +163,9 @@ export default function SmartSearchModal() {
 
   // Debounce the query so a long type-ahead over ~6,600 products never scans
   // the full catalog on every keystroke. The input itself stays instant.
-  const debouncedQuery = useDebouncedValue(query, 300);
+  // Fuse matching on ~6,600 docs is a few ms — an 80ms debounce keeps the
+  // input instant while collapsing burst typing into one search pass.
+  const debouncedQuery = useDebouncedValue(query, 80);
 
   const entries = useMemo<SearchEntry[]>(() => {
     const byProduct: Record<string, SearchEntry["barcodes"]> = {};
@@ -113,27 +185,32 @@ export default function SmartSearchModal() {
         price: p.price,
         unitName: p.baseUnit,
         categoryName: categories[p.categoryId]?.name,
+        brandName: p.brandName,
         barcodes: byProduct[id] ?? [],
       });
     }
     return list;
   }, [products, barcodes, categories]);
 
+  // Rebuilt only when the hydrated snapshot changes (loadSnapshot → new
+  // products/barcodes/categories references), never per keystroke.
+  const fuse = useMemo(() => buildFuseIndex(entries), [entries]);
+
   const results = useMemo<ScoredResult[]>(
-    () => searchEntries(entries, debouncedQuery),
-    [entries, debouncedQuery],
+    () => searchEntries(entries, fuse, debouncedQuery),
+    [entries, fuse, debouncedQuery],
   );
 
   const selectedResult = results[Math.min(selected, Math.max(0, results.length - 1))];
 
   const addSelected = () => {
-    // If the user presses Enter inside the 300ms debounce window the memoized
+    // If the user presses Enter inside the debounce window the memoized
     // results are still from the previous query — run one synchronous search
     // against the live query so the right item is added.
     const live =
       query.trim() === debouncedQuery.trim()
         ? selectedResult
-        : searchEntries(entries, query)[0];
+        : searchEntries(entries, fuse, query)[0];
     if (!live) return;
     const units = Math.max(1, qty);
     addSearchItem(

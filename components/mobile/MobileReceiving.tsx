@@ -28,6 +28,7 @@ import ProductInsightCard from "@/components/mobile/ProductInsightCard";
 import AddSupplierModal from "@/components/mobile/AddSupplierModal";
 import ReceivingNegotiationShield from "@/components/mobile/ReceivingNegotiationShield";
 import { useBackgroundSync } from "@/hooks/useBackgroundSync";
+import { useCatalogWatch } from "@/hooks/useCatalogWatch";
 import { probeStaffCapability } from "@/lib/clientAdminSession";
 import { usePosStoreHydrated } from "@/hooks/usePosStoreHydrated";
 import { usePosStore } from "@/store/usePosStore";
@@ -403,6 +404,10 @@ export default function MobileReceiving() {
 
   const [scanOpen, setScanOpen] = useState(false);
   const [manualBarcode, setManualBarcode] = useState("");
+  // Phase 4: quantity-first receiving — the stepper feeds BOTH the camera
+  // scan and the manual entry, so "12 cartons of X" is one scan, not twelve.
+  const [scanQty, setScanQty] = useState("1");
+  const manualInputRef = useRef<HTMLInputElement | null>(null);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [addSupplierOpen, setAddSupplierOpen] = useState(false);
   const mainScrollRef = useRef<HTMLElement | null>(null);
@@ -411,6 +416,9 @@ export default function MobileReceiving() {
   // offline queue; the 15s background sync engine must run here too, or the
   // batch never drains to the server (it is mounted only inside PosLayout).
   useBackgroundSync();
+  // Live catalog convergence: inventory edits made in the back office reach
+  // this surface without a reload (broadcast/realtime/stamp triggers).
+  useCatalogWatch();
 
   useEffect(() => {
     void loadSuppliers();
@@ -432,9 +440,16 @@ export default function MobileReceiving() {
     void logoutToLogin();
   };
 
+  const parsedScanQty = (): number => {
+    const n = Math.round(parsePrice(scanQty));
+    return Number.isFinite(n) && n >= 1 ? n : 1;
+  };
+
   const handleScanDetected = (barcode: string) => {
     setScanOpen(false);
-    void scanBarcode(barcode);
+    void scanBarcode(barcode, parsedScanQty());
+    // Burst mode: the quantity was consumed by this scan.
+    setScanQty("1");
   };
 
   const handleManualScan = (event: FormEvent<HTMLFormElement>) => {
@@ -442,7 +457,9 @@ export default function MobileReceiving() {
     const barcode = manualBarcode.trim();
     if (!barcode) return;
     setManualBarcode("");
-    void scanBarcode(barcode);
+    void scanBarcode(barcode, parsedScanQty());
+    setScanQty("1");
+    manualInputRef.current?.focus();
   };
 
   const handleCommit = async () => {
@@ -584,7 +601,24 @@ export default function MobileReceiving() {
           )}
 
           <form onSubmit={handleManualScan} className="mt-3 flex gap-2">
+            <div className="flex h-11 w-24 shrink-0 items-center rounded-xl border border-border bg-surface-muted px-1">
+              <input
+                type="text"
+                inputMode="numeric"
+                dir="ltr"
+                aria-label="كمية المسح"
+                value={scanQty}
+                onChange={(event) => setScanQty(event.target.value)}
+                onBlur={() => {
+                  const n = parsedScanQty();
+                  setScanQty(String(n));
+                }}
+                className="min-w-0 flex-1 bg-transparent text-center font-mono text-sm font-black text-foreground outline-none"
+              />
+              <span className="shrink-0 pe-1 text-[10px] font-black text-muted-foreground">كمية</span>
+            </div>
             <input
+              ref={manualInputRef}
               type="text"
               inputMode="numeric"
               dir="ltr"
