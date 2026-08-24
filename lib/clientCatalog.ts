@@ -73,8 +73,6 @@ interface VariantRow {
 interface CashierRow {
   id: string;
   name: string;
-  pin_salt: string | null;
-  pin_hash: string | null;
   role: string;
   role_id: string | null;
   is_active: boolean | null;
@@ -86,17 +84,6 @@ interface StaffRoleRow {
   name: string;
   capabilities: string[] | null;
   limits: StaffLimits | null;
-}
-
-function pinSaltFor(storeId: string): string {
-  return sha256Hex(`pos:pin-salt:${storeId}`).slice(0, 16);
-}
-
-function cashierPin(c: CashierRow, storeId: string): { pinHash: string; pinSalt: string } {
-  // The plaintext `pin` column was dropped by migration 076 after 016
-  // backfilled every legacy row into pin_hash; hash-less rows cannot
-  // authenticate and are filtered out by the PIN check downstream.
-  return { pinHash: c.pin_hash ?? "", pinSalt: c.pin_salt ?? pinSaltFor(storeId) };
 }
 
 function catalogVersionOf(value: unknown): string {
@@ -139,25 +126,26 @@ export async function fetchCatalogSnapshot(storeId: string): Promise<PosSnapshot
         storeId,
         "variant_label",
       ),
-      fetchAllRows<CashierRow>(sb, "cashiers", "id,name,role,role_id,pin_salt,pin_hash,is_active", storeId, "name"),
+      fetchAllRows<CashierRow>(sb, "cashiers", "id,name,role,role_id,is_active", storeId, "name"),
       fetchAllRows<StaffRoleRow>(sb, "staff_roles", "id,code,name,capabilities,limits", storeId, "sort_order"),
     ]);
 
-    const fallbackSalt = pinSaltFor(storeId);
     const roleById = new Map(staffRoles.map((role) => [role.id, role]));
 
+    // Migration 078: PIN verifiers never leave the database. Snapshot cashiers
+    // carry safe profile data only — pinHash is intentionally empty so the
+    // legacy local match in loginCashier can never succeed; offline unlock of
+    // the ACTIVE cashier goes through the cashierSessionCache instead.
     const cashiers: Cashier[] = cashierRows
       .filter((c) => c.is_active !== false)
       .map((c) => {
-        const { pinHash, pinSalt } = cashierPin(c, storeId);
         const roleRow = c.role_id ? roleById.get(c.role_id) : undefined;
         const roleCode = roleRow?.code ?? normalizeStaffRoleCode(c.role);
         const preset = STAFF_ROLE_PRESETS[normalizeStaffRoleCode(roleCode)];
         return {
           id: c.id,
           name: c.name,
-          pinHash,
-          pinSalt: pinSalt ?? fallbackSalt,
+          pinHash: "",
           role: c.role,
           roleId: c.role_id ?? undefined,
           roleCode,
@@ -273,7 +261,6 @@ export async function fetchCatalogSnapshot(storeId: string): Promise<PosSnapshot
       barcodeIndex,
       quickKeys,
       cashiers,
-      pinSalt: fallbackSalt,
     });
 
     return {
@@ -287,7 +274,7 @@ export async function fetchCatalogSnapshot(storeId: string): Promise<PosSnapshot
       barcodeIndex,
       quickKeys,
       cashiers,
-      pinSalt: fallbackSalt,
+      pinSalt: "",
     };
   } catch {
     return null;

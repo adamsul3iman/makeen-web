@@ -852,9 +852,11 @@ async function loadSalesLedgerFilters(
   sb: NonNullable<ReturnType<typeof getSupabaseBrowser>>,
   storeId: string,
 ): Promise<SalesLedgerResponse["filters"]> {
+  // Migration 078: cashiers is deny-all for the browser now; safe roster
+  // names come from the list_cashiers_public RPC.
   const [branchResult, cashierResult] = await Promise.all([
     sb.from("branches").select("id,name").eq("store_id", storeId).order("name"),
-    sb.from("cashiers").select("id,name").eq("store_id", storeId).order("name"),
+    sb.rpc("list_cashiers_public", { p_store_id: storeId, p_include_inactive: false }),
   ]);
   if (branchResult.error) throw new Error(branchResult.error.message);
   if (cashierResult.error) throw new Error(cashierResult.error.message);
@@ -867,7 +869,10 @@ async function loadSalesLedgerFilters(
   return {
     branches,
     terminals: (terminalResult.data ?? []).map((row) => ({ id: row.id, name: row.name, branchId: row.branch_id })),
-    cashiers: (cashierResult.data ?? []).map((row) => ({ id: row.id, name: row.name })),
+    cashiers: ((cashierResult.data ?? []) as Array<Record<string, unknown>>).map((row) => ({
+      id: row.id as string,
+      name: row.name as string,
+    })),
   };
 }
 

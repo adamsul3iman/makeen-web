@@ -70,7 +70,14 @@ import {
 } from "@/lib/persistStorage";
 import { emitPosSound } from "@/lib/posSound";
 import { getSupabaseBrowser, isSupabaseBrowserConfigured } from "@/lib/supabaseBrowser";
+import {
+  clearCachedCashierSession,
+  findCachedCashierSessionByCode,
+  loadCachedCashierSession,
+  saveCachedCashierSession,
+} from "@/lib/cashierSessionCache";
 import { hasCapability, STAFF_ROLE_PRESETS, normalizeStaffRoleCode, homePathForDevice } from "@/lib/permissions";
+import { updateSettings, updateTaxSettings, type StoreSettings } from "@/lib/settingsClient";
 import { pushInvoiceToIstd } from "@/lib/clientIstd";
 
 /** Legacy fallback VAT percent for stores without fiscal settings. */
@@ -174,8 +181,21 @@ export type SecondaryAction =
       cashierId: string;
       name?: string;
     }
+  | { type: "save_settings"; fields: StoreSettingsUpdate }
+  | {
+      type: "save_istd";
+      fields: { tax_number?: string; istd_client_id?: string; istd_client_secret?: string };
+    }
   | { type: "approve_discount"; discount: DiscountInput }
   | { type: "toggle_return_mode" };
+
+/**
+ * Settings form payload awaiting the owner's password. When `email` differs
+ * from the current store email, the confirm path runs
+ * admin_update_owner_email (password proof) BEFORE updateSettings, because the
+ * email is the owner's login identity on both stores + cashiers.
+ */
+export type StoreSettingsUpdate = Partial<Omit<StoreSettings, "id" | "code" | "subscriptionStatus">>;
 
 /** New/edited cashier row collected by the inline management modal. */
 export interface CashierDraft {
@@ -1095,8 +1115,128 @@ type StaffLoginLookup = {
 };
 
 type StaffLoginResult =
-  | { ok: true; payload: LoginPayloadData }
+  | { ok: true; payload: LoginPayloadData; username?: string; verifier?: { salt: string; hash: string } }
   | { ok: false; error: string; unauthorized?: boolean };
+
+/**
+ * Shape of the `verify_staff_pin` SECURITY DEFINER RPC (migration 078). The
+ * roster's PIN hashes never reach the browser; on a successful match the RPC
+ * returns the cashier's SAFE profile plus their own verifier so the register
+ * can cache the active cashier for offline unlock (cashierSessionCache).
+ */
+type StaffPinVerification = {
+  status: "ok" | "invalid" | "locked" | "account_suspended" | "invalid_store" | "store_suspended";
+  cashier?: {
+    id: string;
+    name: string;
+    username: string | null;
+    role: string;
+    role_id: string | null;
+  };
+  role?: {
+    id: string;
+    code: string;
+    name: string;
+    capabilities: string[] | null;
+    limits: Record<string, number | null> | null;
+  } | null;
+  verifier?: { salt: string; hash: string };
+  retry_after_seconds?: number;
+};
+
+function staffPinVerificationError(result: StaffPinVerification): string | null {
+  switch (result.status) {
+    case "account_suspended":
+      return "الحساب موقوف — تواصل مع مدير المتجر";
+    case "locked": {
+      const mins = Math.max(1, Math.ceil((result.retry_after_seconds ?? 60) / 60));
+      return `محاولات خاطئة كثيرة — أعد المحاولة بعد ${mins} دقيقة`;
+    }
+    case "invalid_store":
+      return "المتجر غير موجود";
+    case "store_suspended":
+      return "هذا المتجر موقوف";
+    default:
+      return null;
+  }
+}
+
+/**
+ * Persists the ACTIVE cashier's offline-unlock material after a successful
+ * online verification. Single slot per store — the last verified cashier wins,
+ * exactly the scope the business caveat allows.
+ */
+function writeCashierSessionCache(
+  payload: LoginPayloadData,
+  verifier: { salt: string; hash: string },
+  username: string,
+): void {
+  if (!verifier.salt || !verifier.hash) return;
+  saveCachedCashierSession({
+    storeId: payload.store.id,
+    storeCode: payload.store.code ?? "",
+    username: (username ?? "").trim().toLowerCase(),
+    pinHash: verifier.hash,
+    pinSalt: verifier.salt,
+    store: payload.store,
+    cashier: {
+      id: payload.cashier.id,
+      name: payload.cashier.name,
+      role: payload.cashier.role,
+      roleId: payload.cashier.roleId,
+      roleCode: payload.cashier.roleCode,
+      roleName: payload.cashier.roleName,
+      capabilities: payload.cashier.capabilities,
+      limits: payload.cashier.limits,
+    },
+    branches: payload.branches ?? [],
+    terminals: payload.terminals ?? [],
+    defaultBranchId: payload.defaultBranchId ?? null,
+    defaultTerminalId: payload.defaultTerminalId ?? null,
+    savedAt: new Date().toISOString(),
+  });
+}
+
+/**
+ * Offline /login fallback for the ACTIVE cashier (business caveat: an open
+ * shift must survive Wi-Fi loss). Verifies the PIN against the single cached
+ * verifier and rebuilds the session entirely from cached safe data. Never
+ * succeeds for a different username or the owner account.
+ */
+function tryOfflineStaffUnlock(
+  set: (partial: Partial<PosStore>) => void,
+  get: () => PosStore,
+  storeCode: string,
+  username: string,
+  pin: string,
+): boolean {
+  const cached = findCachedCashierSessionByCode(storeCode);
+  if (!cached) return false;
+  if ((cached.username || "") !== username.trim().toLowerCase()) return false;
+  if (sha256Hex(pin + cached.pinSalt) !== cached.pinHash) return false;
+  const profile = cached.cashier;
+  if (profile.role === "admin" || profile.role === "مدير") return false;
+
+  applyLoginPayloadToStore(set, get, {
+    store: cached.store,
+    cashier: {
+      id: profile.id,
+      name: profile.name,
+      role: profile.role,
+      roleId: profile.roleId,
+      roleCode: profile.roleCode,
+      roleName: profile.roleName,
+      capabilities: profile.capabilities,
+      limits: profile.limits,
+    },
+    branches: cached.branches,
+    terminals: cached.terminals,
+    defaultBranchId: cached.defaultBranchId,
+    defaultTerminalId: cached.defaultTerminalId,
+  });
+  set({ notice: { message: "تم فتح الصندوق دون اتصال", tone: "success" } });
+  return true;
+}
 
 /**
  * Direct-Supabase staff authentication shared by the register flows that used
@@ -1129,74 +1269,36 @@ async function resolveStaffLoginPayload(
     return { ok: false, error: "هذا المتجر موقوف" };
   }
 
-  const { data: cashierRows, error: cashierError } = await sb
-    .from("cashiers")
-    .select("id,name,role,role_id,pin_salt,pin_hash,username,is_active")
-    .eq("store_id", store.id);
-  if (cashierError) throw cashierError;
-
-  // Suspended staff can't sign in, but their row stays discoverable so the
-  // sign-in page can say "الحساب موقوف" rather than a generic 401.
-  const username = input.username?.trim().toLowerCase() ?? "";
-  if (username) {
-    const suspended = (cashierRows ?? []).find(
-      (r) =>
-        r.role !== "admin" &&
-        r.role !== "مدير" &&
-        r.username &&
-        r.username.trim().toLowerCase() === username &&
-        r.is_active === false,
-    );
-    if (suspended) {
-      return { ok: false, error: "الحساب موقوف — تواصل مع مدير المتجر" };
-    }
-  }
-
-  // F3: verify against the stored per-cashier hash (sha256(pin + salt)).
-  // Legacy rows without a hash fall back to the plaintext pin column. Only
-  // cashier rows are eligible — the owner (role 'admin') holds dashboard
-  // credentials and never a PIN, so its hash can never unlock a register.
-  const cashier = (cashierRows ?? []).find((r) => {
-    if (r.role === "admin" || r.role === "مدير") return false;
-    if (r.is_active === false) return false;
-    if (username && (!r.username || r.username.trim().toLowerCase() !== username)) return false;
-    // Hash-less rows can no longer authenticate: migration 076 backfilled
-    // every legacy row via 016's formula and dropped the plaintext pin column.
-    return r.pin_hash
-      ? sha256Hex(input.pin + (r.pin_salt ?? sha256Hex(`pos:pin-salt:${store.id}`).slice(0, 16))) === r.pin_hash
-      : false;
+  // Migration 078: PIN verification runs inside the verify_staff_pin SECURITY
+  // DEFINER RPC — the roster's hash material never reaches the browser.
+  const { data: pinData, error: pinError } = await sb.rpc("verify_staff_pin", {
+    p_store_id: store.id,
+    p_username: input.username?.trim().toLowerCase() || null,
+    p_pin: input.pin.trim(),
   });
-  if (!cashier) {
-    return { ok: false, error: "بيانات الدخول غير صحيحة", unauthorized: true };
+  if (pinError) throw pinError;
+  const pin = (pinData ?? {}) as StaffPinVerification;
+  if (pin.status !== "ok" || !pin.cashier) {
+    return { ok: false, error: staffPinVerificationError(pin) ?? "بيانات الدخول غير صحيحة", unauthorized: true };
   }
+  const cashier = pin.cashier;
 
+  // Role snapshot straight from the RPC (custom staff_roles row when bound,
+  // preset fallback otherwise) — same semantics as the previous local build.
   const fallbackRoleCode = normalizeStaffRoleCode(cashier.role);
-  let staffRole = {
-    id: cashier.role_id as string | null,
-    code: fallbackRoleCode,
-    name: STAFF_ROLE_PRESETS[fallbackRoleCode].name,
-    capabilities: [...STAFF_ROLE_PRESETS[fallbackRoleCode].capabilities],
-    limits: { ...STAFF_ROLE_PRESETS[fallbackRoleCode].limits },
+  const staffRole = {
+    id: cashier.role_id,
+    code: pin.role ? normalizeStaffRoleCode(pin.role.code) : fallbackRoleCode,
+    name: pin.role?.name ?? STAFF_ROLE_PRESETS[fallbackRoleCode].name,
+    capabilities:
+      Array.isArray(pin.role?.capabilities) && pin.role.capabilities.length > 0
+        ? [...pin.role.capabilities]
+        : [...STAFF_ROLE_PRESETS[fallbackRoleCode].capabilities],
+    limits:
+      pin.role?.limits && typeof pin.role.limits === "object"
+        ? (pin.role.limits as Record<string, number | null>)
+        : { ...STAFF_ROLE_PRESETS[fallbackRoleCode].limits },
   };
-  if (cashier.role_id) {
-    const { data: roleRow } = await sb
-      .from("staff_roles")
-      .select("id,code,name,capabilities,limits")
-      .eq("id", cashier.role_id)
-      .eq("store_id", store.id)
-      .maybeSingle();
-    if (roleRow) {
-      staffRole = {
-        id: roleRow.id,
-        code: normalizeStaffRoleCode(roleRow.code),
-        name: roleRow.name,
-        capabilities: Array.isArray(roleRow.capabilities) ? roleRow.capabilities : [],
-        limits: roleRow.limits && typeof roleRow.limits === "object"
-          ? roleRow.limits as typeof staffRole.limits
-          : { ...STAFF_ROLE_PRESETS[fallbackRoleCode].limits },
-      };
-    }
-  }
 
   const { data: branches } = await sb
     .from("branches")
@@ -1224,6 +1326,8 @@ async function resolveStaffLoginPayload(
 
   return {
     ok: true,
+    username: (cashier.username ?? "").trim().toLowerCase(),
+    verifier: pin.verifier,
     payload: {
       store: {
         id: store.id,
@@ -2658,13 +2762,53 @@ export const usePosStore = create<PosStore>()(
         // Owner/cashier separation: only cashier rows can unlock a register.
         // The owner (role 'admin') logs in with email + password on the
         // dashboard and never holds a PIN, so its empty hash must never match.
+        // Migration 078: production snapshots carry NO hash material (empty
+        // pinHash never matches), so this legacy path is test-only; the real
+        // offline unlock below uses the active cashier's cached verifier.
         const cashier = state.cashiers.find(
           (c) =>
             c.role !== "admin" &&
             c.role !== "مدير" &&
             c.pinHash === sha256Hex(code + (c.pinSalt ?? state.pinSalt)),
         );
-        if (!cashier) {
+        let unlocked: {
+          id: string;
+          name: string;
+          role: string;
+          roleId?: string;
+          roleCode?: string;
+          roleName?: string;
+          capabilities?: string[];
+          limits?: Record<string, number | null>;
+        } | null = null;
+        if (cashier) {
+          unlocked = cashier;
+        } else {
+          // Offline unlock of the ACTIVE cashier only — the single verifier
+          // cached by writeCashierSessionCache at the last online login.
+          const storeIdForCache = state.currentStore?.id;
+          const cached = storeIdForCache
+            ? loadCachedCashierSession(storeIdForCache)
+            : null;
+          if (
+            cached &&
+            cached.cashier.role !== "admin" &&
+            cached.cashier.role !== "مدير" &&
+            sha256Hex(code + cached.pinSalt) === cached.pinHash
+          ) {
+            unlocked = {
+              id: cached.cashier.id,
+              name: cached.cashier.name,
+              role: cached.cashier.role,
+              roleId: cached.cashier.roleId,
+              roleCode: cached.cashier.roleCode,
+              roleName: cached.cashier.roleName,
+              capabilities: cached.cashier.capabilities,
+              limits: cached.cashier.limits,
+            };
+          }
+        }
+        if (!unlocked) {
           const next = state.pinFailCount + 1;
           if (next >= PIN_MAX_ATTEMPTS) {
             const level = state.pinLockoutLevel;
@@ -2685,37 +2829,45 @@ export const usePosStore = create<PosStore>()(
         set({ pinFailCount: 0, pinLockoutLevel: 0, pinLockedUntil: 0 });
         set({
           currentCashier: {
-            id: cashier.id,
-            name: cashier.name,
-            role: cashier.role,
-            roleId: cashier.roleId,
-            roleCode: cashier.roleCode,
-            roleName: cashier.roleName,
-            capabilities: cashier.capabilities,
-            limits: cashier.limits,
+            id: unlocked.id,
+            name: unlocked.name,
+            role: unlocked.role,
+            roleId: unlocked.roleId,
+            roleCode: unlocked.roleCode,
+            roleName: unlocked.roleName,
+            capabilities: unlocked.capabilities,
+            limits: unlocked.limits,
             sessionReady: false,
           },
         });
         persistDurablePosState(get());
 
-        // Offline unlock remains immediate. When online, verify against live
-        // cashier rows and refresh the signed role snapshot straight from
-        // Supabase — the legacy /api/login round-trip is gone.
+        // Offline unlock remains immediate. When online, verify via the
+        // verify_staff_pin RPC and refresh the signed role snapshot (and the
+        // active-cashier offline cache) straight from Supabase.
         const storeId = state.currentStore?.id;
         if (storeId) {
           void (async () => {
             const sb = getSupabaseBrowser();
             if (!sb || !isSupabaseBrowserConfigured()) return;
             const result = await resolveStaffLoginPayload(sb, { storeId, pin: code });
-            if (!result.ok || get().currentCashier?.id !== cashier.id) return;
+            if (!result.ok || get().currentCashier?.id !== unlocked.id) return;
             set({ currentCashier: { ...result.payload.cashier, sessionReady: true } });
             persistDurablePosState(get());
+            if (result.ok && result.verifier) {
+              writeCashierSessionCache(
+                result.payload,
+                result.verifier,
+                result.username ?? "",
+              );
+            }
           })().catch(() => undefined);
         }
         return true;
       },
 
       logoutCashier: () => {
+        clearCachedCashierSession(get().currentStore?.id);
         set({ currentCashier: null, adminSession: null });
         persistDurablePosState(get());
       },
@@ -2794,20 +2946,33 @@ export const usePosStore = create<PosStore>()(
 
       staffLogin: async ({ storeCode, username, pin }) => {
         const code = pin.trim();
-        if (!storeCode.trim() || !username.trim() || !code) {
+        const uname = username.trim().toLowerCase();
+        if (!storeCode.trim() || !uname || !code) {
           set({
             notice: { message: "أدخل كود المتجر واسم المستخدم ورمز PIN", tone: "error" },
           });
           return false;
         }
-        try {
-          const sb = getSupabaseBrowser();
-          if (!sb || !isSupabaseBrowserConfigured()) {
-            set({ notice: { message: "Supabase غير مُعد — تحقق من ملف .env.local", tone: "error" } });
+
+        // Migration 078 offline fallback: the LAST ACTIVE cashier of this
+        // store can still unlock during an outage (business caveat — open
+        // shifts survive Wi-Fi loss). Everyone else must wait for network.
+        const tryOffline = (): boolean =>
+          tryOfflineStaffUnlock(set, get, storeCode.trim().toUpperCase(), uname, code);
+
+        let sb: NonNullable<ReturnType<typeof getSupabaseBrowser>>;
+        {
+          const client = getSupabaseBrowser();
+          if (!client || !isSupabaseBrowserConfigured()) {
+            if (tryOffline()) return true;
+            set({ notice: { message: "تعذر الاتصال — تحقق من الشبكة", tone: "error" } });
             return false;
           }
+          sb = client;
+        }
 
-          // 1. Resolve store by code.
+        try {
+          // 1. Resolve the store row by code (needed for the login payload).
           const storeCodeNorm = storeCode.trim().toUpperCase();
           const { data: store, error: storeError } = await sb
             .from("stores")
@@ -2824,74 +2989,45 @@ export const usePosStore = create<PosStore>()(
             return false;
           }
 
-          // 2. Fetch all non-admin cashiers for this store.
-          const { data: cashierRows, error: cashierError } = await sb
-            .from("cashiers")
-            .select("id,name,role,role_id,pin_salt,pin_hash,username,is_active")
-            .eq("store_id", store.id);
-          if (cashierError) throw cashierError;
-
-          // Check for suspended staff.
-          const uname = username.trim().toLowerCase();
-          const suspended = (cashierRows ?? []).find(
-            (r) =>
-              r.role !== "admin" &&
-              r.role !== "مدير" &&
-              r.username &&
-              r.username.trim().toLowerCase() === uname &&
-              r.is_active === false,
-          );
-          if (suspended) {
-            set({ notice: { message: "الحساب موقوف — تواصل مع مدير المتجر", tone: "error" } });
-            return false;
-          }
-
-          // 3. Match PIN against cashier rows (sha256(pin + salt)).
-          const cashier = (cashierRows ?? []).find((r) => {
-            if (r.role === "admin" || r.role === "مدير") return false;
-            if (r.is_active === false) return false;
-            if (uname) {
-              if (!r.username || r.username.trim().toLowerCase() !== uname) return false;
-            }
-            return r.pin_hash
-              ? sha256Hex(code + (r.pin_salt ?? sha256Hex(`pos:pin-salt:${store.id}`).slice(0, 16))) === r.pin_hash
-              : false;
+          // 2. Verify inside the verify_staff_pin SECURITY DEFINER RPC —
+          // hash material never reaches the browser (migration 078).
+          const { data: pinData, error: pinError } = await sb.rpc("verify_staff_pin", {
+            p_store_id: store.id,
+            p_username: uname,
+            p_pin: code,
           });
-          if (!cashier) {
-            set({ notice: { message: "بيانات الدخول غير صحيحة", tone: "error" } });
+          if (pinError) throw pinError;
+          const pinResult = (pinData ?? {}) as StaffPinVerification;
+          if (pinResult.status !== "ok" || !pinResult.cashier) {
+            set({
+              notice: {
+                message:
+                  staffPinVerificationError(pinResult) ?? "بيانات الدخول غير صحيحة",
+                tone: "error",
+              },
+            });
             return false;
           }
+          const cashier = pinResult.cashier;
 
-          // 4. Resolve staff role (custom or preset).
+          // 3. Role snapshot from the RPC (custom staff_roles row when bound,
+          // preset fallback otherwise).
           const fallbackRoleCode = normalizeStaffRoleCode(cashier.role);
-          let staffRole = {
-            id: cashier.role_id as string | null,
-            code: fallbackRoleCode,
-            name: STAFF_ROLE_PRESETS[fallbackRoleCode].name,
-            capabilities: [...STAFF_ROLE_PRESETS[fallbackRoleCode].capabilities],
-            limits: { ...STAFF_ROLE_PRESETS[fallbackRoleCode].limits },
+          const staffRole = {
+            id: cashier.role_id,
+            code: pinResult.role ? normalizeStaffRoleCode(pinResult.role.code) : fallbackRoleCode,
+            name: pinResult.role?.name ?? STAFF_ROLE_PRESETS[fallbackRoleCode].name,
+            capabilities:
+              Array.isArray(pinResult.role?.capabilities) && pinResult.role.capabilities.length > 0
+                ? [...pinResult.role.capabilities]
+                : [...STAFF_ROLE_PRESETS[fallbackRoleCode].capabilities],
+            limits:
+              pinResult.role?.limits && typeof pinResult.role.limits === "object"
+                ? (pinResult.role.limits as Record<string, number | null>)
+                : { ...STAFF_ROLE_PRESETS[fallbackRoleCode].limits },
           };
-          if (cashier.role_id) {
-            const { data: roleRow } = await sb
-              .from("staff_roles")
-              .select("id,code,name,capabilities,limits")
-              .eq("id", cashier.role_id)
-              .eq("store_id", store.id)
-              .maybeSingle();
-            if (roleRow) {
-              staffRole = {
-                id: roleRow.id,
-                code: normalizeStaffRoleCode(roleRow.code),
-                name: roleRow.name,
-                capabilities: Array.isArray(roleRow.capabilities) ? roleRow.capabilities : [],
-                limits: roleRow.limits && typeof roleRow.limits === "object"
-                  ? roleRow.limits as typeof staffRole.limits
-                  : { ...STAFF_ROLE_PRESETS[fallbackRoleCode].limits },
-              };
-            }
-          }
 
-          // 5. Fetch branches + terminals.
+          // 4. Fetch branches + terminals.
           const { data: branches } = await sb
             .from("branches")
             .select("id,name")
@@ -2913,7 +3049,7 @@ export const usePosStore = create<PosStore>()(
             terminalRows[0]?.id ??
             null;
 
-          // 6. Build and commit login payload.
+          // 5. Build and commit login payload.
           const payload: LoginPayloadData = {
             store: {
               id: store.id,
@@ -2952,9 +3088,13 @@ export const usePosStore = create<PosStore>()(
             defaultBranchId,
             defaultTerminalId,
           };
+          if (pinResult.verifier) {
+            writeCashierSessionCache(payload, pinResult.verifier, uname);
+          }
           applyLoginPayloadToStore(set, get, payload);
           return true;
         } catch (err) {
+          if (tryOffline()) return true;
           console.error("RAW STAFF LOGIN ERROR:", err);
           set({ notice: { message: "تعذر الاتصال — تحقق من الشبكة", tone: "error" } });
           return false;
@@ -3273,6 +3413,92 @@ export const usePosStore = create<PosStore>()(
             return false;
           }
 
+          if (action.type === "save_istd") {
+            // JoFotara device credentials (migration 079): the write happens
+            // inside the Edge Function behind the admin password proof; the
+            // secret never round-trips through this bundle.
+            const sessionI = get().adminSession;
+            if (!sessionI) return false;
+            try {
+              await updateTaxSettings(action.fields, sessionI.email, password);
+              set({ isSecondaryAuthOpen: false, pendingSecondaryAction: null });
+              return true;
+            } catch (err) {
+              set({
+                notice: {
+                  message:
+                    err instanceof Error && err.message
+                      ? err.message
+                      : "تعذر حفظ بيانات الفوترة",
+                  tone: "error",
+                },
+              });
+              return false;
+            }
+          }
+
+          if (action.type === "save_settings") {
+            // Owner email is the login identity on BOTH stores + cashiers —
+            // it only moves through admin_update_owner_email with a password
+            // proof (migration 078). Everything else is a plain stores write.
+            const sbS = getSupabaseBrowser();
+            const sessionS = get().adminSession;
+            const storeIdS = get().currentStore?.id;
+            const fields = action.fields;
+            const nextEmail =
+              typeof fields.email === "string" ? fields.email.trim().toLowerCase() : "";
+            try {
+              if (!sbS || !sessionS || !storeIdS) {
+                set({ notice: { message: "Supabase غير مُعد", tone: "error" } });
+                return false;
+              }
+              if (nextEmail) {
+                const { data: emailData, error: emailError } = await sbS.rpc(
+                  "admin_update_owner_email",
+                  {
+                    p_store_id: storeIdS,
+                    p_admin_email: sessionS.email,
+                    p_admin_password: password,
+                    p_new_email: nextEmail,
+                  },
+                );
+                if (emailError) {
+                  set({ notice: { message: emailError.message ?? "تعذر تحديث البريد الإلكتروني", tone: "error" } });
+                  return false;
+                }
+                const emailResult = (emailData ?? {}) as { error?: string };
+                if (
+                  emailResult.error === "invalid_admin_credentials" ||
+                  emailResult.error === "locked"
+                ) {
+                  set({ notice: { message: "كلمة المرور غير صحيحة", tone: "error" } });
+                  return false;
+                }
+                if (emailResult.error === "duplicate_email") {
+                  set({ notice: { message: "هذا البريد الإلكتروني مستخدم مسبقاً", tone: "error" } });
+                  return false;
+                }
+                if (emailResult.error === "invalid_email") {
+                  set({ notice: { message: "البريد الإلكتروني غير صالح", tone: "error" } });
+                  return false;
+                }
+                if (emailResult.error) {
+                  set({ notice: { message: "تعذر تحديث البريد الإلكتروني", tone: "error" } });
+                  return false;
+                }
+                // Keep future password proofs working: the session email just
+                // became the login identity.
+                if (get().adminSession) get().setAdminSessionEmail(nextEmail);
+              }
+              await updateSettings({ ...fields, email: undefined });
+              set({ isSecondaryAuthOpen: false, pendingSecondaryAction: null });
+              return true;
+            } catch {
+              set({ notice: { message: "تعذر الاتصال — تحقق من الشبكة", tone: "error" } });
+              return false;
+            }
+          }
+
           // Re-verify admin password via Supabase RPC.
           const sb = getSupabaseBrowser();
           if (!sb) {
@@ -3511,76 +3737,57 @@ export const usePosStore = create<PosStore>()(
           const storeId = get().currentStore?.id;
           if (!storeId) return false;
 
-          // Verify admin password.
-          const { data: authData } = await sb.rpc("authenticate_admin_client", {
-            p_email: session.email,
-            p_password: password,
-          });
-          if (!authData || typeof authData !== "object") {
+          // Migration 078: the admin password proof and the write are folded
+          // into one SECURITY DEFINER RPC (proof-per-call). No direct table
+          // DML, no client-side PIN hashing — the server salts + hashes.
+          const baseArgs = {
+            p_store_id: storeId,
+            p_admin_email: session.email,
+            p_admin_password: password,
+          };
+          const { data, error: rpcError } = draft.id
+            ? await sb.rpc("admin_update_cashier", {
+                ...baseArgs,
+                p_cashier_id: draft.id,
+                p_name: draft.name ?? null,
+                p_username: draft.username ?? null,
+                p_role: draft.role ?? null,
+                p_role_id: draft.roleId || null,
+                p_is_active: draft.isActive ?? null,
+                p_pin: draft.pin ? String(draft.pin) : null,
+              })
+            : await sb.rpc("admin_create_cashier", {
+                ...baseArgs,
+                p_name: draft.name,
+                p_role: normalizeStaffRoleCode(draft.role),
+                p_username:
+                  draft.username?.trim().toLowerCase() ||
+                  draft.name.trim().replace(/[^\p{L}\p{N}_\-\. ]/gu, "").toLowerCase() ||
+                  "user",
+                p_role_id: draft.roleId || null,
+                p_pin: draft.pin ? String(draft.pin) : null,
+                p_is_active: draft.isActive !== false,
+              });
+          if (rpcError) {
+            set({ notice: { message: rpcError.message ?? "تعذر حفظ الموظف", tone: "error" } });
+            return false;
+          }
+          const result = (data ?? {}) as { error?: string; message?: string };
+          if (result.error === "invalid_admin_credentials" || result.error === "locked") {
             set({ notice: { message: "كلمة المرور غير صحيحة", tone: "error" } });
             return false;
           }
-
-          if (!draft.id) {
-            // CREATE: generate salt + hash, insert row.
-            const pinSalt = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-            const pinHash = sha256Hex(draft.pin + pinSalt);
-            const roleCode = normalizeStaffRoleCode(draft.role);
-            const username = draft.username?.trim().toLowerCase() || draft.name.trim().replace(/[^\p{L}\p{N}_\-\. ]/gu, "").toLowerCase() || "user";
-
-            const { error: insertError } = await sb
-              .from("cashiers")
-              .insert({
-                name: draft.name.trim(),
-                username,
-                role: roleCode,
-                role_id: draft.roleId || null,
-                pin_salt: pinSalt,
-                pin_hash: pinHash,
-                store_id: storeId,
-                is_active: draft.isActive !== false,
-              });
-            if (insertError) {
-              if (insertError.code === "23505") {
-                set({ notice: { message: "اسم المستخدم مستخدم مسبقاً", tone: "error" } });
-              } else {
-                set({ notice: { message: insertError.message ?? "تعذر حفظ الموظف", tone: "error" } });
-              }
-              return false;
-            }
-          } else {
-            // UPDATE: patch fields.
-            const patch: Record<string, unknown> = {};
-            if (draft.name) patch.name = draft.name.trim();
-            if (draft.username) patch.username = draft.username.trim().toLowerCase();
-            if (draft.isActive !== undefined) patch.is_active = draft.isActive;
-            if (draft.pin) {
-              const pinSalt = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-              patch.pin_salt = pinSalt;
-              patch.pin_hash = sha256Hex(draft.pin + pinSalt);
-            }
-            if (draft.role) {
-              const roleCode = normalizeStaffRoleCode(draft.role);
-              patch.role = roleCode;
-              patch.role_id = draft.roleId || null;
-            }
-            if (Object.keys(patch).length === 0) {
-              set({ notice: { message: "لا توجد تغييرات", tone: "error" } });
-              return false;
-            }
-            const { error: updateError } = await sb
-              .from("cashiers")
-              .update(patch)
-              .eq("id", draft.id)
-              .eq("store_id", storeId);
-            if (updateError) {
-              if (updateError.code === "23505") {
-                set({ notice: { message: "اسم المستخدم مستخدم مسبقاً", tone: "error" } });
-              } else {
-                set({ notice: { message: updateError.message ?? "تعذر حفظ الموظف", tone: "error" } });
-              }
-              return false;
-            }
+          if (result.error === "duplicate_username") {
+            set({ notice: { message: "اسم المستخدم مستخدم مسبقاً", tone: "error" } });
+            return false;
+          }
+          if (result.error === "not_found") {
+            set({ notice: { message: "الموظف غير موجود", tone: "error" } });
+            return false;
+          }
+          if (result.error) {
+            set({ notice: { message: result.message ?? "تعذر حفظ الموظف", tone: "error" } });
+            return false;
           }
 
           await get().hydrateCatalog();
@@ -3610,37 +3817,36 @@ export const usePosStore = create<PosStore>()(
           const storeId = get().currentStore?.id;
           if (!storeId) return false;
 
-          // Verify admin password.
-          const { data: authData } = await sb.rpc("authenticate_admin_client", {
-            p_email: session.email,
-            p_password: password,
+          // Migration 078: proof-per-call delete RPC. The admin check and the
+          // admin-target guard live inside the function now.
+          const { data, error: rpcError } = await sb.rpc("admin_delete_cashier", {
+            p_store_id: storeId,
+            p_admin_email: session.email,
+            p_admin_password: password,
+            p_cashier_id: id,
           });
-          if (!authData || typeof authData !== "object") {
+          if (rpcError) {
+            set({ notice: { message: rpcError.message ?? "تعذر حذف الموظف", tone: "error" } });
+            return false;
+          }
+          const result = (data ?? {}) as { error?: string };
+          if (result.error === "invalid_admin_credentials" || result.error === "locked") {
             set({ notice: { message: "كلمة المرور غير صحيحة", tone: "error" } });
             return false;
           }
-
-          // Check the target cashier exists and is not an admin.
-          const { data: row } = await sb
-            .from("cashiers")
-            .select("id,role")
-            .eq("id", id)
-            .eq("store_id", storeId)
-            .maybeSingle();
-          if (!row) {
-            set({ notice: { message: "الموظف غير موجود", tone: "error" } });
-            return false;
-          }
-          if (row.role === "admin" || row.role === "مدير") {
+          if (result.error === "cannot_delete_admin") {
             set({ notice: { message: "لا يمكن حذف حساب مدير المتجر", tone: "error" } });
             return false;
           }
-
-          const { error: deleteError } = await sb.from("cashiers").delete().eq("id", id);
-          if (deleteError) {
-            set({ notice: { message: deleteError.message ?? "تعذر حذف الموظف", tone: "error" } });
+          if (result.error === "not_found") {
+            set({ notice: { message: "الموظف غير موجود", tone: "error" } });
             return false;
           }
+          if (result.error) {
+            set({ notice: { message: "تعذر حذف الموظف", tone: "error" } });
+            return false;
+          }
+
           await get().hydrateCatalog();
           set({ notice: { message: "تم حذف الموظف", tone: "success" } });
           void pushAudit(session.email, "DELETE_CASHIER", id);

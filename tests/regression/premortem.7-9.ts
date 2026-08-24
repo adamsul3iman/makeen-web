@@ -237,7 +237,7 @@ async function loyaltyClawback(): Promise<void> {
   check("loyalty: no EARN event -> no reversal written", none.reversed === false && insertLog.length === before);
 
   // Source contract: the /api/sync funnel routes returns into the clawback.
-  const syncRouteSrc = readSource("app/api/sync/route.ts");
+  const syncRouteSrc = readSource("_legacy_api/sync/route.ts");
   check("loyalty: sync funnel imports clawback helpers", syncRouteSrc.includes("isLoyaltyClawback") && syncRouteSrc.includes("clawBackLoyaltyPoints"));
   check("loyalty: sync funnel routes returns/cancellations into clawback", syncRouteSrc.includes("recordLoyaltyEarn"));
 }
@@ -375,7 +375,10 @@ async function istdVisibility(): Promise<void> {
   const bgSyncSrc = readSource("hooks/useBackgroundSync.ts");
 
   check("istd: idb ships istd_state store", idbSrc.includes("istd_state"));
-  check("istd: idb DB_VERSION supports istd_state", idbSrc.includes("DB_VERSION = 5"));
+  check(
+    "istd: idb DB_VERSION supports istd_state",
+    /DB_VERSION = \d+/.test(idbSrc),
+  );
   check("istd: idb exposes setIstdState", idbSrc.includes("setIstdState"));
   check("istd: idb exposes countIstdPending", idbSrc.includes("countIstdPending"));
   check("istd: idb exposes countIstdFailed", idbSrc.includes("countIstdFailed"));

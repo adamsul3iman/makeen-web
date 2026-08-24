@@ -1,32 +1,59 @@
-import { supabase } from "@/lib/supabase";
-import { jordanAmount } from "@/lib/qrGenerator";
 import type { SalesPaymentMethod } from "@/types/salesLedger.types";
+import { jordanAmount } from "@/lib/qrGenerator";
 
 /**
- * Jordan ISTD (JoFotara) e-invoicing — server-only, multi-tenant.
+ * Jordan ISTD (JoFotara) e-invoicing — browser-side module, secret-free.
  *
- * Every tenant's JoFotara device credentials live in `tenant_tax_settings`
- * (keyed by store_id) and are fetched from PostgreSQL on EVERY call. Nothing
- * is ever read from .env — a tenant's client_id / secret_key exist only in the
- * DB, scoped to their own store row, so one store can neither see nor submit
- * under another tenant's identity.
+ * Since remediation step 3 (migration 079 + the `jofotara` Edge Function),
+ * NO JoFotara credential ever reaches this bundle. The tenant's
+ * istd_client_id / istd_client_secret live in `tenant_tax_settings`, which is
+ * deny-all for anon/authenticated and readable only by the Edge Function via
+ * the service role. This module is a thin transport to that function:
  *
- * Endpoints (JoFotara /api reference — confirm exact paths against the ISTD
- * developer portal when credentials are issued):
- *   POST /api/get_token   client_id + secret_key -> Bearer JWT
- *   POST /api/invoice     cleared invoice -> { uuid, qrCode }
+ *   config_get     -> masked fiscal settings for THIS store
+ *   invoice_submit -> claim + token exchange + submission happen server-side
  *
- * Real-time CTC: JoFotara validates and clears each invoice synchronously and
- * returns the authoritative QR string; that QR is what the receipt must print.
+ * The invoice MAPPING below stays client-side on purpose: it is a pure,
+ * deterministic transform of data the POS already holds, covered by tests.
  */
 
-const ISTD_PRODUCTION_BASE_URL = "https://backend.jofotara.gov.jo";
-const ISTD_SANDBOX_BASE_URL = "https://sandbox.jofotara.gov.jo";
+/** URL of the deployed `jofotara` Edge Function. */
+function jofotaraFunctionUrl(): string {
+  const base = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "http://localhost:54321";
+  return `${base.replace(/\/$/, "")}/functions/v1/jofotara`;
+}
+
+/**
+ * POST one action to the jofotara Edge Function. Resolves with whatever JSON
+ * the function returned (callers inspect `ok`). Throws only on network-level
+ * failures so offline behaviour stays distinguishable from business errors.
+ */
+export async function jofotaraInvoke<T = Record<string, unknown>>(
+  body: Record<string, unknown>,
+  timeoutMs = 25_000,
+): Promise<T> {
+  const apiKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const response = await fetch(jofotaraFunctionUrl(), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(apiKey ? { apikey: apiKey, Authorization: `Bearer ${apiKey}` } : {}),
+    },
+    body: JSON.stringify(body),
+    cache: "no-store",
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  return (await response.json().catch(() => ({ ok: false, code: "bad_json" }))) as T;
+}
 
 export interface TenantTaxSettings {
   storeId: string;
   taxNumber: string;
   istdClientId: string;
+  /**
+   * Always empty in the browser since migration 079 — the secret never leaves
+   * the Edge Function. Kept on the shape for legacy callers/tests.
+   */
   istdClientSecret: string;
 }
 
@@ -41,97 +68,6 @@ export class IstdError extends Error {
     this.code = code;
     this.status = status;
   }
-}
-
-function configured(settings: TenantTaxSettings): boolean {
-  return (
-    settings.taxNumber.trim().length > 0 &&
-    settings.istdClientId.trim().length > 0 &&
-    settings.istdClientSecret.trim().length > 0
-  );
-}
-
-/**
- * Fetch THIS store's ISTD credentials from the database. Returns null when the
- * row does not exist yet (integration never configured).
- */
-export async function getTenantTaxSettings(storeId: string): Promise<TenantTaxSettings | null> {
-  if (!supabase) return null;
-  const { data, error } = await supabase
-    .from("tenant_tax_settings")
-    .select("store_id,tax_number,istd_client_id,istd_client_secret")
-    .eq("store_id", storeId)
-    .maybeSingle();
-  if (error) throw new IstdError("db_error", error.message);
-  if (!data) return null;
-  return {
-    storeId: data.store_id,
-    taxNumber: data.tax_number ?? "",
-    istdClientId: data.istd_client_id ?? "",
-    istdClientSecret: data.istd_client_secret ?? "",
-  };
-}
-
-/**
- * Exchange the tenant's JoFotara device credentials for a Bearer JWT.
- * Credentials come from the DB lookup, never from environment variables.
- */
-export async function requestIstdToken(
-  settings: TenantTaxSettings,
-  baseUrl: string = ISTD_PRODUCTION_BASE_URL,
-  timeoutMs = 8_000,
-): Promise<string> {
-  if (!configured(settings)) {
-    throw new IstdError(
-      "not_configured",
-      "بيانات الفوترة الإلكترونية غير مكتملة — أضف الرقم الضريبي وبيانات JoFotara من الإعدادات",
-      409,
-    );
-  }
-
-  let response: Response;
-  try {
-    response = await fetch(`${baseUrl.replace(/\/$/, "")}/api/get_token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        client_id: settings.istdClientId,
-        client_secret: settings.istdClientSecret,
-      }),
-      cache: "no-store",
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch {
-    throw new IstdError("network", "تعذر الوصول إلى خوادم ISTD — تحقق من الاتصال");
-  }
-
-  if (!response.ok) {
-    if (response.status === 401 || response.status === 403) {
-      throw new IstdError(
-        "invalid_credentials",
-        "بيانات JoFotara غير مقبولة من ISTD — راجع client_id و secret_key",
-        401,
-      );
-    }
-    throw new IstdError(
-      "token_failed",
-      `فشل الحصول على رمز ISTD (HTTP ${response.status})`,
-      response.status,
-    );
-  }
-
-  const data = (await response.json().catch(() => ({}))) as {
-    access_token?: unknown;
-    token?: unknown;
-  };
-  const token = typeof data.access_token === "string"
-    ? data.access_token
-    : typeof data.token === "string"
-      ? data.token
-      : "";
-  if (!token) throw new IstdError("token_failed", "استجابة ISTD لا تحوي رمز وصول");
-
-  return token;
 }
 
 const PAYMENT_METHOD_ISTD: Record<SalesPaymentMethod, string> = {
@@ -274,11 +210,53 @@ export interface IstdSubmitResult {
   status: number;
 }
 
+/* ──────────────────────── Edge Function transport ──────────────────────── */
+
+interface ConfigGetResponse {
+  ok: boolean;
+  taxNumber?: string;
+  istdClientId?: string;
+  configured?: boolean;
+  code?: string;
+  message?: string;
+}
+
+interface InvoiceSubmitResponse {
+  ok: boolean;
+  uuid?: string;
+  qrCode?: string;
+  code?: string;
+  message?: string;
+}
+
 /**
- * Full ISTD pipeline for one store: DB credential lookup -> JWT -> submit.
- * The returned `qrCode` (when ISTD provides it) is the authoritative QR to
- * print on the receipt. Pass `opts.settings` to skip the credential lookup
- * when the caller already fetched them.
+ * Masked fiscal settings for THIS store via the Edge Function. Returns null
+ * when the integration was never configured. `istdClientSecret` is always "".
+ */
+export async function getTenantTaxSettings(storeId: string): Promise<TenantTaxSettings | null> {
+  try {
+    const data = await jofotaraInvoke<ConfigGetResponse>({ action: "config_get", storeId });
+    if (!data.ok) return null;
+    return {
+      storeId,
+      taxNumber: data.taxNumber ?? "",
+      istdClientId: data.istdClientId ?? "",
+      istdClientSecret: "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+const EDGE_ERROR_STATUS: Record<string, number> = {
+  not_configured: 409,
+  invalid_credentials: 401,
+};
+
+/**
+ * Submit ONE invoice through the Edge Function. The claim bookkeeping, token
+ * exchange and JoFotara call all happen server-side; the returned `qrCode`
+ * (when provided) is the authoritative QR to print on the receipt.
  */
 export async function submitInvoiceToIstd(
   storeId: string,
@@ -286,56 +264,31 @@ export async function submitInvoiceToIstd(
   supplier: IstdSupplier,
   opts?: { baseUrl?: string; settings?: TenantTaxSettings; timeoutMs?: number },
 ): Promise<IstdSubmitResult> {
-  const settings = opts?.settings ?? (await getTenantTaxSettings(storeId));
-  if (!settings) {
-    throw new IstdError(
-      "not_configured",
-      "الفوترة الإلكترونية غير مفعّلة لهذا المتجر — أضف بيانات JoFotara من الإعدادات",
-      409,
-    );
-  }
-
-  const token = await requestIstdToken(settings, opts?.baseUrl, opts?.timeoutMs);
-  const payload = mapSalesInvoiceToIstd(invoice, settings, supplier);
-
-  let response: Response;
-  try {
-    response = await fetch(
-      `${(opts?.baseUrl ?? ISTD_PRODUCTION_BASE_URL).replace(/\/$/, "")}/api/invoice`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ invoice: payload }),
-        cache: "no-store",
-        signal: AbortSignal.timeout(opts?.timeoutMs ?? 15_000),
+  const data = await jofotaraInvoke<InvoiceSubmitResponse>(
+    {
+      action: "invoice_submit",
+      storeId,
+      syncId: invoice.id,
+      invoice: {
+        completed_at: invoice.completedAt,
+        total: invoice.total,
+        tax: invoice.tax,
+        discount: invoice.discount,
+        paymentMethod: invoice.paymentMethod,
+        customerName: invoice.customerName,
+        customerPhone: invoice.customerPhone,
+        customerId: invoice.customerId,
+        supplier_name: supplier.name,
       },
+    },
+    opts?.timeoutMs ? opts.timeoutMs + 5_000 : undefined,
+  );
+  if (!data.ok) {
+    throw new IstdError(
+      data.code ?? "submission_failed",
+      data.message ?? "رفض ISTD الفاتورة",
+      EDGE_ERROR_STATUS[data.code ?? ""] ?? 502,
     );
-  } catch {
-    throw new IstdError("network", "تعذر إرسال الفاتورة إلى ISTD — تحقق من الاتصال");
   }
-
-  if (!response.ok) {
-    throw new IstdError("submission_failed", `رفض ISTD الفاتورة (HTTP ${response.status})`, response.status);
-  }
-
-  const data = (await response.json().catch(() => ({}))) as {
-    uuid?: unknown;
-    qrCode?: unknown;
-    qr?: unknown;
-  };
-  return {
-    status: response.status,
-    uuid: typeof data.uuid === "string" ? data.uuid : undefined,
-    qrCode:
-      typeof data.qrCode === "string"
-        ? data.qrCode
-        : typeof data.qr === "string"
-          ? data.qr
-          : undefined,
-  };
+  return { status: 200, uuid: data.uuid, qrCode: data.qrCode };
 }
-
-export { ISTD_PRODUCTION_BASE_URL, ISTD_SANDBOX_BASE_URL };

@@ -1,15 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CheckCircle2, KeyRound, Loader2, ReceiptText, Save, Store as StoreIcon } from "lucide-react";
 import Link from "next/link";
+import SecondaryAuthModal from "@/components/auth/SecondaryAuthModal";
 import { usePosStore } from "@/store/usePosStore";
 import {
   changeAdminAccount,
   fetchSettings,
   fetchTaxSettings,
   updateSettings,
-  updateTaxSettings,
 } from "@/lib/settingsClient";
 
 interface SettingsForm {
@@ -92,6 +92,8 @@ export default function AdminSettingsPage() {
   const setCurrentStore = usePosStore((s) => s.setCurrentStore);
   const adminSession = usePosStore((s) => s.adminSession);
   const setAdminSessionEmail = usePosStore((s) => s.setAdminSessionEmail);
+  const requestSecondaryAuth = usePosStore((s) => s.requestSecondaryAuth);
+  const isSecondaryAuthOpen = usePosStore((s) => s.isSecondaryAuthOpen);
 
   const [form, setForm] = useState<SettingsForm>(EMPTY);
   const [loading, setLoading] = useState(true);
@@ -195,34 +197,47 @@ export default function AdminSettingsPage() {
     }));
   }
 
+  const buildPayload = () => ({
+    name: form.name.trim(),
+    ownerName: form.ownerName,
+    email: form.email,
+    phone: form.phone,
+    logoUrl: form.logoUrl,
+    address: form.address,
+    receiptHeader: form.receiptHeader,
+    receiptFooter: form.receiptFooter,
+    loyaltyEnabled: form.loyaltyEnabled,
+    pointsPerSpend: parseFloat(form.pointsPerSpend) || 1,
+    pointValue: parseFloat(form.pointValue) || 0.01,
+    taxPercent: parseFloat(form.taxPercent) || 0,
+    taxNumber: form.taxNumber.trim(),
+    receiptShowTaxNumber: form.receiptShowTaxNumber,
+    receiptShowCashierTime: form.receiptShowCashierTime,
+    receiptShowBarcodeQr: form.receiptShowBarcodeQr,
+    receiptCompactSpacing: form.receiptCompactSpacing,
+  });
+
   const save = async () => {
     if (!form.name.trim()) {
       setError("اسم المتجر مطلوب");
+      return;
+    }
+    const payload = buildPayload();
+    // Migration 078: the email is the owner's LOGIN identity (stores +
+    // cashiers). Changing it requires the password proof via the secondary
+    // auth modal; the confirm path runs admin_update_owner_email first.
+    const nextEmail = form.email.trim().toLowerCase();
+    const prevEmail = (currentStore?.email ?? "").trim().toLowerCase();
+    if (nextEmail && nextEmail !== prevEmail) {
+      setError("");
+      requestSecondaryAuth({ type: "save_settings", fields: payload });
       return;
     }
     setSaving(true);
     setError("");
     setSaved(false);
     try {
-      const data = await updateSettings({
-        name: form.name.trim(),
-        ownerName: form.ownerName,
-        email: form.email,
-        phone: form.phone,
-        logoUrl: form.logoUrl,
-        address: form.address,
-        receiptHeader: form.receiptHeader,
-        receiptFooter: form.receiptFooter,
-        loyaltyEnabled: form.loyaltyEnabled,
-        pointsPerSpend: parseFloat(form.pointsPerSpend) || 1,
-        pointValue: parseFloat(form.pointValue) || 0.01,
-        taxPercent: parseFloat(form.taxPercent) || 0,
-        taxNumber: form.taxNumber.trim(),
-        receiptShowTaxNumber: form.receiptShowTaxNumber,
-        receiptShowCashierTime: form.receiptShowCashierTime,
-        receiptShowBarcodeQr: form.receiptShowBarcodeQr,
-        receiptCompactSpacing: form.receiptCompactSpacing,
-      });
+      const data = await updateSettings(payload);
       setSaved(true);
       setTimeout(() => setSaved(false), 4000);
       setForm({
@@ -255,40 +270,82 @@ export default function AdminSettingsPage() {
     }
   };
 
-  const saveIstd = async () => {
+  // After the secondary-auth modal closes following an email change, resync
+  // from the server so the form shows the new login identity.
+  const prevAuthOpenRef = useRef(false);
+  useEffect(() => {
+    const closed = prevAuthOpenRef.current && !isSecondaryAuthOpen;
+    prevAuthOpenRef.current = isSecondaryAuthOpen;
+    if (!closed) return;
+    let cancelled = false;
+    fetchSettings()
+      .then((s) => {
+        if (cancelled) return;
+        setForm({
+          name: s.name,
+          ownerName: s.ownerName,
+          email: s.email,
+          phone: s.phone,
+          logoUrl: s.logoUrl,
+          address: s.address,
+          receiptHeader: s.receiptHeader,
+          receiptFooter: s.receiptFooter,
+          loyaltyEnabled: s.loyaltyEnabled,
+          pointsPerSpend: String(s.pointsPerSpend),
+          pointValue: String(s.pointValue),
+          taxPercent: String(s.taxPercent),
+          taxNumber: s.taxNumber,
+          receiptShowTaxNumber: s.receiptShowTaxNumber,
+          receiptShowCashierTime: s.receiptShowCashierTime,
+          receiptShowBarcodeQr: s.receiptShowBarcodeQr,
+          receiptCompactSpacing: s.receiptCompactSpacing,
+        });
+        if (currentStore) {
+          setCurrentStore({ ...currentStore, ...s, subscriptionStatus: currentStore.subscriptionStatus });
+        }
+      })
+      .catch(() => {
+        /* keep the local form on network failure */
+      });
+    // JoFotara state can also change via a password-proofed save — resync it.
+    fetchTaxSettings()
+      .then((t) => {
+        if (cancelled) return;
+        setIstdTaxNumber(t.taxNumber);
+        setIstdClientId(t.istdClientId);
+        setIstdSecretMasked(t.istdSecretMasked);
+        setIstdConfigured(t.configured);
+        setIstdClientSecret("");
+      })
+      .catch(() => {
+        /* keep the local ISTD section on network failure */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isSecondaryAuthOpen, currentStore, setCurrentStore]);
+
+  const saveIstd = () => {
     if (!istdTaxNumber.trim() || !istdClientId.trim()) {
       setIstdError("الرقم الضريبي و client_id مطلوبان");
       return;
     }
     if (istdClientId.trim() && !istdClientSecret.trim() && !istdSecretMasked) {
-      setIstdError("أدخل secret_key لتفعيل JoFotara (يُحفظ مشفّراً في الخادم)");
+      setIstdError("أدخل secret_key لتفعيل JoFotara (تُحفظ في الخادم ولا تُرسل للمتصفح)");
       return;
     }
-    setSavingIstd(true);
+    // Migration 079: the credentials live server-side; saving them requires
+    // the owner's password proof via the secondary-auth modal. The confirm
+    // path calls the jofotara Edge Function through updateTaxSettings.
     setIstdError("");
-    setIstdSaved(false);
-    try {
-      const data = await updateTaxSettings({
+    requestSecondaryAuth({
+      type: "save_istd",
+      fields: {
         tax_number: istdTaxNumber.trim(),
         istd_client_id: istdClientId.trim(),
         istd_client_secret: istdClientSecret.trim(),
-      });
-      setIstdTaxNumber(data.taxNumber);
-      setIstdClientId(data.istdClientId);
-      setIstdSecretMasked(data.istdSecretMasked);
-      setIstdClientSecret("");
-      setIstdConfigured(data.configured === true);
-      // Mirror the fiscal number onto the receipt QR immediately.
-      if (data.taxNumber && currentStore) {
-        setCurrentStore({ ...currentStore, taxNumber: data.taxNumber });
-      }
-      setIstdSaved(true);
-      setTimeout(() => setIstdSaved(false), 4000);
-    } catch (err) {
-      setIstdError(err instanceof Error && err.message ? err.message : "تعذر الاتصال بالخادم");
-    } finally {
-      setSavingIstd(false);
-    }
+      },
+    });
   };
 
   const saveCredentials = async () => {
@@ -603,6 +660,7 @@ export default function AdminSettingsPage() {
           </div>
         </>
       )}
+      <SecondaryAuthModal />
     </div>
   );
 }

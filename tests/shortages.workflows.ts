@@ -357,8 +357,8 @@ async function routeValidation(): Promise<void> {
     role: "cashier",
   }).split(";", 1)[0];
 
-  const shortages = await import("../app/api/shortages/route");
-  const syncRoute = await import("../app/api/sync/route");
+  const shortages = await import("../_legacy_api/shortages/route");
+  const syncRoute = await import("../_legacy_api/sync/route");
 
   const POST = (name: string, fn: () => Promise<Response>, expected: number): Promise<void> =>
     expectResponse(name, fn, expected);

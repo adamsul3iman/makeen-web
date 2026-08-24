@@ -238,7 +238,7 @@ async function shiftCloseGuard(): Promise<void> {
 
   // Contract: the server must defer finalize while the shift ledger is
   // incomplete instead of freezing a partial Z-report.
-  const routeSrc = readFileSync(join(process.cwd(), "app/api/sync/route.ts"), "utf8");
+  const routeSrc = readFileSync(join(process.cwd(), "_legacy_api/sync/route.ts"), "utf8");
   check(
     "shift-guard: server defers finalize on incomplete ledger",
     routeSrc.includes("shift_ledger_incomplete") && routeSrc.includes("assessShiftLedgerCompleteness"),

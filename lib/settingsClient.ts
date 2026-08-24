@@ -1,5 +1,6 @@
 import { getSupabaseBrowser } from "./supabaseBrowser";
 import { getTenantStoreId } from "./tenantClient";
+import { jofotaraInvoke } from "./istdIntegration";
 
 export interface StoreSettings {
   id: string;
@@ -74,7 +75,8 @@ export async function updateSettings(fields: Partial<StoreSettings>): Promise<St
   const updateData: Record<string, unknown> = {};
   if (fields.name !== undefined) updateData.name = fields.name.trim();
   if (fields.ownerName !== undefined) updateData.owner_name = fields.ownerName;
-  if (fields.email !== undefined) updateData.email = fields.email.trim().toLowerCase();
+  // stores.email deliberately NOT written here: it must stay in lockstep with
+  // the admin cashier row's login email (admin_update_owner_email only).
   if (fields.phone !== undefined) updateData.phone = fields.phone;
   if (fields.logoUrl !== undefined) updateData.logo_url = fields.logoUrl;
   if (fields.address !== undefined) updateData.address = fields.address;
@@ -98,14 +100,10 @@ export async function updateSettings(fields: Partial<StoreSettings>): Promise<St
     .single();
   if (error || !data) throw new Error(error?.message ?? "المتجر غير موجود");
 
-  if (fields.email) {
-    await sb
-      .from("cashiers")
-      .update({ email: fields.email.trim().toLowerCase() })
-      .eq("store_id", storeId)
-      .eq("role", "admin")
-      .neq("email", fields.email.trim().toLowerCase());
-  }
+  // NOTE: owner email changes are NOT applied here. Migration 078 removed
+  // browser writes to cashiers, and the admin row's email is the login
+  // identity — it only moves via admin_update_owner_email behind a password
+  // proof (see usePosStore confirmSecondaryAction "save_settings").
 
   return mapSettings(data);
 }
@@ -117,67 +115,71 @@ export interface TaxSettings {
   configured: boolean;
 }
 
+/**
+ * Masked fiscal settings via the jofotara Edge Function (migration 079): the
+ * secret itself never leaves the server, so the UI can only see whether one
+ * is stored.
+ */
 export async function fetchTaxSettings(): Promise<TaxSettings> {
-  const sb = getSupabaseBrowser();
   const storeId = getTenantStoreId();
-  if (!sb || !storeId) throw new Error("Supabase غير مهيأة");
-  const { data, error } = await sb
-    .from("tenant_tax_settings")
-    .select("tax_number,istd_client_id,istd_client_secret")
-    .eq("store_id", storeId)
-    .maybeSingle();
-  if (error) throw new Error(error.message);
-  const taxNumber = data?.tax_number ?? "";
-  const istdClientId = data?.istd_client_id ?? "";
-  const hasSecret = Boolean(data?.istd_client_secret);
+  if (!storeId) throw new Error("Supabase غير مهيأة");
+  const data = await jofotaraInvoke<{
+    ok: boolean;
+    taxNumber?: string;
+    istdClientId?: string;
+    configured?: boolean;
+    message?: string;
+  }>({ action: "config_get", storeId });
+  if (!data.ok) throw new Error(data.message ?? "تعذر جلب إعدادات الفوترة");
+  const taxNumber = data.taxNumber ?? "";
+  const istdClientId = data.istdClientId ?? "";
   return {
     taxNumber,
     istdClientId,
-    istdSecretMasked: hasSecret ? "***configured***" : "",
-    configured: taxNumber.trim().length > 0 && istdClientId.trim().length > 0 && hasSecret,
+    istdSecretMasked: data.configured ? "***configured***" : "",
+    configured: data.configured === true,
   };
 }
 
-export async function updateTaxSettings(data: {
-  tax_number?: string;
-  istd_client_id?: string;
-  istd_client_secret?: string;
-}): Promise<TaxSettings> {
-  const sb = getSupabaseBrowser();
+export async function updateTaxSettings(
+  data: {
+    tax_number?: string;
+    istd_client_id?: string;
+    istd_client_secret?: string;
+  },
+  adminEmail: string,
+  adminPassword: string,
+): Promise<TaxSettings> {
   const storeId = getTenantStoreId();
-  if (!sb || !storeId) throw new Error("Supabase غير مهيأة");
+  if (!storeId) throw new Error("Supabase غير مهيأة");
 
-  const taxNumber = (data.tax_number ?? "").trim().slice(0, 30);
-  const istdClientId = (data.istd_client_id ?? "").trim().slice(0, 200);
-  let istdClientSecret = (data.istd_client_secret ?? "").trim();
-
-  if (!istdClientSecret) {
-    const { data: existing } = await sb
-      .from("tenant_tax_settings")
-      .select("istd_client_secret")
-      .eq("store_id", storeId)
-      .maybeSingle();
-    istdClientSecret = existing?.istd_client_secret ?? "";
+  const res = await jofotaraInvoke<{
+    ok: boolean;
+    taxNumber?: string;
+    istdClientId?: string;
+    configured?: boolean;
+    code?: string;
+    message?: string;
+  }>({
+    action: "config_save",
+    storeId,
+    adminEmail,
+    adminPassword,
+    taxNumber: (data.tax_number ?? "").trim().slice(0, 30),
+    clientId: (data.istd_client_id ?? "").trim().slice(0, 200),
+    secret: (data.istd_client_secret ?? "").trim(),
+  });
+  if (!res.ok) {
+    if (res.code === "invalid_admin_credentials") {
+      throw new Error("كلمة المرور غير صحيحة");
+    }
+    throw new Error(res.message ?? "تعذر حفظ إعدادات الفوترة");
   }
-
-  const { error: upsertError } = await sb
-    .from("tenant_tax_settings")
-    .upsert(
-      { store_id: storeId, tax_number: taxNumber, istd_client_id: istdClientId, istd_client_secret: istdClientSecret },
-      { onConflict: "store_id" },
-    );
-  if (upsertError) throw new Error(upsertError.message);
-
-  if (taxNumber) {
-    await sb.from("stores").update({ tax_number: taxNumber }).eq("id", storeId);
-  }
-
-  const hasSecret = Boolean(istdClientSecret);
   return {
-    taxNumber,
-    istdClientId,
-    istdSecretMasked: hasSecret ? "***configured***" : "",
-    configured: Boolean(taxNumber && istdClientId && hasSecret),
+    taxNumber: res.taxNumber ?? "",
+    istdClientId: res.istdClientId ?? "",
+    istdSecretMasked: res.configured ? "***configured***" : "",
+    configured: res.configured === true,
   };
 }
 

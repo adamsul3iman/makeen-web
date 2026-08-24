@@ -261,22 +261,22 @@ async function routeValidation(): Promise<void> {
     role: "cashier",
   }).split(";", 1)[0];
 
-  const customers = await import("../app/api/customers/route");
-  const suppliers = await import("../app/api/suppliers/route");
-  const expenses = await import("../app/api/expenses/route");
-  const purchaseOrders = await import("../app/api/purchase-orders/route");
-  const customerTx = await import("../app/api/customers/[id]/transactions/route");
-  const importRoute = await import("../app/api/catalog/import/route");
-  const syncRoute = await import("../app/api/sync/route");
-  const loginRoute = await import("../app/api/login/route");
-  const storesRoute = await import("../app/api/stores/route");
-  const adminStores = await import("../app/api/admin/stores/route");
-  const adminStoresId = await import("../app/api/admin/stores/[id]/route");
-  const settingsRoute = await import("../app/api/settings/route");
-  const loyaltyRoute = await import("../app/api/loyalty/route");
-  const auditRoute = await import("../app/api/admin/audit/route");
-  const reportsOverviewRoute = await import("../app/api/reports/overview/route");
-  const printServerRoute = await import("../app/api/print-server/route");
+  const customers = await import("../_legacy_api/customers/route");
+  const suppliers = await import("../_legacy_api/suppliers/route");
+  const expenses = await import("../_legacy_api/expenses/route");
+  const purchaseOrders = await import("../_legacy_api/purchase-orders/route");
+  const customerTx = await import("../_legacy_api/customers/[id]/transactions/route");
+  const importRoute = await import("../_legacy_api/catalog/import/route");
+  const syncRoute = await import("../_legacy_api/sync/route");
+  const loginRoute = await import("../_legacy_api/login/route");
+  const storesRoute = await import("../_legacy_api/stores/route");
+  const adminStores = await import("../_legacy_api/admin/stores/route");
+  const adminStoresId = await import("../_legacy_api/admin/stores/[id]/route");
+  const settingsRoute = await import("../_legacy_api/settings/route");
+  const loyaltyRoute = await import("../_legacy_api/loyalty/route");
+  const auditRoute = await import("../_legacy_api/admin/audit/route");
+  const reportsOverviewRoute = await import("../_legacy_api/reports/overview/route");
+  const printServerRoute = await import("../_legacy_api/print-server/route");
 
   const POST = (name: string, fn: () => Promise<Response>, expected: number): Promise<void> =>
     expectResponse(name, fn, expected);
@@ -542,7 +542,7 @@ async function routeValidation(): Promise<void> {
   // Closed self-registration: stores are created only through the Super Admin
   // console (POST /api/admin/stores), so the public register endpoint always
   // refuses regardless of the payload.
-  const registerRoute = await import("../app/api/auth/register/route");
+  const registerRoute = await import("../_legacy_api/auth/register/route");
   const regReq = (body?: string): Request => {
     const headers: Record<string, string> = {};
     if (body !== undefined) headers["Content-Type"] = "application/json";
