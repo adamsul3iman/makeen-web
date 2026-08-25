@@ -58,12 +58,17 @@ export default function UnitsEditorModal({
   baseUnit,
   storeId,
   onClose,
+  onSaved,
 }: {
   productId: string;
   productName: string;
   baseUnit: string;
   storeId: string;
   onClose: () => void;
+  /** Called after units are successfully saved so the parent can trigger a
+   *  catalog refresh (hydrateCatalog) on the same tab — BroadcastChannel
+   *  only notifies *other* tabs, not the writer. */
+  onSaved?: () => void;
 }) {
   const [rows, setRows] = useState<UnitDraft[]>([]);
   const [deletedIds, setDeletedIds] = useState<string[]>([]);
@@ -179,6 +184,7 @@ export default function UnitsEditorModal({
       await reload();
       setSavedOnce(true);
       setTimeout(() => setSavedOnce(false), 2500);
+      onSaved?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : "تعذر حفظ الوحدات");
     } finally {

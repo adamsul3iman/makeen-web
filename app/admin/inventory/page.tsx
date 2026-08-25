@@ -679,7 +679,12 @@ export default function AdminInventoryPage() {
       setModalOpen(false);
       setEditing(null);
       setEntryDefaults(null);
-      syncCatalogInBackground();
+      // Await the catalog refresh so productUnits is live in the Zustand store
+      // before the user reaches the POS register (syncCatalogInBackground was
+      // fire-and-forget and let the user outrun it).
+      await hydrateCatalog().catch((error: unknown) => {
+        console.error("Catalog hydration after save failed:", error);
+      });
       productBatchDirtyRef.current = false;
       batchSavedCountRef.current = 0;
       setImportStatus(
@@ -688,10 +693,10 @@ export default function AdminInventoryPage() {
           : {
               tone: "success",
               message: editedProduct
-                ? "تم تعديل المنتج، ويجري تحديث نقطة البيع في الخلفية"
+                ? "تم تعديل المنتج وتحديث نقطة البيع"
                 : savedCount > 1
-                  ? `تم حفظ ${savedCount} منتجات، ويجري تحديث نقطة البيع في الخلفية`
-                  : "تمت إضافة المنتج، ويجري تحديث نقطة البيع في الخلفية",
+                  ? `تم حفظ ${savedCount} منتجات وتحديث نقطة البيع`
+                  : "تمت إضافة المنتج وتحديث نقطة البيع",
             },
       );
     } catch (err) {
@@ -1291,6 +1296,7 @@ export default function AdminInventoryPage() {
           productName={unitsProduct.name}
           baseUnit={unitsProduct.baseUnit}
           storeId={getTenantStoreId() ?? ""}
+          onSaved={syncCatalogInBackground}
           onClose={() => {
             setUnitsProduct(null);
             // Unit chips in POS re-price from the catalog snapshot; converge.
