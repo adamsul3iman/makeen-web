@@ -6,6 +6,7 @@ import { anyPosModalOpen, usePosStore } from "@/store/usePosStore";
 import { useOrdersStore } from "@/store/useOrdersStore";
 import { formatMoney } from "@/lib/format";
 import { withB2BMarkup } from "@/lib/saleMath";
+import { formatProductDisplayName } from "@/lib/productDisplayName";
 import type { DiscountScope, LocalUnit, SaleItem } from "@/types/pos.types";
 import { useDeviceHardware } from "@/hooks/useDeviceHardware";
 import { scannerAcceptsSubmitKey } from "@/lib/deviceHardware";
@@ -90,14 +91,13 @@ const CartRow = memo(function CartRow({
       <td className="py-1.5 ps-3 pe-2">
         <div className="flex flex-col gap-0.5">
           <div className="flex items-baseline gap-1.5">
-            <span className="text-sm font-bold leading-tight text-slate-800">{item.name}</span>
+            <span className="text-sm font-bold leading-tight text-slate-800">
+              {formatProductDisplayName(item.name, item.variantLabel)}
+            </span>
             {item.barcode && item.barcode !== item.variantLabel && (
               <span className="font-mono text-xs text-slate-400">{item.barcode}</span>
             )}
           </div>
-          {item.variantLabel && (
-            <span className="text-xs font-bold text-primary">{item.variantLabel}</span>
-          )}
           {activeUnits.length > 1 && (
             <UnitChips
               units={activeUnits}

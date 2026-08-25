@@ -7,6 +7,7 @@ import { AlertTriangle, ArrowRight, Loader2, Printer, ReceiptText, RotateCcw } f
 import SalesInvoiceDocument from "@/components/admin/SalesInvoiceDocument";
 import { formatMoney } from "@/lib/format";
 import { fetchSalesInvoiceDetail } from "@/lib/reportsClient";
+import { formatProductDisplayName } from "@/lib/productDisplayName";
 import type { SalesInvoiceDetail } from "@/types/salesLedger.types";
 
 export default function SalesInvoiceDetailPage() {
@@ -72,7 +73,7 @@ export default function SalesInvoiceDetailPage() {
           <div className="overflow-x-auto">
             <table className="w-full min-w-[620px] text-sm">
               <thead className="bg-slate-50 text-xs font-black text-muted"><tr><th className="px-4 py-3 text-right">الصنف</th><th className="px-4 py-3 text-right">الصافي</th><th className="px-4 py-3 text-right">التكلفة</th><th className="px-4 py-3 text-right">الربح</th></tr></thead>
-              <tbody>{(invoice.items ?? []).map((item) => <tr key={item.id} className="border-t border-border/70"><td className="px-4 py-3"><p className="font-black">{item.productName}</p><p className="text-xs font-bold text-muted">{item.barcode || "بدون باركود"}</p></td><td className="px-4 py-3 font-bold tabular-nums">{formatMoney(item.netTotal)}</td><td className="px-4 py-3 font-bold tabular-nums text-muted">{formatMoney(item.costTotal)}</td><td className={`px-4 py-3 font-black tabular-nums ${item.grossProfit != null && item.grossProfit < 0 ? "text-red-700" : item.grossProfit == null ? "text-amber-700" : "text-green-700"}`}>{item.grossProfit == null ? "غير محسوم" : formatMoney(item.grossProfit)}</td></tr>)}</tbody>
+              <tbody>{(invoice.items ?? []).map((item) => <tr key={item.id} className="border-t border-border/70"><td className="px-4 py-3"><p className="font-black">{formatProductDisplayName(item.productName, item.variantLabel)}</p><p className="text-xs font-bold text-muted">{item.barcode || "بدون باركود"}</p></td><td className="px-4 py-3 font-bold tabular-nums">{formatMoney(item.netTotal)}</td><td className="px-4 py-3 font-bold tabular-nums text-muted">{formatMoney(item.costTotal)}</td><td className={`px-4 py-3 font-black tabular-nums ${item.grossProfit != null && item.grossProfit < 0 ? "text-red-700" : item.grossProfit == null ? "text-amber-700" : "text-green-700"}`}>{item.grossProfit == null ? "غير محسوم" : formatMoney(item.grossProfit)}</td></tr>)}</tbody>
               <tfoot className="border-t-2 border-slate-900 bg-slate-50 font-black"><tr><td className="px-4 py-3">الإجمالي</td><td className="px-4 py-3 tabular-nums">{formatMoney(invoice.subtotal + invoice.deliveryFee)}</td><td className="px-4 py-3 tabular-nums">{formatMoney((invoice.items ?? []).reduce((sum, item) => sum + item.costTotal, 0))}</td><td className={invoice.grossProfit == null ? "px-4 py-3 tabular-nums text-amber-700" : "px-4 py-3 tabular-nums text-green-700"}>{invoice.grossProfit == null ? "غير محسوم" : formatMoney(invoice.grossProfit)}</td></tr></tfoot>
             </table>
           </div>

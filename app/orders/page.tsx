@@ -19,6 +19,7 @@ import { usePosStoreHydrated } from "@/hooks/usePosStoreHydrated";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { computeSaleTotals } from "@/lib/saleMath";
 import { formatMoney } from "@/lib/format";
+import { formatProductDisplayName } from "@/lib/productDisplayName";
 import type { LocalOrder } from "@/types/orders.types";
 
 type Tab = "open" | "closed";
@@ -319,8 +320,7 @@ export default function OrdersPage() {
                       {order.items.map((item, idx) => (
                         <li key={`${item.barcode}-${idx}`} className="flex items-center justify-between gap-2">
                           <span className="min-w-0 truncate">
-                            {item.name}
-                            {item.variantLabel ? ` — ${item.variantLabel}` : ""}
+                            {formatProductDisplayName(item.name, item.variantLabel)}
                             <span className="text-muted">
                               {" "}
                               ×{item.qty} {item.unitName}

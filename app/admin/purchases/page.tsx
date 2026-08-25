@@ -1,39 +1,56 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, PackageCheck, Plus, RefreshCw, Trash2, Truck } from "lucide-react";
+import {
+  Ban,
+  CheckCircle2,
+  PackageCheck,
+  Pencil,
+  Plus,
+  Printer,
+  RefreshCw,
+  Trash2,
+  Truck,
+} from "lucide-react";
 import { ListPagination } from "@/components/admin/ListPagination";
 import { SearchInput } from "@/components/admin/SearchInput";
+import AsyncProductCombobox, {
+  type AsyncProductOption,
+} from "@/components/admin/AsyncProductCombobox";
+import PurchaseOrderPrint from "@/components/admin/PurchaseOrderPrint";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { normalizeArabicText } from "@/lib/arabic";
 import { formatMoney } from "@/lib/format";
+import type { PurchaseOrderDetail } from "@/lib/purchasesClient";
 import {
   createPurchaseOrder,
+  fetchPurchaseOrderDetail,
   fetchPurchaseOrders,
   receivePurchaseOrder,
+  updatePurchaseOrderItems,
 } from "@/lib/purchasesClient";
 import { getSupabaseBrowser } from "@/lib/supabaseBrowser";
+import { getTenantStoreId } from "@/lib/tenantClient";
 import {
   createSupplier as createSupplierApi,
   fetchSupplierInvoices,
   fetchSuppliers,
 } from "@/lib/suppliersClient";
-import { getTenantStoreId } from "@/lib/tenantClient";
 import EntityCombobox from "@/components/shared/EntityCombobox";
 import QuickCreateEntityModal from "@/components/shared/QuickCreateEntityModal";
 import { usePosStore } from "@/store/usePosStore";
 
 interface LineInput {
+  key: string;
   productId: string;
   productName: string;
   quantity: string;
   unitCost: string;
-}
-
-interface ProductOption {
-  id: string;
-  name: string;
-  costPrice?: number;
+  /** Parent-level reference prices captured when the product was picked. */
+  baseCost: number | null;
+  basePrice: number | null;
+  /** Optional updated selling price pushed onto the product at receive time. */
+  newSellingPrice: string;
 }
 
 /**
@@ -56,6 +73,25 @@ const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 1
 
 const RECEIVED_PO_STATUSES = new Set(["received", "RECEIVED"]);
 
+function makeKey(): string {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `line-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function emptyLine(): LineInput {
+  return {
+    key: makeKey(),
+    productId: "",
+    productName: "",
+    quantity: "1",
+    unitCost: "",
+    baseCost: null,
+    basePrice: null,
+    newSellingPrice: "",
+  };
+}
+
 /** Item counts for the listed purchase orders (lightweight lookup instead of an embed). */
 async function fetchPoItemCounts(orderIds: string[]): Promise<Map<string, number>> {
   const sb = getSupabaseBrowser();
@@ -77,7 +113,6 @@ export default function AdminPurchasesPage() {
   const adminEmail = usePosStore((state) => state.adminSession?.email ?? "");
   const [orders, setOrders] = useState<PurchasesRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [products, setProducts] = useState<ProductOption[]>([]);
   const [suppliers, setSuppliers] = useState<{ id: string; name: string }[]>([]);
   const [supplierId, setSupplierId] = useState("");
   const [addingSupplier, setAddingSupplier] = useState(false);
@@ -85,6 +120,8 @@ export default function AdminPurchasesPage() {
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [receivingId, setReceivingId] = useState<string | null>(null);
+  const [editing, setEditing] = useState<PurchaseOrderDetail | null>(null);
+  const [printDetail, setPrintDetail] = useState<PurchaseOrderDetail | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [q, setQ] = useState("");
   const debouncedQ = useDebouncedValue(q.trim(), 300);
@@ -145,26 +182,6 @@ export default function AdminPurchasesPage() {
   const refresh = () => setRefreshKey((k) => k + 1);
 
   useEffect(() => {
-    const loadCatalogProducts = async () => {
-      const sb = getSupabaseBrowser();
-      const storeId = getTenantStoreId();
-      if (!sb || !storeId) return;
-      const { data } = await sb
-        .from("products")
-        .select("id,name,cost_price")
-        .eq("store_id", storeId)
-        .order("name", { ascending: true });
-      setProducts(
-        ((data ?? []) as Array<{ id: string; name: string; cost_price: number | string | null }>).map((p) => ({
-          id: p.id,
-          name: p.name,
-          costPrice: Number(p.cost_price) || 0,
-        })),
-      );
-    };
-    loadCatalogProducts().catch(() => {
-      /* keep empty product picker */
-    });
     fetchSuppliers()
       .then((rows) => setSuppliers(rows.map((s) => ({ id: s.id, name: s.name }))))
       .catch(() => {
@@ -172,19 +189,36 @@ export default function AdminPurchasesPage() {
       });
   }, []);
 
+  // Drop the hidden print document after the dialog closes so a later
+  // window.print() elsewhere on this page cannot reprint a stale PO.
+  useEffect(() => {
+    if (!printDetail) return;
+    const clearPrint = () => setPrintDetail(null);
+    window.addEventListener("afterprint", clearPrint);
+    return () => window.removeEventListener("afterprint", clearPrint);
+  }, [printDetail]);
+
   const addLine = () => {
-    setLines((prev) => [
-      ...prev,
-      { productId: "", productName: "", quantity: "1", unitCost: "" },
-    ]);
+    setLines((prev) => [...prev, emptyLine()]);
   };
 
-  const updateLine = (index: number, patch: Partial<LineInput>) => {
-    setLines((prev) => prev.map((line, i) => (i === index ? { ...line, ...patch } : line)));
+  const updateLine = (key: string, patch: Partial<LineInput>) => {
+    setLines((prev) => prev.map((line) => (line.key === key ? { ...line, ...patch } : line)));
   };
 
-  const removeLine = (index: number) => {
-    setLines((prev) => prev.filter((_, i) => i !== index));
+  const removeLine = (key: string) => {
+    setLines((prev) => prev.filter((line) => line.key !== key));
+  };
+
+  const handleProductPicked = (key: string, product: AsyncProductOption) => {
+    updateLine(key, {
+      productId: product.id,
+      productName: product.name,
+      unitCost:
+        product.costPrice != null && product.costPrice > 0 ? String(product.costPrice) : "",
+      baseCost: product.costPrice ?? null,
+      basePrice: product.sellingPrice ?? null,
+    });
   };
 
   const poTotal = round2(
@@ -195,7 +229,20 @@ export default function AdminPurchasesPage() {
     }, 0),
   );
 
-  const canCreate = supplierId.trim() !== "" && lines.length > 0 && !saving;
+  const validLines = lines.filter(
+    (line) =>
+      line.productId &&
+      parseInt(line.quantity, 10) > 0 &&
+      (line.unitCost === "" || parseFloat(line.unitCost) >= 0),
+  );
+  const canSubmit = supplierId.trim() !== "" && lines.length > 0 && validLines.length === lines.length && !saving;
+
+  const resetForm = () => {
+    setEditing(null);
+    setSupplierId("");
+    setLines([]);
+    setError("");
+  };
 
   const createSupplier = async (data: { name: string; phone: string }) => {
     const supplier = await createSupplierApi({ name: data.name, phone: data.phone });
@@ -206,30 +253,58 @@ export default function AdminPurchasesPage() {
     setAddingSupplier(false);
   };
 
-  const handleCreate = async () => {
-    if (!canCreate) return;
+  const handleSubmit = async () => {
+    if (!canSubmit) return;
     setError("");
     setSaving(true);
     try {
-      const items = lines
-        .map((line) => ({
-          product_id: line.productId,
-          quantity: parseInt(line.quantity, 10) || 0,
-          unit_cost: parseFloat(line.unitCost) || 0,
-        }))
-        .filter((it) => it.product_id && it.quantity > 0 && it.unit_cost >= 0);
-      if (items.length === 0) {
-        setError("أضف بنوداً صالحة بأصناف وكماًيات ومبالغ");
-        return;
+      const items = validLines.map((line) => ({
+        product_id: line.productId,
+        quantity: parseInt(line.quantity, 10) || 0,
+        unit_cost: parseFloat(line.unitCost) || 0,
+        new_selling_price: parseFloat(line.newSellingPrice) || undefined,
+      }));
+      if (editing) {
+        await updatePurchaseOrderItems(editing.order.id, { supplier_id: supplierId, items });
+        resetForm();
+      } else {
+        await createPurchaseOrder({ supplier_id: supplierId, items });
+        setSupplierId("");
+        setLines([]);
       }
-      await createPurchaseOrder({ supplier_id: supplierId, items });
-      setSupplierId("");
-      setLines([]);
       refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "تعذر إنشاء أمر الشراء — تحقق من الاتصال");
+      setError(err instanceof Error ? err.message : "تعذر حفظ أمر الشراء — تحقق من الاتصال");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const startEdit = async (row: PurchasesRow) => {
+    setError("");
+    try {
+      const detail = await fetchPurchaseOrderDetail(row.id);
+      if (RECEIVED_PO_STATUSES.has(detail.order.status)) {
+        setError("أمر الشراء مستلم بالفعل ولا يمكن تعديله");
+        return;
+      }
+      setEditing(detail);
+      setSupplierId(detail.order.supplier_id);
+      setLines(
+        detail.items.map((item) => ({
+          key: item.id || makeKey(),
+          productId: item.product_id ?? "",
+          productName: item.productName,
+          quantity: String(item.quantity),
+          unitCost: String(item.unit_cost),
+          baseCost: item.unit_cost,
+          basePrice: null,
+          newSellingPrice: item.new_selling_price != null ? String(item.new_selling_price) : "",
+        })),
+      );
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "تعذر تحميل أمر الشراء للتعديل");
     }
   };
 
@@ -243,6 +318,18 @@ export default function AdminPurchasesPage() {
       setError(err instanceof Error ? err.message : "تعذر استلام الأمر — تحقق من الاتصال");
     } finally {
       setReceivingId(null);
+    }
+  };
+
+  const handlePrint = async (row: PurchasesRow) => {
+    setError("");
+    try {
+      const detail = await fetchPurchaseOrderDetail(row.id);
+      setPrintDetail(detail);
+      // Two frames so the hidden document paints before the print dialog.
+      requestAnimationFrame(() => requestAnimationFrame(() => window.print()));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "تعذر تجهيز الطباعة");
     }
   };
 
@@ -266,7 +353,7 @@ export default function AdminPurchasesPage() {
       <header>
         <h1 className="text-2xl font-black text-foreground">أوامر الشراء والاستلام</h1>
         <p className="mt-1 text-sm font-semibold text-muted">
-          إنشاء أوامر شراء من الموردين واستلامها لزيادة المخزون وتحديث تكلفة الوحدة
+          إنشاء أوامر شراء من الموردين، ثم استلامها لزيادة المخزون وتحديث التكلفة وأسعار البيع وفتح ذمة المورد
         </p>
       </header>
 
@@ -292,23 +379,39 @@ export default function AdminPurchasesPage() {
           className="h-fit space-y-4 rounded-2xl border border-border bg-surface p-5 shadow-sm lg:col-span-1"
           onSubmit={(e) => {
             e.preventDefault();
-            void handleCreate();
+            void handleSubmit();
           }}
         >
-          <h2 className="text-lg font-black text-foreground">أمر شراء جديد</h2>
+          {editing ? (
+            <div className="flex items-center justify-between gap-2 rounded-xl bg-amber-50 px-3 py-2.5">
+              <p className="text-xs font-black text-amber-700">
+                تعديل أمر الشراء {editing.order.order_number || editing.order.id.slice(0, 8)} — لم يُستلم بعد
+              </p>
+              <button
+                type="button"
+                onClick={resetForm}
+                aria-label="إلغاء التعديل"
+                className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-amber-700 transition hover:bg-amber-100"
+              >
+                <Ban className="h-4 w-4" />
+              </button>
+            </div>
+          ) : (
+            <h2 className="text-lg font-black text-foreground">أمر شراء جديد</h2>
+          )}
 
           <EntityCombobox
-              id="po-supplier"
-              label="المورد"
-              value={supplierId}
-              options={suppliers}
-              placeholder="اختر المورد"
-              emptyLabel="لا يوجد مورد مطابق"
-              addLabel="إضافة مورد جديد"
-              onChange={setSupplierId}
-              onAdd={() => setAddingSupplier(true)}
-              required
-            />
+            id="po-supplier"
+            label="المورد"
+            value={supplierId}
+            options={suppliers}
+            placeholder="اختر المورد"
+            emptyLabel="لا يوجد مورد مطابق"
+            addLabel="إضافة مورد جديد"
+            onChange={setSupplierId}
+            onAdd={() => setAddingSupplier(true)}
+            required
+          />
 
           <div className="space-y-2">
             <div className="flex items-center justify-between">
@@ -322,47 +425,32 @@ export default function AdminPurchasesPage() {
                 إضافة صنف
               </button>
             </div>
-            {lines.map((line, i) => (
-              <div key={i} className="rounded-xl border border-border bg-white p-3">
-                <div className="flex items-start justify-between gap-2">
-                  <select
-                    value={line.productId}
-                    onChange={(e) => {
-                      const product = products.find((p) => p.id === e.target.value);
-                      updateLine(i, {
-                        productId: e.target.value,
-                        productName: product?.name ?? "",
-                        unitCost:
-                          line.unitCost || (product?.costPrice ? String(product.costPrice) : ""),
-                      });
-                    }}
-                    className="w-full rounded-lg border border-border bg-white px-3 py-2 text-sm font-bold outline-none focus:border-primary"
-                  >
-                    <option value="">الصنف…</option>
-                    {products.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    onClick={() => removeLine(i)}
-                    aria-label="حذف الصنف"
-                    className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-muted transition hover:bg-destructive/10 hover:text-destructive"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
-                <div className="mt-2 grid grid-cols-2 gap-2">
+            {lines.map((line) => (
+              <div key={line.key} className="rounded-xl border border-border bg-white p-3">
+                <AsyncProductCombobox
+                  id={`po-product-${line.key}`}
+                  label="الصنف"
+                  value={line.productId}
+                  selectedLabel={line.productName || undefined}
+                  placeholder="ابحث بالاسم…"
+                  required
+                  onChange={(product) => handleProductPicked(line.key, product)}
+                />
+                {(line.baseCost != null || line.basePrice != null) && (
+                  <p className="mt-1.5 flex flex-wrap gap-x-3 text-[11px] font-bold text-muted">
+                    {line.baseCost != null && <span>التكلفة الحالية: <span className="tabular-nums">{formatMoney(line.baseCost)}</span></span>}
+                    {line.basePrice != null && <span>سعر البيع الحالي: <span className="tabular-nums">{formatMoney(line.basePrice)}</span></span>}
+                  </p>
+                )}
+                <div className="mt-2 grid grid-cols-3 gap-2">
                   <label className="block text-xs font-bold text-muted">
                     الكمية
                     <input
                       type="number"
                       min={1}
                       value={line.quantity}
-                      onChange={(e) => updateLine(i, { quantity: e.target.value })}
-                      className="mt-1 w-full rounded-lg border border-border bg-white px-3 py-2 text-sm font-bold tabular-nums outline-none focus:border-primary"
+                      onChange={(e) => updateLine(line.key, { quantity: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-border bg-white px-2 py-2 text-sm font-bold tabular-nums outline-none focus:border-primary"
                     />
                   </label>
                   <label className="block text-xs font-bold text-muted">
@@ -374,10 +462,40 @@ export default function AdminPurchasesPage() {
                       inputMode="decimal"
                       dir="ltr"
                       value={line.unitCost}
-                      onChange={(e) => updateLine(i, { unitCost: e.target.value })}
-                      className="mt-1 w-full rounded-lg border border-border bg-white px-3 py-2 text-left text-sm font-bold tabular-nums outline-none focus:border-primary"
+                      onChange={(e) => updateLine(line.key, { unitCost: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-border bg-white px-2 py-2 text-left text-sm font-bold tabular-nums outline-none focus:border-primary"
                     />
                   </label>
+                  <label className="block text-xs font-bold text-muted">
+                    سعر بيع جديد
+                    <input
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      inputMode="decimal"
+                      dir="ltr"
+                      placeholder={line.basePrice != null ? String(line.basePrice) : "اختياري"}
+                      value={line.newSellingPrice}
+                      onChange={(e) => updateLine(line.key, { newSellingPrice: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-border bg-white px-2 py-2 text-left text-sm font-bold tabular-nums outline-none focus:border-primary placeholder:text-muted/60"
+                    />
+                  </label>
+                </div>
+                <div className="mt-2 flex items-center justify-between">
+                  <p className="text-xs font-semibold text-muted">
+                    إجمالي البند:{" "}
+                    <span className="font-black tabular-nums text-foreground">
+                      {formatMoney(round2((parseInt(line.quantity, 10) || 0) * (parseFloat(line.unitCost) || 0)))}
+                    </span>
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => removeLine(line.key)}
+                    aria-label="حذف الصنف"
+                    className="grid h-8 w-8 place-items-center rounded-lg text-muted transition hover:bg-destructive/10 hover:text-destructive"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
                 </div>
               </div>
             ))}
@@ -397,11 +515,16 @@ export default function AdminPurchasesPage() {
 
           <button
             type="submit"
-            disabled={!canCreate}
+            disabled={!canSubmit}
             className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-primary text-base font-black text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-40"
           >
             {saving ? (
-              "جارٍ الإنشاء…"
+              "جارٍ الحفظ…"
+            ) : editing ? (
+              <>
+                <Pencil className="h-5 w-5" />
+                حفظ التعديل
+              </>
             ) : (
               <>
                 <Plus className="h-5 w-5" />
@@ -409,6 +532,9 @@ export default function AdminPurchasesPage() {
               </>
             )}
           </button>
+          <p className="text-[11px] font-semibold leading-4 text-muted">
+            إنشاء الأمر مسودة فقط — لا يؤثر على المخزون. عند الضغط على «استلام» تُضاف الكميات وتتحدث التكلفة وأسعار البيع وتُفتح فاتورة المورد في الذمم تلقائياً.
+          </p>
         </form>
 
         <section className="overflow-hidden rounded-2xl border border-border bg-surface shadow-sm lg:col-span-2">
@@ -446,57 +572,85 @@ export default function AdminPurchasesPage() {
                     <th className="px-5 py-3">البنود</th>
                     <th className="px-5 py-3">الإجمالي</th>
                     <th className="px-5 py-3">الحالة</th>
-                    <th className="px-5 py-3"></th>
+                    <th className="px-5 py-3">إجراءات</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {pagedOrders.map((o) => (
-                    <tr key={o.id} className="border-b border-border/60 text-right">
-                      <td className="px-5 py-3 font-bold text-foreground">
-                        {new Date(o.createdAt).toLocaleDateString("en-US", {
-                          day: "2-digit",
-                          month: "2-digit",
-                          year: "numeric",
-                        })}
-                      </td>
-                      <td className="px-5 py-3 text-muted">
-                        {o.supplierName}
-                        {o.source === "invoice" && (
-                          <span className="ms-2 rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-black text-blue-700">
-                            استلام
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-5 py-3 tabular-nums text-muted">{o.itemCount}</td>
-                      <td className="px-5 py-3 font-black tabular-nums">{formatMoney(o.totalAmount)}</td>
-                      <td className="px-5 py-3">
-                        <span
-                          className={`rounded-full px-2.5 py-1 text-xs font-black ${
-                            o.status === "received"
-                              ? "bg-success/10 text-success"
-                              : "bg-amber-100 text-amber-700"
-                          }`}
-                        >
-                          {o.status === "received" ? "مستلم" : "معلق"}
-                        </span>
-                      </td>
-                      <td className="px-5 py-3 text-left">
-                        {o.status === "pending" && o.source === "po" ? (
-                          <button
-                            type="button"
-                            onClick={() => void handleReceive(o.id)}
-                            disabled={receivingId === o.id}
-                            className="inline-flex items-center gap-1 rounded-lg bg-success px-2.5 py-1.5 text-xs font-black text-success-foreground transition hover:bg-success-hover disabled:opacity-40"
+                  {pagedOrders.map((o) => {
+                    const isEditablePo = o.source === "po" && o.status === "pending";
+                    return (
+                      <tr key={o.id} className="border-b border-border/60 text-right">
+                        <td className="px-5 py-3 font-bold text-foreground">
+                          {new Date(o.createdAt).toLocaleDateString("en-US", {
+                            day: "2-digit",
+                            month: "2-digit",
+                            year: "numeric",
+                          })}
+                        </td>
+                        <td className="px-5 py-3 text-muted">
+                          {o.supplierName}
+                          {o.source === "invoice" && (
+                            <span className="ms-2 rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-black text-blue-700">
+                              استلام
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-5 py-3 tabular-nums text-muted">{o.itemCount}</td>
+                        <td className="px-5 py-3 font-black tabular-nums">{formatMoney(o.totalAmount)}</td>
+                        <td className="px-5 py-3">
+                          <span
+                            className={`rounded-full px-2.5 py-1 text-xs font-black ${
+                              o.status === "received"
+                                ? "bg-success/10 text-success"
+                                : "bg-amber-100 text-amber-700"
+                            }`}
                           >
-                            <CheckCircle2 className="h-3.5 w-3.5" />
-                            {receivingId === o.id ? "جارٍ الاستلام…" : "استلام"}
-                          </button>
-                        ) : (
-                          <span className="text-xs font-semibold text-muted">—</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
+                            {o.status === "received" ? "مستلم" : "معلق"}
+                          </span>
+                        </td>
+                        <td className="px-5 py-3">
+                          <div className="flex items-center justify-end gap-1">
+                            {isEditablePo && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => void startEdit(o)}
+                                  title="تعديل — متاح قبل الاستلام فقط"
+                                  className="inline-flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-black text-primary transition hover:bg-primary/10"
+                                >
+                                  <Pencil className="h-3.5 w-3.5" />
+                                  تعديل
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => void handleReceive(o.id)}
+                                  disabled={receivingId === o.id}
+                                  className="inline-flex items-center gap-1 rounded-lg bg-success px-2.5 py-1.5 text-xs font-black text-success-foreground transition hover:bg-success-hover disabled:opacity-40"
+                                >
+                                  <CheckCircle2 className="h-3.5 w-3.5" />
+                                  {receivingId === o.id ? "جارٍ الاستلام…" : "استلام"}
+                                </button>
+                              </>
+                            )}
+                            {o.source === "po" && (
+                              <button
+                                type="button"
+                                onClick={() => void handlePrint(o)}
+                                title="طباعة أمر الشراء"
+                                className="inline-flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-black text-muted transition hover:bg-surface-muted hover:text-foreground"
+                              >
+                                <Printer className="h-3.5 w-3.5" />
+                                طباعة
+                              </button>
+                            )}
+                            {!isEditablePo && o.source !== "po" && (
+                              <span className="text-xs font-semibold text-muted">—</span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                   {orders.length === 0 && (
                     <tr>
                       <td colSpan={6} className="px-5 py-8 text-center text-sm font-semibold text-muted">
@@ -527,10 +681,13 @@ export default function AdminPurchasesPage() {
             }}
           />
           <footer className="border-t border-border px-5 py-3 text-xs font-semibold text-muted">
-            استلام أمر الشراء يزيد كميات المنتجات ويحدّث تكلفة الوحدة تلقائياً — فواتير الاستلام من جهاز الكاشير تظهر هنا أيضاً
+            التعديل متاح قبل الاستلام فقط — الاستلام نهائي: يحدّث المخزون وسجل الحركات والتكلفة وأسعار البيع ويولّد فاتورة المورد في الذمم
           </footer>
         </section>
       </section>
+
+      {printDetail && <PurchaseOrderPrint detail={printDetail} />}
+
       {addingSupplier && (
         <QuickCreateEntityModal
           title="إضافة مورد جديد"

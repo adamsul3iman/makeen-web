@@ -7,6 +7,7 @@ import { claimPrintJob, resolvePrintJob, type ClaimedPrintJob } from "@/lib/prin
 import BarcodeLabel, { type BarcodeLabelData } from "@/components/print/BarcodeLabel";
 import { DEFAULT_BARCODE_LABEL_TEMPLATE, normalizeBarcodeLabelTemplate } from "@/lib/printTemplates";
 import type { BarcodeLabelTemplateConfig } from "@/types/printTemplates";
+import { formatProductDisplayName } from "@/lib/productDisplayName";
 
 const POLL_MS = 2500;
 
@@ -76,7 +77,7 @@ export default function PrintServerPage() {
       // so the queue advances even when the event is lost.
       await new Promise((resolveGrace) => setTimeout(resolveGrace, 400));
       await resolve(claimed.id, true);
-      setLastPrinted(claimed.payload.name + (claimed.payload.variantLabel ? ` • ${claimed.payload.variantLabel}` : ""));
+      setLastPrinted(formatProductDisplayName(claimed.payload.name, claimed.payload.variantLabel));
       setTotal((t) => t + 1);
       setJob(null);
       setConnected("waiting");
@@ -122,7 +123,7 @@ export default function PrintServerPage() {
     if (!job) return null;
     const p = job.payload;
     return {
-      name: p.name + (p.variantLabel ? ` • ${p.variantLabel}` : ""),
+      name: formatProductDisplayName(p.name, p.variantLabel),
       barcode: p.barcode,
       price: p.price,
       unitName: p.unitName || "حبة",

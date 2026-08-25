@@ -73,6 +73,9 @@ export interface ReportsNegativeStock {
   productId: string;
   name: string;
   stock: number;
+  /** First variant barcode, so the stock manager can scan-verify the item. */
+  barcode?: string;
+  variantLabel?: string;
 }
 
 export interface ReportsDataQualityIssue {

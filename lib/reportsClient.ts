@@ -65,6 +65,15 @@ interface ProductCostRow {
 interface VariantRow {
   barcode: string;
   product_id: string;
+  variant_label: string | null;
+}
+
+/** A variant barcode joined with its product's parent-level cost. */
+interface CatalogBarcodeRow {
+  barcode: string;
+  product_id: string;
+  cost_price: number | string | null;
+  variantLabel: string;
 }
 
 interface SalesInvoiceRow {
@@ -259,10 +268,26 @@ function objectPayload(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
-function buildNegativeStock(products: ProductRow[]): ReportsNegativeStock[] {
+function buildNegativeStock(
+  products: ProductRow[],
+  barcodes: CatalogBarcodeRow[] = [],
+): ReportsNegativeStock[] {
+  const firstBarcodeByProduct = new Map<string, CatalogBarcodeRow>();
+  for (const b of barcodes) {
+    if (!firstBarcodeByProduct.has(b.product_id)) firstBarcodeByProduct.set(b.product_id, b);
+  }
   return products
     .filter((p) => p.total_stock < 0)
-    .map((p) => ({ productId: p.id, name: p.name, stock: round2(p.total_stock) }))
+    .map((p) => {
+      const match = firstBarcodeByProduct.get(p.id);
+      return {
+        productId: p.id,
+        name: p.name,
+        stock: round2(p.total_stock),
+        barcode: match?.barcode ?? undefined,
+        variantLabel: match?.variantLabel || undefined,
+      };
+    })
     .sort((a, b) => a.stock - b.stock);
 }
 
@@ -344,8 +369,8 @@ async function fetchProducts(storeId: string): Promise<ProductRow[]> {
   return fetchPage<ProductRow>("products", "id,name,total_stock", storeId, (q) => q.order("name"));
 }
 
-async function fetchBarcodes(storeId: string) {
-  const variants = await fetchPage<VariantRow>("product_variants", "barcode,product_id", storeId);
+async function fetchBarcodes(storeId: string): Promise<CatalogBarcodeRow[]> {
+  const variants = await fetchPage<VariantRow>("product_variants", "barcode,product_id,variant_label", storeId);
   if (variants.length === 0) return [];
 
   const sb = getSupabaseBrowser();
@@ -366,6 +391,7 @@ async function fetchBarcodes(storeId: string) {
     barcode: v.barcode,
     product_id: v.product_id,
     cost_price: costMap.get(v.product_id) ?? null,
+    variantLabel: v.variant_label ?? "",
   }));
 }
 
@@ -419,7 +445,7 @@ function buildOverviewFromLedger(params: {
   items: SalesInvoiceItemRow[];
   events: SyncEventRow[];
   products: ProductRow[];
-  barcodes: { barcode: string; product_id: string; cost_price: number | string | null }[];
+  barcodes: CatalogBarcodeRow[];
   from: Date;
   to: Date;
 }): ReportsOverview {
@@ -597,7 +623,7 @@ function buildOverviewFromLedger(params: {
     topProducts,
     stockAlerts,
     dataQuality,
-    negativeStock: buildNegativeStock(params.products),
+    negativeStock: buildNegativeStock(params.products, params.barcodes),
     generatedAt: new Date().toISOString(),
   };
 }
@@ -624,7 +650,7 @@ export async function fetchReportsOverview(
   const from = parseReportDate(range?.from, new Date(to.getTime() - 29 * DAY_MS));
 
   let products: ProductRow[];
-  let barcodes: { barcode: string; product_id: string; cost_price: number | string | null }[];
+  let barcodes: CatalogBarcodeRow[];
   try {
     [products, barcodes] = await Promise.all([fetchProducts(storeId), fetchBarcodes(storeId)]);
   } catch {
@@ -659,7 +685,7 @@ export async function fetchReportsOverview(
 function buildOverviewFromEvents(params: {
   events: SyncEventRow[];
   products: ProductRow[];
-  barcodes: { barcode: string; product_id: string; cost_price: number | string | null }[];
+  barcodes: CatalogBarcodeRow[];
   from: Date;
   to: Date;
 }): ReportsOverview {
@@ -804,7 +830,7 @@ function buildOverviewFromEvents(params: {
     topProducts,
     stockAlerts,
     dataQuality,
-    negativeStock: buildNegativeStock(params.products),
+    negativeStock: buildNegativeStock(params.products, params.barcodes),
     generatedAt: new Date().toISOString(),
   };
 }

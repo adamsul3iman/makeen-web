@@ -304,6 +304,27 @@ body {
     -webkit-print-color-adjust: exact !important;
   }
 
+  /* Reveal the printable purchase order document (A4). */
+  #purchase-order-print,
+  #purchase-order-print * {
+    visibility: visible !important;
+  }
+
+  #purchase-order-print {
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    box-shadow: none !important;
+    border: none !important;
+    color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    -webkit-print-color-adjust: exact !important;
+  }
+
   /* Reveal only the barcode label sheet. */
   #barcode-sheet,
   #barcode-sheet * {

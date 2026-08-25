@@ -148,37 +148,42 @@ export default function ProfitabilityReportPage() {
   const current = report?.current;
   const statement = current?.statement;
   const taxPosition = current?.taxPosition;
-  const reliable = current?.quality.profitReliable ?? true;
+  // Server payloads are loosely shaped (older RPC versions omit deltaPercent
+  // and friends), so EVERY nested read stays optional-chained — one missing
+  // section must degrade to "—" instead of crashing the whole report page.
+  const deltas = report?.deltaPercent;
+  const reliable = current?.quality?.profitReliable ?? true;
   const maxExpense = useMemo(
-    () => Math.max(0, ...(current?.expenseBreakdown.map((group) => group.amount) ?? [])),
+    () => Math.max(0, ...(current?.expenseBreakdown?.map((group) => group.amount) ?? [])),
     [current?.expenseBreakdown],
   );
 
   function exportCsv() {
-    if (!report) return;
+    if (!report?.current?.statement) return;
+    const snapshot = report.current;
     const rows: Array<Array<string | number>> = [
       ["قائمة الدخل", "من", from, "إلى", to],
       ["البند", "القيمة"],
-      ["صافي الإيراد قبل الضريبة", report.current.statement.netRevenue],
-      ["ضريبة المخرجات", report.current.statement.outputTax],
-      ["ضريبة المدخلات القابلة للخصم", report.current.taxPosition.deductibleInputTax],
-      ["صافي الضريبة المستحقة", report.current.taxPosition.netPayable],
-      ["تكلفة البضاعة الموثقة", report.current.statement.knownCogs],
-      ["الربح الإجمالي", report.current.statement.grossProfit ?? formatMoney(report.current.statement.grossProfitCandidate ?? "—")],
-      ["المصروفات التشغيلية", report.current.statement.operatingExpenses],
-      ["الربح التشغيلي", report.current.statement.operatingProfit ?? formatMoney(report.current.statement.operatingProfitCandidate ?? "—")],
-      ["جودة التكلفة", report.current.quality.profitReliable ? "مكتملة" : "ناقصة"],
-      ["أسطر بلا تكلفة", report.current.quality.zeroCostLineCount],
+      ["صافي الإيراد قبل الضريبة", snapshot.statement.netRevenue],
+      ["ضريبة المخرجات", snapshot.statement.outputTax],
+      ["ضريبة المدخلات القابلة للخصم", snapshot.taxPosition?.deductibleInputTax ?? 0],
+      ["صافي الضريبة المستحقة", snapshot.taxPosition?.netPayable ?? 0],
+      ["تكلفة البضاعة الموثقة", snapshot.statement.knownCogs],
+      ["الربح الإجمالي", snapshot.statement.grossProfit ?? formatMoney(snapshot.statement.grossProfitCandidate ?? "—")],
+      ["المصروفات التشغيلية", snapshot.statement.operatingExpenses],
+      ["الربح التشغيلي", snapshot.statement.operatingProfit ?? formatMoney(snapshot.statement.operatingProfitCandidate ?? "—")],
+      ["جودة التكلفة", snapshot.quality?.profitReliable ? "مكتملة" : "ناقصة"],
+      ["أسطر بلا تكلفة", snapshot.quality?.zeroCostLineCount ?? 0],
       [],
       ["المصروفات حسب الفئة", "العدد", "القيمة"],
-      ...report.current.expenseBreakdown.map((group) => [
+      ...(snapshot.expenseBreakdown ?? []).map((group) => [
         EXPENSE_LABELS[group.category] ?? group.category,
         group.entryCount,
         group.amount,
       ]),
       [],
       ["التاريخ", "الإيراد", "التكلفة", "المصروفات", "الربح التشغيلي"],
-      ...report.current.trend.map((point) => [
+      ...(snapshot.trend ?? []).map((point) => [
         point.date,
         point.revenue,
         point.cogs,
@@ -242,7 +247,7 @@ export default function ProfitabilityReportPage() {
           <div>
             <h2 className="text-sm font-black">الربح النهائي غير محسوم</h2>
             <p className="mt-1 text-sm font-bold leading-6">
-              يوجد {current.quality.zeroCostLineCount} سطر بيع بلا تكلفة، بقيمة مبيعات {formatMoney(current.quality.zeroCostNetSales)}.
+              يوجد {current?.quality?.zeroCostLineCount ?? 0} سطر بيع بلا تكلفة، بقيمة مبيعات {formatMoney(current?.quality?.zeroCostNetSales ?? 0)}.
               لذلك نعرض تكلفة البضاعة الموثقة، ولا نعتمد الربح الإجمالي أو التشغيلي كرقم نهائي.
             </p>
           </div>
@@ -250,13 +255,13 @@ export default function ProfitabilityReportPage() {
       ) : null}
 
       <section className="grid grid-cols-2 gap-3 xl:grid-cols-4">
-        <Metric label="صافي الإيراد قبل الضريبة" value={statement ? formatMoney(statement.netRevenue) : "—"} delta={report?.deltaPercent.netRevenue} tone="info" icon={<TrendingUp className="h-4 w-4" />} />
-        <Metric label="تكلفة البضاعة الموثقة" value={statement ? formatMoney(statement.knownCogs) : "—"} delta={report?.deltaPercent.knownCogs} icon={<PackageCheck className="h-4 w-4" />} />
-        <Metric label="المصروفات التشغيلية" value={statement ? formatMoney(statement.operatingExpenses) : "—"} delta={report?.deltaPercent.operatingExpenses} tone="warn" icon={<Wallet className="h-4 w-4" />} />
+        <Metric label="صافي الإيراد قبل الضريبة" value={statement ? formatMoney(statement.netRevenue) : "—"} delta={deltas?.netRevenue} tone="info" icon={<TrendingUp className="h-4 w-4" />} />
+        <Metric label="تكلفة البضاعة الموثقة" value={statement ? formatMoney(statement.knownCogs) : "—"} delta={deltas?.knownCogs} icon={<PackageCheck className="h-4 w-4" />} />
+        <Metric label="المصروفات التشغيلية" value={statement ? formatMoney(statement.operatingExpenses) : "—"} delta={deltas?.operatingExpenses} tone="warn" icon={<Wallet className="h-4 w-4" />} />
         <Metric
           label="الربح التشغيلي"
           value={statement ? (statement.operatingProfit == null ? "—" : formatMoney(statement.operatingProfit)) : "—"}
-          delta={report?.deltaPercent.operatingProfit}
+          delta={deltas?.operatingProfit}
           tone={statement?.operatingProfit != null && statement.operatingProfit < 0 ? "bad" : reliable ? "good" : "warn"}
           icon={statement?.operatingProfit != null && statement.operatingProfit < 0 ? <TrendingDown className="h-4 w-4" /> : <BadgeDollarSign className="h-4 w-4" />}
         />
@@ -315,15 +320,15 @@ export default function ProfitabilityReportPage() {
                 <p className="mt-1 text-xs font-bold text-muted">{group.entryCount} حركة</p>
               </div>
             ))}
-            {!loading && current?.expenseBreakdown.length === 0 ? <p className="py-8 text-center text-sm font-bold text-muted">لا توجد مصروفات في الفترة.</p> : null}
+            {!loading && current?.expenseBreakdown?.length === 0 ? <p className="py-8 text-center text-sm font-bold text-muted">لا توجد مصروفات في الفترة.</p> : null}
           </div>
         </div>
 
         <div className="rounded-lg border border-border bg-white p-4">
           <h2 className="flex items-center gap-2 text-sm font-black text-foreground"><PackageCheck className="h-4 w-4 text-blue-700" /> حركة المشتريات</h2>
           <div className="mt-4 grid grid-cols-2 gap-3">
-            <div className="border-l border-border pl-3"><p className="text-xs font-bold text-muted">مستلمة خلال الفترة</p><p className="mt-2 text-xl font-black tabular-nums">{current ? formatMoney(current.purchases.receivedValue) : "—"}</p><p className="mt-1 text-xs font-bold text-muted">{current?.purchases.receivedCount ?? 0} أمر</p></div>
-            <div><p className="text-xs font-bold text-muted">التزامات معلقة</p><p className="mt-2 text-xl font-black tabular-nums text-amber-700">{current ? formatMoney(current.purchases.pendingValue) : "—"}</p><p className="mt-1 text-xs font-bold text-muted">{current?.purchases.pendingCount ?? 0} أمر</p></div>
+            <div className="border-l border-border pl-3"><p className="text-xs font-bold text-muted">مستلمة خلال الفترة</p><p className="mt-2 text-xl font-black tabular-nums">{current ? formatMoney(current.purchases?.receivedValue ?? 0) : "—"}</p><p className="mt-1 text-xs font-bold text-muted">{current?.purchases?.receivedCount ?? 0} أمر</p></div>
+            <div><p className="text-xs font-bold text-muted">التزامات معلقة</p><p className="mt-2 text-xl font-black tabular-nums text-amber-700">{current ? formatMoney(current.purchases?.pendingValue ?? 0) : "—"}</p><p className="mt-1 text-xs font-bold text-muted">{current?.purchases?.pendingCount ?? 0} أمر</p></div>
           </div>
           <p className="mt-5 rounded-lg bg-blue-50 px-3 py-3 text-xs font-bold leading-5 text-blue-900">المشتريات تزيد المخزون ولا تُخصم من الربح فوراً؛ الخصم يحدث عند بيع البضاعة ضمن تكلفة البضاعة المباعة.</p>
         </div>

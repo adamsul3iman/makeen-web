@@ -39,8 +39,15 @@ type OrderRow = {
   cancel_reason: string | null;
 };
 
-function rowToOrder(row: OrderRow): LocalOrder {
-  return {
+/** Postgres uuid typed exactly — anything else makes the INSERT fail 400. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function uuidOrNull(value: string | null | undefined): string | null {
+  const trimmed = (value ?? "").trim();
+  return UUID_RE.test(trimmed) ? trimmed : null;
+}
+
+function rowToOrder(row: OrderRow): LocalOrder {  return {
     id: row.id,
     storeId: row.store_id,
     branchId: row.branch_id,
@@ -65,21 +72,28 @@ function rowToOrder(row: OrderRow): LocalOrder {
   };
 }
 
+/**
+ * Project a LocalOrder onto the exact `pos_orders` shape (migration 082).
+ * Every uuid-typed column is validated and blanked to NULL — PostgREST
+ * rejects the whole INSERT with 400 on one malformed id (e.g. a legacy
+ * device-local hold id or an unset tenant store), so nothing non-uuid
+ * ever reaches the wire. Numerics are coerced defensively too.
+ */
 function orderToRow(order: LocalOrder): Record<string, unknown> {
   return {
-    id: order.id,
-    store_id: order.storeId,
-    branch_id: order.branchId ?? null,
-    terminal_id: order.terminalId ?? null,
+    id: uuidOrNull(order.id),
+    store_id: uuidOrNull(order.storeId),
+    branch_id: uuidOrNull(order.branchId),
+    terminal_id: uuidOrNull(order.terminalId),
     order_number: order.orderNumber,
     status: order.status,
     items: order.items,
-    invoice_discount: order.invoiceDiscount,
-    delivery_fee: order.deliveryFee,
-    customer_id: order.customerId ?? null,
+    invoice_discount: order.invoiceDiscount ?? null,
+    delivery_fee: Number(order.deliveryFee) || 0,
+    customer_id: uuidOrNull(order.customerId),
     customer_name: order.customerName ?? null,
     customer_phone: order.customerPhone ?? null,
-    cashier_id: order.cashierId ?? null,
+    cashier_id: uuidOrNull(order.cashierId),
     cashier_name: order.cashierName ?? null,
     device_name: order.deviceName ?? null,
     invoice_sync_id: order.invoiceSyncId ?? null,
@@ -130,6 +144,10 @@ export async function fetchOpenOrders(): Promise<
 export async function pushOrder(order: LocalOrder): Promise<OrderResult> {
   const sb = getSupabaseBrowser();
   if (!sb || !isSupabaseBrowserConfigured()) return { ok: false, error: "offline" };
+  // A parked order can only mirror when BOTH ids are genuine uuids — the
+  // row's primary key and its tenant FK are typed uuid in migration 082.
+  if (!UUID_RE.test(order.id)) return { ok: false, error: "معرّف الطلب غير صالح للمزامنة" };
+  if (!uuidOrNull(order.storeId)) return { ok: false, error: "لا يوجد متجر مرتبط بالطلب" };
   try {
     const { data, error } = await sb
       .from("pos_orders")

@@ -21,6 +21,7 @@ import {
   Barcode,
 } from "lucide-react";
 import { formatMoney } from "@/lib/format";
+import { formatProductDisplayName } from "@/lib/productDisplayName";
 import { flattenHierarchy } from "@/lib/categoryTree";
 import {
   fetchPaginatedInventory,
@@ -54,6 +55,7 @@ import ProductModal, {
   type ProductSaveOptions,
 } from "@/components/admin/ProductModal";
 import UnitsEditorModal from "@/components/admin/UnitsEditorModal";
+import { deleteProductUnit, saveProductUnit } from "@/lib/productUnitsClient";
 import type { EntityOption } from "@/components/shared/EntityCombobox";
 import EntityCombobox from "@/components/shared/EntityCombobox";
 
@@ -185,6 +187,11 @@ const InventoryMobileCard = memo(function InventoryMobileCard({
               {depth > 0 && product.variantLabel && (
                 <Badge tone="primary">{product.variantLabel}</Badge>
               )}
+              {depth > 0 && firstVariant?.barcode ? (
+                <span dir="ltr" className="rounded bg-surface-muted px-1.5 py-0.5 font-mono text-xs font-bold text-muted">
+                  {firstVariant.barcode}
+                </span>
+              ) : null}
               <Badge tone={product.showInPos ? "success" : "muted"}>
                 {product.showInPos ? "POS" : "مخفي"}
               </Badge>
@@ -536,7 +543,8 @@ export default function AdminInventoryPage() {
     async (id: string) => {
       const product = products.find((p) => p.id === id);
       if (!product) return;
-      if (!window.confirm(`حذف المنتج «${product.name}${product.variantLabel ? ` — ${product.variantLabel}` : ""}»؟`)) return;
+      const barcodeSuffix = product.variants[0]?.barcode ? ` (باركود: ${product.variants[0].barcode})` : "";
+      if (!window.confirm(`حذف المنتج «${formatProductDisplayName(product.name, product.variantLabel)}»${barcodeSuffix}؟`)) return;
 
     setDeletingId(id);
     setImportStatus(null);
@@ -597,6 +605,50 @@ export default function AdminInventoryPage() {
     }
   };
 
+  /**
+   * Persist the packaging rows captured inside ProductModal (Tier 3.5
+   * product_units). Runs AFTER the product row exists — new products need
+   * their id. Failures degrade to names of the rows that could not save;
+   * they never fail the product save itself.
+   */
+  const persistProductUnits = async (
+    productId: string,
+    payload: ProductFormPayload,
+  ): Promise<string[]> => {
+    const storeId = getTenantStoreId();
+    const failures: string[] = [];
+    if (!storeId) return failures;
+    for (const unitId of payload.deletedUnitIds ?? []) {
+      try {
+        await deleteProductUnit(storeId, unitId);
+      } catch {
+        failures.push(`حذف وحدة (${unitId.slice(0, 8)}…)`);
+      }
+    }
+    let sortOrder = 0;
+    for (const unit of payload.units ?? []) {
+      if (!unit.name || unit.qtyMultiplier <= 0) continue;
+      try {
+        await saveProductUnit(storeId, {
+          id: unit.id,
+          productId,
+          unitName: unit.name,
+          qtyMultiplier: unit.qtyMultiplier,
+          costPrice: 0,
+          sellingPrice: 0,
+          wholesalePrice: unit.wholesalePrice,
+          barcode: unit.barcode || null,
+          isDefaultSale: false,
+          isActive: true,
+          sortOrder: (sortOrder += 1),
+        });
+      } catch {
+        failures.push(unit.name);
+      }
+    }
+    return failures;
+  };
+
   const handleSave = async (payload: ProductFormPayload, options: ProductSaveOptions) => {
     const editedProduct = editing;
     try {
@@ -605,6 +657,9 @@ export default function AdminInventoryPage() {
         : { product: await createInventoryProduct(payload) };
       if (!body?.product) throw new Error("حُفظ المنتج لكن لم تصل بياناته المحدثة");
 
+      // Packaging units ride along after the product row exists.
+      const unitFailures = await persistProductUnits(body.product.id, payload);
+
       productBatchDirtyRef.current = true;
       batchSavedCountRef.current += 1;
 
@@ -612,10 +667,11 @@ export default function AdminInventoryPage() {
         setEntryDefaults(options.defaults);
         setEditing(null);
         setNewProductSequence((value) => value + 1);
-        setImportStatus({
-          tone: "success",
-          message: `تم حفظ «${body.product.name}» — أدخل المنتج التالي`,
-        });
+        setImportStatus(
+          unitFailures.length > 0
+            ? { tone: "error", message: `حُفظ «${body.product.name}» لكن تعذر حفظ وحدات التعبئة: ${unitFailures.join("، ")}` }
+            : { tone: "success", message: `تم حفظ «${body.product.name}» — أدخل المنتج التالي` },
+        );
         return;
       }
 
@@ -626,14 +682,18 @@ export default function AdminInventoryPage() {
       syncCatalogInBackground();
       productBatchDirtyRef.current = false;
       batchSavedCountRef.current = 0;
-      setImportStatus({
-        tone: "success",
-        message: editedProduct
-          ? "تم تعديل المنتج، ويجري تحديث نقطة البيع في الخلفية"
-          : savedCount > 1
-            ? `تم حفظ ${savedCount} منتجات، ويجري تحديث نقطة البيع في الخلفية`
-            : "تمت إضافة المنتج، ويجري تحديث نقطة البيع في الخلفية",
-      });
+      setImportStatus(
+        unitFailures.length > 0
+          ? { tone: "error", message: `تم حفظ «${body.product.name}» لكن تعذر حفظ وحدات التعبئة: ${unitFailures.join("، ")}` }
+          : {
+              tone: "success",
+              message: editedProduct
+                ? "تم تعديل المنتج، ويجري تحديث نقطة البيع في الخلفية"
+                : savedCount > 1
+                  ? `تم حفظ ${savedCount} منتجات، ويجري تحديث نقطة البيع في الخلفية`
+                  : "تمت إضافة المنتج، ويجري تحديث نقطة البيع في الخلفية",
+            },
+      );
     } catch (err) {
       throw new Error(err instanceof Error ? err.message : "تعذر حفظ المنتج");
     }
@@ -682,6 +742,11 @@ export default function AdminInventoryPage() {
               <div className="flex flex-wrap items-center gap-1.5">
                 <span className="font-bold text-foreground">{product.name}</span>
                 {row.depth > 0 && product.variantLabel ? <Badge tone="primary">{product.variantLabel}</Badge> : null}
+                {row.depth > 0 && product.variants[0]?.barcode ? (
+                  <span dir="ltr" className="rounded bg-surface-muted px-1.5 py-0.5 font-mono text-xs font-bold text-muted">
+                    {product.variants[0].barcode}
+                  </span>
+                ) : null}
               </div>
               <Badge tone={product.showInPos ? "success" : "muted"} className="mt-1">
                 {product.showInPos ? "يظهر في نقطة البيع" : "مخفي عن نقطة البيع"}

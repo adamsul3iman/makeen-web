@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Barcode,
   Building2,
+  Boxes,
   Grid3x3,
   Package,
   Percent,
@@ -17,6 +18,7 @@ import {
 } from "lucide-react";
 import EntityCombobox, { type EntityOption } from "@/components/shared/EntityCombobox";
 import QuickCreateEntityModal from "@/components/shared/QuickCreateEntityModal";
+import { getTenantStoreId } from "@/lib/tenantClient";
 
 export interface InventoryVariant {
   id: string;
@@ -26,6 +28,21 @@ export interface InventoryVariant {
   price: number;
   wholesalePrice: number;
   isDefaultSale: boolean;
+  /** Opening stock for this barcode at creation (create mode only). */
+  stock?: number;
+}
+
+/**
+ * Packaging/UoM row defined inside the product flow (Tier 3.5
+ * `product_units`). The inventory page persists these AFTER the product
+ * itself is saved, so the modal stays a pure form.
+ */
+export interface ProductUnitInput {
+  id?: string;
+  name: string;
+  qtyMultiplier: number;
+  barcode: string;
+  wholesalePrice: number;
 }
 
 export interface InventoryProduct {
@@ -56,16 +73,28 @@ export interface InventoryProduct {
 
 export type ProductFormPayload = Omit<InventoryProduct, "id" | "variants"> & {
   variants: Omit<InventoryVariant, "id">[];
+  /** Packaging rows to upsert after the product save resolves. */
+  units?: ProductUnitInput[];
+  /** Pre-existing unit ids the user removed in this session. */
+  deletedUnitIds?: string[];
 };
 
 interface RowDraft {
   key: string;
   barcode: string;
   variantLabel: string;
-  costPrice: string;
-  price: string;
-  wholesalePrice: string;
+  stock: string;
   isDefaultSale: boolean;
+}
+
+/** Inline packaging/UoM row (carton etc.). */
+interface UnitRowDraft {
+  key: string;
+  id?: string;
+  name: string;
+  multiplier: string;
+  barcode: string;
+  wholesalePrice: string;
 }
 
 type QuickCreateKind = "category" | "brand" | "supplier";
@@ -103,20 +132,26 @@ const emptyRow = (isFirst = false): RowDraft => ({
   key: freshKey(),
   barcode: "",
   variantLabel: "",
-  costPrice: "",
-  price: "",
-  wholesalePrice: "",
+  stock: "",
   isDefaultSale: isFirst,
 });
 
+// Variant rows inherit the product-level base pricing — per-row prices are
+// intentionally gone (QA redesign: colors of one product share cost/price).
 const toRow = (variant: InventoryVariant): RowDraft => ({
   key: variant.id,
   barcode: variant.barcode,
   variantLabel: variant.variantLabel,
-  costPrice: String(variant.costPrice),
-  price: String(variant.price),
-  wholesalePrice: String(variant.wholesalePrice ?? 0),
+  stock: variant.stock != null ? String(variant.stock) : "",
   isDefaultSale: variant.isDefaultSale,
+});
+
+const emptyUnitRow = (): UnitRowDraft => ({
+  key: freshKey(),
+  name: "",
+  multiplier: "",
+  barcode: "",
+  wholesalePrice: "",
 });
 
 function Toggle({
@@ -187,6 +222,18 @@ export default function ProductModal({
   const [rows, setRows] = useState<RowDraft[]>(
     initial?.variants.length ? initial.variants.map(toRow) : [emptyRow(true)],
   );
+  // ── Base pricing (QA redesign): ONE cost/price for the whole product.
+  // Variant rows inherit these automatically; edit mode seeds from row 1.
+  const firstVariant = initial?.variants[0];
+  const [baseCost, setBaseCost] = useState(firstVariant ? String(firstVariant.costPrice) : "");
+  const [basePrice, setBasePrice] = useState(firstVariant ? String(firstVariant.price) : "");
+  const [baseWholesale, setBaseWholesale] = useState(
+    firstVariant ? String(firstVariant.wholesalePrice ?? 0) : "",
+  );
+  // ── Packaging & Units (التعبئة والوحدات): carton-style rows defined in the
+  // same flow. Edit mode preloads existing product_units for in-place editing.
+  const [unitRows, setUnitRows] = useState<UnitRowDraft[]>([]);
+  const originalUnitIdsRef = useRef<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [quickCreate, setQuickCreate] = useState<QuickCreateState | null>(null);
@@ -213,15 +260,49 @@ export default function ProductModal({
       isPurchasable: initial?.isPurchasable ?? entryDefaults?.isPurchasable ?? true,
       allowPriceChange: initial?.allowPriceChange ?? entryDefaults?.allowPriceChange ?? false,
       isQuickKey: initial?.isQuickKey ?? entryDefaults?.isQuickKey ?? false,
+      baseCost,
+      basePrice,
+      baseWholesale,
       rows: initial?.variants.length ? initial.variants.map(toRow) : [emptyRow(true)],
+      unitRows: [] as UnitRowDraft[],
     });
   }
-  const currentSnapshot = JSON.stringify({ name, categoryId, brandId, supplierId, baseUnit, stock, reorderLevel, taxPercent, taxIncluded, isActive, showInPos, isSellable, isPurchasable, allowPriceChange, isQuickKey, rows });
+  const currentSnapshot = JSON.stringify({ name, categoryId, brandId, supplierId, baseUnit, stock, reorderLevel, taxPercent, taxIncluded, isActive, showInPos, isSellable, isPurchasable, allowPriceChange, isQuickKey, baseCost, basePrice, baseWholesale, rows, unitRows });
   const isDirty = currentSnapshot !== initialSnapshotRef.current;
 
   useEffect(() => {
     nameRef.current?.focus();
   }, []);
+
+  // Edit mode: preload existing packaging units so they can be edited or
+  // removed inline. setState happens only inside async callbacks so the
+  // effect body itself never cascades renders.
+  useEffect(() => {
+    if (!initial) return;
+    let cancelled = false;
+    const storeId = getTenantStoreId();
+    if (!storeId || !initial.id) return;
+    void import("@/lib/productUnitsClient")
+      .then(({ fetchProductUnits }) => fetchProductUnits(storeId, initial.id))
+      .then((units) => {
+        if (cancelled) return;
+        originalUnitIdsRef.current = units.map((u) => u.id);
+        setUnitRows(
+          units.map((u) => ({
+            key: u.id,
+            id: u.id,
+            name: u.unitName,
+            multiplier: String(u.qtyMultiplier),
+            barcode: u.barcode ?? "",
+            wholesalePrice: String(u.wholesalePrice ?? 0),
+          })),
+        );
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [initial]);
 
   const updateRow = (key: string, patch: Partial<RowDraft>) => {
     setRows((current) => current.map((row) => (row.key === key ? { ...row, ...patch } : row)));
@@ -252,6 +333,41 @@ export default function ProductModal({
     setRows((current) => current.map((row) => ({ ...row, isDefaultSale: row.key === key })));
   };
 
+  /* ── Packaging & Units (التعبئة والوحدات) ───────────────────────────── */
+  const updateUnitRow = (key: string, patch: Partial<UnitRowDraft>) =>
+    setUnitRows((current) => current.map((row) => (row.key === key ? { ...row, ...patch } : row)));
+
+  const removeUnitRow = (key: string) =>
+    setUnitRows((current) => current.filter((row) => row.key !== key));
+
+  const [unitGeneratingKey, setUnitGeneratingKey] = useState<string | null>(null);
+
+  const generateUnitBarcode = async (key: string) => {
+    setUnitGeneratingKey(key);
+    setSaveError(null);
+    try {
+      const { generateEan13 } = await import("@/lib/inventoryClient");
+      const used = new Set<string>([
+        ...rows.map((row) => row.barcode.trim()).filter(Boolean),
+        ...unitRows.map((row) => row.barcode.trim()).filter(Boolean),
+      ]);
+      let candidate = generateEan13();
+      for (let attempt = 0; attempt < 5 && used.has(candidate); attempt++) {
+        candidate = generateEan13();
+      }
+      updateUnitRow(key, { barcode: candidate });
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "تعذر توليد الباركود");
+    } finally {
+      setUnitGeneratingKey(null);
+    }
+  };
+
+  const addQuickCarton = () => {
+    const next: UnitRowDraft = { ...emptyUnitRow(), name: "كرتون", multiplier: "" };
+    setUnitRows((current) => [...current, next]);
+  };
+
   const removeRow = (key: string) => {
     setRows((current) => {
       if (current.length === 1) return current;
@@ -264,8 +380,8 @@ export default function ProductModal({
 
   /* ── Phase 4: Variant Matrix Generator ──────────────────────────────── */
   // One attribute list (colors) or a cartesian product of two (color ×
-  // size) becomes fully-priced variant rows with unique generated barcodes,
-  // inheriting prices from the first row. Existing labels are never duplicated.
+  // size) becomes variant rows with unique generated barcodes. Pricing is
+  // inherited from the product-level base — no per-row price entry.
   const MAX_MATRIX_VARIANTS = 30;
 
   const [matrixOpen, setMatrixOpen] = useState(false);
@@ -302,7 +418,6 @@ export default function ProductModal({
     setSaveError(null);
     try {
       const { generateEan13 } = await import("@/lib/inventoryClient");
-      const template = rows.find((row) => row.costPrice.trim() || row.price.trim());
       const usedBarcodes = new Set(rows.map((row) => row.barcode.trim()).filter(Boolean));
       const stamp = Date.now().toString(36);
       const generated: RowDraft[] = fresh.map((label, i) => {
@@ -313,9 +428,7 @@ export default function ProductModal({
           key: `${stamp}-${i}`,
           barcode,
           variantLabel: label,
-          costPrice: template?.costPrice ?? "",
-          price: template?.price ?? "",
-          wholesalePrice: template?.wholesalePrice ?? "",
+          stock: "",
           isDefaultSale: false,
         };
       });
@@ -332,11 +445,14 @@ export default function ProductModal({
 
   const validRows = rows.filter((row) => row.barcode.trim().length > 0);
   const taxValue = Number(taxPercent);
-  const pricesValid = validRows.every((row) => {
-    const cost = Number(row.costPrice);
-    const sale = Number(row.price);
-    return Number.isFinite(cost) && cost > 0 && (allowPriceChange || (Number.isFinite(sale) && sale > 0));
-  });
+  const baseCostValue = Number(baseCost);
+  const basePriceValue = Number(basePrice);
+  const baseWholesaleValue = Number(baseWholesale);
+  // Base pricing validates ONCE at product level — rows inherit it.
+  const pricesValid =
+    Number.isFinite(baseCostValue) &&
+    baseCostValue > 0 &&
+    (allowPriceChange || (Number.isFinite(basePriceValue) && basePriceValue > 0));
   const taxValid = Number.isFinite(taxValue) && taxValue >= 0 && taxValue <= 100;
   const canSave =
     name.trim().length > 0 &&
@@ -347,32 +463,22 @@ export default function ProductModal({
   // Per-row validation: red = blocks save, amber = row will be silently dropped
   // from the payload (no barcode) — surface it so the user doesn't lose data.
   const rowErrors = useMemo(() => {
-    const map: Record<string, { barcode?: "warn" | "error"; costPrice?: boolean; price?: boolean }> = {};
+    const map: Record<string, { barcode?: "warn" | "error" }> = {};
     for (const row of rows) {
-      const entry: { barcode?: "warn" | "error"; costPrice?: boolean; price?: boolean } = {};
       const hasBarcode = row.barcode.trim().length > 0;
-      const cost = Number(row.costPrice);
-      const sale = Number(row.price);
-      if (!hasBarcode && (row.costPrice.trim() || row.price.trim() || row.wholesalePrice.trim() || row.variantLabel.trim())) {
-        entry.barcode = "warn";
+      if (!hasBarcode && (row.stock.trim() || row.variantLabel.trim())) {
+        map[row.key] = { barcode: "warn" };
       }
-      if (hasBarcode && !(Number.isFinite(cost) && cost > 0)) entry.costPrice = true;
-      if (hasBarcode && !allowPriceChange && !(Number.isFinite(sale) && sale > 0)) entry.price = true;
-      if (entry.barcode || entry.costPrice || entry.price) map[row.key] = entry;
     }
     return map;
-  }, [rows, allowPriceChange]);
+  }, [rows]);
 
-  const firstInvalidRowIndex = rows.findIndex(
-    (row) => rowErrors[row.key]?.costPrice || rowErrors[row.key]?.price,
-  );
   const validationMessage = (() => {
     if (name.trim().length === 0) return "أدخل اسم المنتج";
-    if (firstInvalidRowIndex >= 0) {
-      const errors = rowErrors[rows[firstInvalidRowIndex].key];
-      if (errors.costPrice) return `الصف ${firstInvalidRowIndex + 1}: أدخل تكلفة صحيحة أكبر من صفر`;
-      return `الصف ${firstInvalidRowIndex + 1}: أدخل سعر بيع أكبر من صفر`;
-    }
+    if (!(Number.isFinite(baseCostValue) && baseCostValue > 0))
+      return "أدخل سعر تكلفة أساسي صحيحاً أكبر من صفر";
+    if (!allowPriceChange && !(Number.isFinite(basePriceValue) && basePriceValue > 0))
+      return "أدخل سعر بيع أساسياً أكبر من صفر";
     if (validRows.length === 0) return "امسح الباركود أو ولّد باركوداً واحداً على الأقل";
     if (!taxValid) return "نسبة الضريبة يجب أن تكون بين 0 و 100";
     return null;
@@ -384,8 +490,18 @@ export default function ProductModal({
     onClose();
   };
 
+  const round2 = (value: number): number => Math.max(0, Math.round(value * 100) / 100);
+
+  const formatUnitMath = (multiplier: number, pieceWholesale: number): string =>
+    pieceWholesale > 0
+      ? `عبوة تحتوي ${multiplier} — بسعر الجملة الأساسي تعادل تقديرياً ${round2(multiplier * pieceWholesale)}`
+      : `عبوة تحتوي ${multiplier} من وحدة الأساس`;
+
   const handleSave = async (addAnother: boolean) => {
     if (!canSave) return;
+    // Every variant inherits the product-level base pricing; only barcode,
+    // color label and opening stock are per-row.
+    const inheritedWholesale = Number.isFinite(baseWholesaleValue) ? baseWholesaleValue : 0;
     const payload: ProductFormPayload = {
       name: name.trim(),
       categoryId,
@@ -408,11 +524,24 @@ export default function ProductModal({
       variants: validRows.map((row) => ({
         barcode: row.barcode.trim(),
         variantLabel: row.variantLabel.trim(),
-        costPrice: Math.max(0, Number(row.costPrice) || 0),
-        price: Math.max(0, Number(row.price) || 0),
-        wholesalePrice: Math.max(0, Number(row.wholesalePrice) || 0),
+        costPrice: round2(baseCostValue),
+        price: round2(basePriceValue),
+        wholesalePrice: round2(inheritedWholesale),
         isDefaultSale: row.isDefaultSale,
+        stock: Math.max(0, Number(row.stock) || 0),
       })),
+      units: unitRows
+        .filter((unit) => unit.name.trim().length > 0 && (Number(unit.multiplier) || 0) > 0)
+        .map((unit) => ({
+          id: unit.id,
+          name: unit.name.trim().slice(0, 60),
+          qtyMultiplier: Number(unit.multiplier) || 1,
+          barcode: unit.barcode.trim(),
+          wholesalePrice: round2(Number(unit.wholesalePrice) || 0),
+        })),
+      deletedUnitIds: originalUnitIdsRef.current.filter(
+        (id) => !unitRows.some((unit) => unit.id === id),
+      ),
     };
 
     setSaving(true);
@@ -665,6 +794,9 @@ export default function ProductModal({
             <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <h3 className="text-sm font-black text-foreground">الباركود والسعر</h3>
+                <p className="mt-0.5 text-xs font-semibold text-muted">
+                  حدّد التسعير الأساسي مرة واحدة — كل الألوان/الوحدات أدناه ترثه تلقائياً.
+                </p>
               </div>
               <button
                 type="button"
@@ -673,6 +805,45 @@ export default function ProductModal({
               >
                 <Plus className="h-4 w-4" /> إضافة باركود / وحدة
               </button>
+            </div>
+
+            {/* ── Base pricing (inherited by every variant row) ── */}
+            <div className="mb-4 rounded-lg border border-primary/25 bg-primary/5 p-3">
+              <div className="grid gap-3 sm:grid-cols-3">
+                <label className="text-xs font-bold text-muted">
+                  التكلفة الأساسية <span className="text-destructive">*</span>
+                  <input
+                    value={baseCost}
+                    onChange={(event) => setBaseCost(event.target.value)}
+                    inputMode="decimal"
+                    dir="ltr"
+                    placeholder="0.00"
+                    className={`${fieldClass} mt-1 tabular-nums`}
+                  />
+                </label>
+                <label className="text-xs font-bold text-muted">
+                  سعر البيع الأساسي {!allowPriceChange && <span className="text-destructive">*</span>}
+                  <input
+                    value={basePrice}
+                    onChange={(event) => setBasePrice(event.target.value)}
+                    inputMode="decimal"
+                    dir="ltr"
+                    placeholder="0.00"
+                    className={`${fieldClass} mt-1 tabular-nums`}
+                  />
+                </label>
+                <label className={showAdvanced ? "text-xs font-bold text-muted" : "hidden"}>
+                  سعر الجملة الأساسي
+                  <input
+                    value={baseWholesale}
+                    onChange={(event) => setBaseWholesale(event.target.value)}
+                    inputMode="decimal"
+                    dir="ltr"
+                    placeholder="0.00"
+                    className={`${fieldClass} mt-1 tabular-nums`}
+                  />
+                </label>
+              </div>
             </div>
 
             {/* ── Variant Matrix Generator (Phase 4) ── */}
@@ -780,7 +951,7 @@ export default function ProductModal({
                     </div>
 
                     <label className="text-xs font-bold text-muted">
-                      تمييز الباركود
+                      تمييز الباركود (اللون)
                       <input
                         value={row.variantLabel}
                         onChange={(event) => updateRow(row.key, { variantLabel: event.target.value })}
@@ -789,44 +960,26 @@ export default function ProductModal({
                       />
                     </label>
 
-                    <label className="text-xs font-bold text-muted">
-                      سعر التكلفة <span className="text-destructive">*</span>
-                      <input
-                        value={row.costPrice}
-                        onChange={(event) => updateRow(row.key, { costPrice: event.target.value })}
-                        inputMode="decimal"
-                        dir="ltr"
-                        className={`${fieldClass} tabular-nums ${rowErrors[row.key]?.costPrice ? "border-destructive focus:border-destructive focus:ring-destructive/20" : ""}`}
-                      />
-                      {rowErrors[row.key]?.costPrice && (
-                        <span className="mt-1 block text-[11px] font-bold text-destructive">أدخل تكلفة أكبر من صفر</span>
-                      )}
-                    </label>
+                    {!initial && (
+                      <label className="text-xs font-bold text-muted">
+                        المخزون الافتتاحي
+                        <input
+                          value={row.stock}
+                          onChange={(event) => updateRow(row.key, { stock: event.target.value })}
+                          inputMode="decimal"
+                          dir="ltr"
+                          placeholder="0"
+                          className={`${fieldClass} tabular-nums`}
+                        />
+                      </label>
+                    )}
 
-                    <label className="text-xs font-bold text-muted">
-                      سعر البيع {!allowPriceChange && <span className="text-destructive">*</span>}
-                      <input
-                        value={row.price}
-                        onChange={(event) => updateRow(row.key, { price: event.target.value })}
-                        inputMode="decimal"
-                        dir="ltr"
-                        className={`${fieldClass} tabular-nums ${rowErrors[row.key]?.price ? "border-destructive focus:border-destructive focus:ring-destructive/20" : ""}`}
-                      />
-                      {rowErrors[row.key]?.price && (
-                        <span className="mt-1 block text-[11px] font-bold text-destructive">أدخل سعر بيع أكبر من صفر</span>
-                      )}
-                    </label>
-
-                    <label className={showAdvanced ? "text-xs font-bold text-muted" : "hidden"}>
-                      سعر الجملة
-                      <input
-                        value={row.wholesalePrice}
-                        onChange={(event) => updateRow(row.key, { wholesalePrice: event.target.value })}
-                        inputMode="decimal"
-                        dir="ltr"
-                        className={`${fieldClass} tabular-nums`}
-                      />
-                    </label>
+                    <div className="flex items-end pb-2">
+                      <span className="w-full rounded-lg border border-border bg-surface-muted px-3 py-2 text-[11px] font-bold leading-4 text-muted">
+                        يرث التسعير الأساسي: تكلفة {baseCost || "—"} · بيع {basePrice || "—"}
+                        {showAdvanced && baseWholesale ? ` · جملة ${baseWholesale}` : ""}
+                      </span>
+                    </div>
 
                     <label className={showAdvanced ? "flex cursor-pointer items-center gap-2 self-end pb-2 text-xs font-black text-foreground" : "hidden"}>
                       <input
@@ -842,6 +995,120 @@ export default function ProductModal({
                 </div>
               ))}
             </div>
+          </section>
+
+          {/* ── Packaging & Units (التعبئة والوحدات) ── */}
+          <section className="border-t border-border pt-4">
+            <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h3 className="flex items-center gap-2 text-sm font-black text-foreground">
+                  <Boxes className="h-4 w-4 text-primary" />
+                  التعبئة والوحدات
+                </h3>
+                <p className="mt-0.5 text-xs font-semibold text-muted">
+                  عرّف الكرتون ومعامل التحويل (مثال: كرتون = 12 حبة) مع باركوده وسعر جملته — يُحسب المخزون دائماً بوحدة الأساس.
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <button
+                  type="button"
+                  onClick={addQuickCarton}
+                  className="flex h-10 items-center justify-center gap-1.5 rounded-lg border border-primary/30 bg-primary/5 px-3 text-xs font-black text-primary transition hover:bg-primary/10"
+                >
+                  <Plus className="h-4 w-4" /> كرتون سريع
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setUnitRows((current) => [...current, emptyUnitRow()])}
+                  className="flex h-10 items-center justify-center gap-1.5 rounded-lg bg-primary px-4 text-sm font-black text-primary-foreground"
+                >
+                  <Plus className="h-4 w-4" /> إضافة وحدة تعبئة
+                </button>
+              </div>
+            </div>
+
+            {unitRows.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-xs font-bold text-muted">
+                لا توجد وحدات تعبئة — أضف كرتوناً إذا كنت تبيع بالجملة أو بتعبئات.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                {unitRows.map((unit, index) => (
+                  <div key={unit.key} className="rounded-lg border border-border bg-white p-3">
+                    <div className="mb-3 flex items-center justify-between gap-2">
+                      <span className="text-xs font-black text-muted">وحدة تعبئة {index + 1}</span>
+                      <button
+                        type="button"
+                        aria-label="حذف وحدة التعبئة"
+                        onClick={() => removeUnitRow(unit.key)}
+                        className="grid h-8 w-8 place-items-center rounded-lg text-destructive hover:bg-destructive/10"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                      <label className="lg:col-span-1 text-xs font-bold text-muted">
+                        اسم الوحدة
+                        <input
+                          value={unit.name}
+                          onChange={(event) => updateUnitRow(unit.key, { name: event.target.value })}
+                          placeholder="كرتون / علبة / درزن"
+                          className={fieldClass}
+                        />
+                      </label>
+                      <label className="text-xs font-bold text-muted">
+                        تحتوي على (وحدة أساس)
+                        <input
+                          value={unit.multiplier}
+                          onChange={(event) => updateUnitRow(unit.key, { multiplier: event.target.value })}
+                          inputMode="decimal"
+                          dir="ltr"
+                          placeholder="12"
+                          className={`${fieldClass} tabular-nums`}
+                        />
+                      </label>
+                      <label className="text-xs font-bold text-muted">
+                        الباركود
+                        <input
+                          value={unit.barcode}
+                          onChange={(event) => updateUnitRow(unit.key, { barcode: event.target.value })}
+                          dir="ltr"
+                          className={`${fieldClass} tabular-nums`}
+                        />
+                      </label>
+                      <div className="flex items-end gap-1.5 pb-0.5">
+                        <button
+                          type="button"
+                          onClick={() => void generateUnitBarcode(unit.key)}
+                          disabled={Boolean(unitGeneratingKey)}
+                          title="توليد باركود فريد تلقائياً"
+                          className="flex h-[42px] w-full items-center justify-center gap-1.5 rounded-lg border border-primary/30 bg-primary/5 px-2.5 text-xs font-black text-primary transition hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          <RefreshCw className={`h-4 w-4 ${unitGeneratingKey === unit.key ? "animate-spin" : ""}`} />
+                          {unitGeneratingKey === unit.key ? "جارٍ..." : "توليد"}
+                        </button>
+                      </div>
+                      <label className="text-xs font-bold text-muted">
+                        سعر جملة الوحدة
+                        <input
+                          value={unit.wholesalePrice}
+                          onChange={(event) => updateUnitRow(unit.key, { wholesalePrice: event.target.value })}
+                          inputMode="decimal"
+                          dir="ltr"
+                          placeholder="0.00"
+                          className={`${fieldClass} tabular-nums`}
+                        />
+                      </label>
+                    </div>
+                    {Number(unit.multiplier) > 0 && Number(baseWholesaleValue) >= 0 && (
+                      <p className="mt-2 text-[11px] font-semibold text-muted">
+                        بيع الكرتون بسعر الجملة الأساسي يعادل {formatUnitMath(Number(unit.multiplier), baseWholesaleValue)}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
         </div>
 

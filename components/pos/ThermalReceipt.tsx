@@ -10,6 +10,7 @@ import type { ReceiptPaperWidth } from "@/lib/deviceHardware";
 import { useDefaultPrintTemplate } from "@/hooks/useDefaultPrintTemplate";
 import type { ReceiptSectionId } from "@/types/printTemplates";
 import { formatShiftDateTime } from "@/lib/dateTime";
+import { formatProductDisplayName } from "@/lib/productDisplayName";
 
 const PAYMENT_LABEL: Record<PaymentMethod, string> = {
   CASH: "نقداً",
@@ -371,8 +372,7 @@ export default function ThermalReceipt({
                     <td className={`${template.itemStyle === "grid" ? CELL : ""} ${itemPad} px-1 align-top text-right`}>
                       <p className="text-[11px] font-bold leading-snug">
                         {template.showLineNumbers ? `${i + 1}. ` : ""}
-                        {item.name}
-                        {item.variantLabel ? ` - ${item.variantLabel}` : ""}
+                        {formatProductDisplayName(item.name, item.variantLabel)}
                       </p>
                       {!fullItemColumns && <p className={`${META} ${MONEY} mt-0.5`}>سعر الوحدة {formatMoney(item.unitPrice)}</p>}
                       {template.showItemDiscount && discountHint && <p className={`${META} mt-0.5`}>{discountHint}</p>}

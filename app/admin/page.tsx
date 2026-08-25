@@ -24,6 +24,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { formatMoney } from "@/lib/format";
+import { formatProductDisplayName } from "@/lib/productDisplayName";
 import { fetchReportsOverview, submitInventoryCount } from "@/lib/reportsClient";
 import { usePosStore } from "@/store/usePosStore";
 import { getTenantStoreId } from "@/lib/tenantClient";
@@ -364,7 +365,14 @@ export default function AdminDashboardPage() {
                   <tbody>
                     {overview.negativeStock.map((product) => (
                       <tr key={product.productId} className="border-b border-border/60 text-right">
-                        <td className="py-2.5 pl-3 font-bold text-foreground">{product.name}</td>
+                        <td className="py-2.5 pl-3 font-bold text-foreground">
+                          {formatProductDisplayName(product.name, product.variantLabel)}
+                          {product.barcode && (
+                            <span dir="ltr" className="mt-0.5 block font-mono text-xs font-bold text-muted">
+                              {product.barcode}
+                            </span>
+                          )}
+                        </td>
                         <td className="py-2.5 pl-3 font-black tabular-nums text-destructive">
                           {product.stock}
                         </td>

@@ -8,7 +8,10 @@
 // (--no-verify-JWT: the POS has no Supabase Auth; every request already
 //  carries the anon apikey header, and admin writes are password-proofed
 //  inside `config_save`. If you prefer JWT verification ON, issue machine
-//  tokens out of band — not part of this remediation.)
+//  tokens out of band — not part of this remediation. NOTE: with gateway
+//  JWT verification ON, a rejected request never reaches this handler and
+//  the platform's bare 401 carries no CORS headers — the browser then
+//  reports a CORS policy error instead of the real status.)
 //
 // Environment (auto-injected by the platform):
 //   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
@@ -39,10 +42,17 @@ const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const ISTD_BASE_URL =
   (Deno.env.get("JOFOTARA_BASE_URL") ?? "https://backend.jofotara.gov.jo").replace(/\/$/, "");
 
+// Preflight contract: the browser blocks the POST (and surfaces it as a CORS
+// error) unless the gateway/function answers OPTIONS with these headers. The
+// allow-list must cover everything lib/istdIntegration.ts sends: apikey +
+// Authorization bearer + JSON content-type.
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type, x-supabase-api-version",
+  "Access-Control-Max-Age": "86400",
+  Vary: "Origin",
 };
 
 function json(body: unknown, status = 200): Response {

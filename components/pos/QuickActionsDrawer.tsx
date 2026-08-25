@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useMemo, useState } from "react";
 import {
@@ -34,8 +34,8 @@ interface ScanMatch {
 }
 
 /**
- * "Ù„ÙŠÙˆÙ†Ø©" quick-actions drawer (Phase 3): a side sheet with the four fast
- * tools a cashier/store-owner needs without leaving the register lane â€”
+ * "ليونة" quick-actions drawer (Phase 3): a side sheet with the four fast
+ * tools a cashier/store-owner needs without leaving the register lane —
  * quick price update, manual sync trigger, printer/hardware settings, and a
  * barcode probe. Pure UI over existing clients/hooks; it never mutates cart
  * or shift state.
@@ -61,7 +61,7 @@ export default function QuickActionsDrawer({
     adminSession || hasCapability(currentCashier, "catalog.manage"),
   );
 
-  // â”€â”€ Quick price update â”€â”€
+  // ── Quick price update ──
   const [priceQuery, setPriceQuery] = useState("");
   const [selectedProduct, setSelectedProduct] = useState<LocalProduct | null>(null);
   const [priceInput, setPriceInput] = useState("");
@@ -84,7 +84,7 @@ export default function QuickActionsDrawer({
     const next = Number(priceInput);
     const storeId = getTenantStoreId();
     if (!storeId || !Number.isFinite(next) || next <= 0) {
-      setPriceFeedback({ tone: "error", message: "Ø£Ø¯Ø®Ù„ Ø³Ø¹Ø±Ø§Ù‹ ØµØ§Ù„Ø­Ø§Ù‹ Ø£ÙƒØ¨Ø± Ù…Ù† ØµÙØ±" });
+      setPriceFeedback({ tone: "error", message: "أدخل سعراً صالحاً أكبر من صفر" });
       return;
     }
     setSavingPrice(true);
@@ -94,7 +94,7 @@ export default function QuickActionsDrawer({
     if (result.ok) {
       setPriceFeedback({
         tone: "success",
-        message: `ØªÙ… ØªØ­Ø¯ÙŠØ« Ø³Ø¹Ø± Â«${selectedProduct.name}Â» Ø¥Ù„Ù‰ ${formatMoney(next)}`,
+        message: `تم تحديث سعر «${selectedProduct.name}» إلى ${formatMoney(next)}`,
       });
       setSelectedProduct(null);
       setPriceInput("");
@@ -104,15 +104,16 @@ export default function QuickActionsDrawer({
         tone: "error",
         message:
           result.error === "offline"
-            ? "Ù„Ø§ ÙŠÙˆØ¬Ø¯ Ø§ØªØµØ§Ù„ â€” ØªØ­Ø¯ÙŠØ« Ø§Ù„Ø£Ø³Ø¹Ø§Ø± ÙŠØªØ·Ù„Ø¨ Ø§Ù„Ø´Ø¨ÙƒØ©"
-            : result.error === "Ø³Ø¹Ø± ØºÙŠØ± ØµØ§Ù„Ø­"
-              ? "Ø£Ø¯Ø®Ù„ Ø³Ø¹Ø±Ø§Ù‹ ØµØ§Ù„Ø­Ø§Ù‹ Ø£ÙƒØ¨Ø± Ù…Ù† ØµÙØ±"
-              : "ØªØ¹Ø°Ø± ØªØ­Ø¯ÙŠØ« Ø§Ù„Ø³Ø¹Ø± â€” Ø­Ø§ÙˆÙ„ Ù…Ø¬Ø¯Ø¯Ø§Ù‹",
+            ? "لا يوجد اتصال — تحديث الأسعار يتطلب الشبكة"
+            : result.error === "سعر غير صالح"
+              ? "أدخل سعراً صالحاً أكبر من صفر"
+              : // quickUpdateProductPrice guarantees user-safe Arabic reasons.
+                result.error || "تعذر تحديث السعر — حاول مجدداً",
       });
     }
   };
 
-  // â”€â”€ Manual sync â”€â”€
+  // ── Manual sync ──
   const [syncing, setSyncing] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
 
@@ -124,12 +125,12 @@ export default function QuickActionsDrawer({
     setSyncing(false);
     setSyncFeedback(
       result.ok
-        ? `Ø§ÙƒØªÙ…Ù„Øª Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø© â€” ${result.pending} Ø­Ø±ÙƒØ© Ø¨Ø§Ù†ØªØ¸Ø§Ø± Ø§Ù„Ø¥Ø±Ø³Ø§Ù„`
-        : "ØªØ¹Ø°Ø± Ø¥ÙƒÙ…Ø§Ù„ Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø© â€” ØªØ­Ù‚Ù‚ Ù…Ù† Ø§Ù„Ø§ØªØµØ§Ù„",
+        ? `اكتملت المزامنة — ${result.pending} حركة بانتظار الإرسال`
+        : "تعذر إكمال المزامنة — تحقق من الاتصال",
     );
   };
 
-  // â”€â”€ Barcode probe â”€â”€
+  // ── Barcode probe ──
   const [scanInput, setScanInput] = useState("");
   const [scanMatch, setScanMatch] = useState<ScanMatch | null>(null);
   const [scanMissing, setScanMissing] = useState(false);
@@ -164,7 +165,7 @@ export default function QuickActionsDrawer({
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     } catch {
-      /* clipboard unavailable â€” silently ignore */
+      /* clipboard unavailable — silently ignore */
     }
   };
 
@@ -178,7 +179,7 @@ export default function QuickActionsDrawer({
         className="absolute inset-y-0 end-0 flex w-full max-w-md flex-col bg-white shadow-2xl"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
-        aria-label="Ø§Ù„Ø¥Ø¬Ø±Ø§Ø¡Ø§Øª Ø§Ù„Ø³Ø±ÙŠØ¹Ø©"
+        aria-label="الإجراءات السريعة"
       >
         <header className="flex shrink-0 items-center justify-between border-b border-border px-4 py-3">
           <div className="flex items-center gap-2">
@@ -186,13 +187,13 @@ export default function QuickActionsDrawer({
               <Zap className="h-5 w-5 text-primary" />
             </span>
             <div>
-              <h2 className="text-base font-black leading-tight">Ù„ÙŠÙˆÙ†Ø©</h2>
-              <p className="text-[11px] font-semibold text-muted">Ø¥Ø¬Ø±Ø§Ø¡Ø§Øª Ø³Ø±ÙŠØ¹Ø© Ø¨Ù„Ø§ Ù…ØºØ§Ø¯Ø±Ø© Ø§Ù„ÙƒØ§Ø´ÙŠØ±</p>
+              <h2 className="text-base font-black leading-tight">ليونة</h2>
+              <p className="text-[11px] font-semibold text-muted">إجراءات سريعة بلا مغادرة الكاشير</p>
             </div>
           </div>
           <button
             type="button"
-            aria-label="Ø¥ØºÙ„Ø§Ù‚"
+            aria-label="إغلاق"
             onClick={onClose}
             className="grid h-10 w-10 place-items-center rounded-lg text-muted transition hover:bg-surface-muted hover:text-foreground focus-visible:focus-ring"
           >
@@ -201,11 +202,11 @@ export default function QuickActionsDrawer({
         </header>
 
         <div className="min-h-0 flex-1 space-y-0 overflow-y-auto scrollbar-hidden">
-          {/* â”€â”€ Quick price update â”€â”€ */}
+          {/* ── Quick price update ── */}
           <section className="border-b border-border px-4 py-4">
             <h3 className="flex items-center gap-2 text-sm font-black text-foreground">
               <Tag className="h-4 w-4 text-primary" />
-              ØªØ­Ø¯ÙŠØ« Ø³Ø¹Ø± Ø³Ø±ÙŠØ¹
+              تحديث سعر سريع
             </h3>
             {canManageCatalog ? (
               <div className="mt-2 space-y-2">
@@ -213,7 +214,7 @@ export default function QuickActionsDrawer({
                   <div className="rounded-xl border border-border bg-surface-muted/60 px-3 py-2.5">
                     <p className="truncate text-sm font-bold">{selectedProduct.name}</p>
                     <p className="text-xs font-semibold text-muted">
-                      Ø§Ù„Ø³Ø¹Ø± Ø§Ù„Ø­Ø§Ù„ÙŠ: {formatMoney(selectedProduct.price)}
+                      السعر الحالي: {formatMoney(selectedProduct.price)}
                     </p>
                     <div className="mt-2 flex items-center gap-2">
                       <input
@@ -229,7 +230,7 @@ export default function QuickActionsDrawer({
                             void handleSavePrice();
                           }
                         }}
-                        placeholder="Ø§Ù„Ø³Ø¹Ø± Ø§Ù„Ø¬Ø¯ÙŠØ¯"
+                        placeholder="السعر الجديد"
                         autoFocus
                         className="h-10 min-w-0 flex-1 rounded-lg border border-border px-3 text-sm font-black tabular-nums outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
                       />
@@ -244,11 +245,11 @@ export default function QuickActionsDrawer({
                         ) : (
                           <Check className="h-4 w-4" />
                         )}
-                        Ø­ÙØ¸
+                        حفظ
                       </button>
                       <button
                         type="button"
-                        aria-label="Ø¥Ù„ØºØ§Ø¡ Ø§Ù„Ø§Ø®ØªÙŠØ§Ø±"
+                        aria-label="إلغاء الاختيار"
                         onClick={() => {
                           setSelectedProduct(null);
                           setPriceInput("");
@@ -263,7 +264,7 @@ export default function QuickActionsDrawer({
                   <input
                     value={priceQuery}
                     onChange={(e) => setPriceQuery(e.target.value)}
-                    placeholder="Ø§Ø¨Ø­Ø« Ø¨Ø§Ø³Ù… Ø§Ù„Ù…Ù†ØªØ¬â€¦"
+                    placeholder="ابحث باسم المنتج…"
                     className="h-10 w-full rounded-lg border border-border px-3 text-sm font-bold outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
                   />
                 )}
@@ -290,7 +291,7 @@ export default function QuickActionsDrawer({
                   </ul>
                 )}
                 {!selectedProduct && priceQuery.trim() && priceMatches.length === 0 && (
-                  <p className="text-xs font-semibold text-muted">Ù„Ø§ Ù†ØªØ§Ø¦Ø¬ Ù…Ø·Ø§Ø¨Ù‚Ø©</p>
+                  <p className="text-xs font-semibold text-muted">لا نتائج مطابقة</p>
                 )}
                 {priceFeedback && (
                   <p
@@ -307,21 +308,21 @@ export default function QuickActionsDrawer({
             ) : (
               <p className="mt-2 flex items-center gap-2 rounded-lg bg-surface-muted px-3 py-2 text-xs font-semibold text-muted">
                 <Lock className="h-3.5 w-3.5 shrink-0" />
-                ØªØ­Ø¯ÙŠØ« Ø§Ù„Ø£Ø³Ø¹Ø§Ø± Ù…ØªØ§Ø­ Ù„Ø¬Ù„Ø³Ø© Ø§Ù„Ù…Ø¯ÙŠØ± ÙÙ‚Ø·
+                تحديث الأسعار متاح لجلسة المدير فقط
               </p>
             )}
           </section>
 
-          {/* â”€â”€ Manual sync â”€â”€ */}
+          {/* ── Manual sync ── */}
           <section className="border-b border-border px-4 py-4">
             <h3 className="flex items-center gap-2 text-sm font-black text-foreground">
               <RefreshCw className={`h-4 w-4 text-primary ${syncing ? "animate-spin" : ""}`} />
-              Ù…Ø²Ø§Ù…Ù†Ø© ÙÙˆØ±ÙŠØ©
+              مزامنة فورية
             </h3>
             <p className="mt-1 text-xs font-semibold text-muted">
               {isOnline
-                ? `${pendingSyncCount} Ø­Ø±ÙƒØ© Ø¨Ø§Ù†ØªØ¸Ø§Ø± Ø§Ù„Ø¥Ø±Ø³Ø§Ù„`
-                : "Ø§Ù„Ø¬Ù‡Ø§Ø² Ø¯ÙˆÙ† Ø§ØªØµØ§Ù„ â€” Ø³ÙŠÙØ¬Ø±Ù‰ Ø§Ù„Ø¥Ø±Ø³Ø§Ù„ Ø¹Ù†Ø¯ Ø¹ÙˆØ¯Ø© Ø§Ù„Ø´Ø¨ÙƒØ©"}
+                ? `${pendingSyncCount} حركة بانتظار الإرسال`
+                : "الجهاز دون اتصال — سيُجرى الإرسال عند عودة الشبكة"}
             </p>
             <button
               type="button"
@@ -330,7 +331,7 @@ export default function QuickActionsDrawer({
               className="mt-2 flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-border bg-surface text-sm font-black text-foreground transition hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-40"
             >
               <RefreshCw className={`h-4 w-4 ${syncing ? "animate-spin" : ""}`} />
-              {syncing ? "Ø¬Ø§Ø±Ù Ø§Ù„Ù…Ø²Ø§Ù…Ù†Ø©â€¦" : "Ù…Ø²Ø§Ù…Ù†Ø© Ø§Ù„Ø¢Ù†"}
+              {syncing ? "جارٍ المزامنة…" : "مزامنة الآن"}
             </button>
             {syncFeedback && (
               <p className="mt-2 rounded-lg bg-surface-muted px-3 py-2 text-xs font-bold text-foreground">
@@ -339,15 +340,15 @@ export default function QuickActionsDrawer({
             )}
           </section>
 
-          {/* â”€â”€ Printer & device settings â”€â”€ */}
+          {/* ── Printer & device settings ── */}
           <section className="border-b border-border px-4 py-4">
             <h3 className="flex items-center gap-2 text-sm font-black text-foreground">
               <Printer className="h-4 w-4 text-primary" />
-              Ø¥Ø¹Ø¯Ø§Ø¯Ø§Øª Ø§Ù„Ø·Ø§Ø¨Ø¹Ø© ÙˆØ§Ù„Ø¬Ù‡Ø§Ø²
+              إعدادات الطابعة والجهاز
             </h3>
             <div className="mt-2 grid grid-cols-2 gap-2">
               <label className="block">
-                <span className="mb-1 block text-[11px] font-bold text-muted">Ø¹Ø±Ø¶ Ø§Ù„ÙˆØ±Ù‚</span>
+                <span className="mb-1 block text-[11px] font-bold text-muted">عرض الورق</span>
                 <select
                   value={hardware.receiptWidth}
                   onChange={(e) =>
@@ -355,12 +356,12 @@ export default function QuickActionsDrawer({
                   }
                   className="h-9 w-full rounded-lg border border-border bg-white px-2 text-xs font-bold outline-none focus:border-primary"
                 >
-                  <option value={80}>80 Ù…Ù…</option>
-                  <option value={58}>58 Ù…Ù…</option>
+                  <option value={80}>80 مم</option>
+                  <option value={58}>58 مم</option>
                 </select>
               </label>
               <label className="block">
-                <span className="mb-1 block text-[11px] font-bold text-muted">Ù…ÙØªØ§Ø­ Ø§Ù„Ø³ÙƒØ§Ù†Ø±</span>
+                <span className="mb-1 block text-[11px] font-bold text-muted">مفتاح السكانر</span>
                 <select
                   value={hardware.scannerSubmitKey}
                   onChange={(e) =>
@@ -368,13 +369,13 @@ export default function QuickActionsDrawer({
                   }
                   className="h-9 w-full rounded-lg border border-border bg-white px-2 text-xs font-bold outline-none focus:border-primary"
                 >
-                  <option value="ENTER_OR_TAB">Enter Ø£Ùˆ Tab</option>
+                  <option value="ENTER_OR_TAB">Enter أو Tab</option>
                   <option value="ENTER">Enter</option>
                   <option value="TAB">Tab</option>
                 </select>
               </label>
               <label className="block">
-                <span className="mb-1 block text-[11px] font-bold text-muted">Ø³Ø±Ø¹Ø© Ø§Ù„Ø¯Ø±Ø¬</span>
+                <span className="mb-1 block text-[11px] font-bold text-muted">سرعة الدرج</span>
                 <select
                   value={hardware.drawerBaudRate}
                   onChange={(e) =>
@@ -389,7 +390,7 @@ export default function QuickActionsDrawer({
                 </select>
               </label>
               <label className="block">
-                <span className="mb-1 block text-[11px] font-bold text-muted">Ø¯Ø¨ÙˆØ³ Ø§Ù„Ø¯Ø±Ø¬</span>
+                <span className="mb-1 block text-[11px] font-bold text-muted">دبوس الدرج</span>
                 <select
                   value={hardware.drawerPin}
                   onChange={(e) => updateSettings({ drawerPin: Number(e.target.value) === 5 ? 5 : 2 })}
@@ -402,7 +403,7 @@ export default function QuickActionsDrawer({
             </div>
             <div className="mt-2 space-y-1.5">
               <label className="flex items-center justify-between rounded-lg border border-border px-3 py-2 text-xs font-bold">
-                Ø·Ø¨Ø§Ø¹Ø© Ø§Ù„Ø¥ÙŠØµØ§Ù„ ØªÙ„Ù‚Ø§Ø¦ÙŠØ§Ù‹
+                طباعة الإيصال تلقائياً
                 <input
                   type="checkbox"
                   checked={hardware.autoPrintReceipt}
@@ -411,7 +412,7 @@ export default function QuickActionsDrawer({
                 />
               </label>
               <label className="flex items-center justify-between rounded-lg border border-border px-3 py-2 text-xs font-bold">
-                ÙØªØ­ Ø¯Ø±Ø¬ Ø§Ù„Ù†Ù‚Ø¯ Ø¹Ù†Ø¯ Ø§Ù„Ø¨ÙŠØ¹ Ø§Ù„Ù†Ù‚Ø¯ÙŠ
+                فتح درج النقد عند البيع النقدي
                 <input
                   type="checkbox"
                   checked={hardware.autoOpenDrawer}
@@ -420,7 +421,7 @@ export default function QuickActionsDrawer({
                 />
               </label>
               <label className="flex items-center justify-between rounded-lg border border-border px-3 py-2 text-xs font-bold">
-                Ø§Ù„Ø£ØµÙˆØ§Øª
+                الأصوات
                 <input
                   type="checkbox"
                   checked={hardware.soundEnabled}
@@ -430,7 +431,7 @@ export default function QuickActionsDrawer({
               </label>
               {hardware.soundEnabled && (
                 <label className="flex items-center gap-3 rounded-lg border border-border px-3 py-2 text-xs font-bold">
-                  Ù…Ø³ØªÙˆÙ‰ Ø§Ù„ØµÙˆØª
+                  مستوى الصوت
                   <input
                     type="range"
                     min={0}
@@ -445,15 +446,15 @@ export default function QuickActionsDrawer({
               )}
             </div>
             <p className="mt-2 text-[11px] font-semibold text-muted">
-              ØªÙØ­ÙØ¸ ÙÙˆØ±Ø§Ù‹ Ù„Ù‡Ø°Ø§ Ø§Ù„Ø¬Ù‡Ø§Ø² ({activeTerminalId ? "Ø·Ø±ÙÙŠØ© Ù…Ø±ØªØ¨Ø·Ø©" : "ØºÙŠØ± Ù…Ø±ØªØ¨Ø·Ø© Ø¨Ø·Ø±ÙÙŠØ©"}) ÙˆØªØ³Ø±ÙŠ Ø¹Ù„Ù‰ ÙƒÙ„ Ø§Ù„Ø´Ø§Ø´Ø§Øª.
+              تُحفظ فوراً لهذا الجهاز ({activeTerminalId ? "طرفية مرتبطة" : "غير مرتبطة بطرفية"}) وتسري على كل الشاشات.
             </p>
           </section>
 
-          {/* â”€â”€ Barcode tools â”€â”€ */}
+          {/* ── Barcode tools ── */}
           <section className="px-4 py-4">
             <h3 className="flex items-center gap-2 text-sm font-black text-foreground">
               <ScanLine className="h-4 w-4 text-primary" />
-              Ø£Ø¯ÙˆØ§Øª Ø§Ù„Ø¨Ø§Ø±ÙƒÙˆØ¯
+              أدوات الباركود
             </h3>
             <form
               onSubmit={(e) => {
@@ -470,7 +471,7 @@ export default function QuickActionsDrawer({
                   dir="ltr"
                   autoComplete="off"
                   spellCheck={false}
-                  placeholder="Ø§Ù…Ø³Ø­ Ø¨Ø§Ø±ÙƒÙˆØ¯Ø§Ù‹ Ø£Ùˆ Ø£Ø¯Ø®Ù„Ù‡ ÙŠØ¯ÙˆÙŠØ§Ù‹â€¦"
+                  placeholder="امسح باركوداً أو أدخله يدوياً…"
                   className="min-w-0 flex-1 bg-transparent text-sm font-bold tracking-wider outline-none placeholder:text-muted"
                 />
               </div>
@@ -478,7 +479,7 @@ export default function QuickActionsDrawer({
                 type="submit"
                 className="h-10 shrink-0 rounded-lg bg-header px-3 text-xs font-black text-primary-foreground transition hover:bg-header/90"
               >
-                ÙØ­Øµ
+                فحص
               </button>
             </form>
             {scanMatch && (
@@ -487,10 +488,10 @@ export default function QuickActionsDrawer({
                 <p className="mt-0.5 text-xs font-semibold text-muted">
                   {scanMatch.variantLabel}
                   {scanMatch.unitName && scanMatch.qtyMultiplier && scanMatch.qtyMultiplier !== 1
-                    ? ` â€¢ ${scanMatch.unitName} (${scanMatch.qtyMultiplier} Ø­Ø¨Ø©)`
+                    ? ` • ${scanMatch.unitName} (${scanMatch.qtyMultiplier} حبة)`
                     : ""}
-                  {` â€¢ ${formatMoney(scanMatch.price)}`}
-                  {typeof scanMatch.totalStock === "number" ? ` â€¢ Ø§Ù„Ø±ØµÙŠØ¯: ${scanMatch.totalStock}` : ""}
+                  {` • ${formatMoney(scanMatch.price)}`}
+                  {typeof scanMatch.totalStock === "number" ? ` • الرصيد: ${scanMatch.totalStock}` : ""}
                 </p>
                 <button
                   type="button"
@@ -498,13 +499,13 @@ export default function QuickActionsDrawer({
                   className="mt-2 flex h-8 items-center gap-1.5 rounded-lg border border-border bg-white px-2.5 text-[11px] font-bold text-foreground transition hover:bg-surface-muted"
                 >
                   {copied ? <Check className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5" />}
-                  {copied ? "ØªÙ… Ø§Ù„Ù†Ø³Ø®" : scanMatch.barcode}
+                  {copied ? "تم النسخ" : scanMatch.barcode}
                 </button>
               </div>
             )}
             {scanMissing && (
               <p className="mt-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs font-bold text-destructive">
-                Ù‡Ø°Ø§ Ø§Ù„Ø¨Ø§Ø±ÙƒÙˆØ¯ ØºÙŠØ± Ù…Ø³Ø¬Ù„ ÙÙŠ Ø§Ù„ÙƒØªØ§Ù„ÙˆØ¬
+                هذا الباركود غير مسجل في الكتالوج
               </p>
             )}
           </section>

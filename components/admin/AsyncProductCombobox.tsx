@@ -11,6 +11,10 @@ export interface AsyncProductOption {
   name: string;
   baseUnit: string;
   stock: number;
+  /** Parent-level unit cost (products.cost_price) — surfaced in procurement screens. */
+  costPrice?: number | null;
+  /** Parent-level selling price (products.selling_price). */
+  sellingPrice?: number | null;
   barcodes: Array<{
     barcode: string;
     variantLabel: string;
@@ -252,7 +256,9 @@ export default function AsyncProductCombobox({
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-black text-foreground">{option.name}</span>
                       <span className="block truncate text-xs font-semibold text-muted">
-                        {new Intl.NumberFormat("ar-JO", { maximumFractionDigits: 3 }).format(option.stock)} {option.baseUnit}
+                        {[`${new Intl.NumberFormat("ar-JO", { maximumFractionDigits: 3 }).format(option.stock)} ${option.baseUnit}`,
+                          option.costPrice != null ? `تكلفة ${option.costPrice.toFixed(2)}` : "",
+                          option.sellingPrice != null ? `بيع ${option.sellingPrice.toFixed(2)}` : ""].filter(Boolean).join(" • ")}
                       </span>
                     </span>
                   </button>

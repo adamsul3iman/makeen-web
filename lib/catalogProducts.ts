@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { notifyLocalCatalogWrite } from "./catalogInvalidation";
 import { getSupabaseBrowser, isSupabaseBrowserConfigured } from "./supabaseBrowser";
+import { roundMoney } from "./saleMath";
 
 /**
  * Store-scoped barcode conflict rule: a barcode may exist in other stores
@@ -568,10 +569,30 @@ export async function deleteCatalogProduct(
 }
 
 /**
+ * PostgREST errors surface as raw English internals (or an opaque 400 when
+ * the schema cache / filters are off). Keep one Arabic summarizer so every
+ * caller can show the exact reason without leaking driver jargon.
+ */
+function describePgError(error: { message?: string | null }): string {
+  const message = typeof error?.message === "string" ? error.message : "";
+  if (/Could not find the .* column/i.test(message)) {
+    return "عمود غير موجود في قاعدة البيانات — شغّل الترحيلات";
+  }
+  if (/row-level security/i.test(message)) {
+    return "صلاحيات الجلسة الحالية لا تسمح بالتعديل";
+  }
+  if (/numeric field overflow|numeric value out of range/i.test(message)) {
+    return "السعر يتجاوز الحد المسموح في قاعدة البيانات";
+  }
+  return message ? message.slice(0, 140) : "خطأ غير معروف";
+}
+
+/**
  * Quick price update (Phase 3 "ليونة" drawer). Sets the product's retail
- * selling price on the parent row and every variant (variants carry a
- * denormalized copy of the same parent price by invariant). Guarded result
- * object — the drawer surfaces the failure without throwing.
+ * selling price on the parent row and every denormalized copy — Tier 4
+ * variants AND Tier 3.5 piece-equivalent packaging units (migration 080) —
+ * so scans and unit-picker picks charge the new price immediately. Guarded
+ * result object; never throws, the drawer renders the failure.
  */
 export async function quickUpdateProductPrice(
   storeId: string,
@@ -583,25 +604,66 @@ export async function quickUpdateProductPrice(
   if (!Number.isFinite(salePrice) || salePrice < 0) {
     return { ok: false, error: "سعر غير صالح" };
   }
+
+  // The columns patched below are canonical (products.selling_price from
+  // migration 062; product_variants from 067/072; product_units from 080),
+  // so a 400 here means the REQUEST shape was rejected. Pre-validate the two
+  // inputs REST answers with an opaque 400: uuid-shaped filters (22P02) and
+  // values that fit products.selling_price NUMERIC(12,2) (22003).
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!UUID_RE.test(productId) || !UUID_RE.test(storeId)) {
+    return {
+      ok: false,
+      error: "معرّف المنتج غير صالح — حدّث بيانات الكتالوج ثم أعد المحاولة",
+    };
+  }
+  const next = roundMoney(salePrice);
+  if (!Number.isFinite(next) || Math.abs(next) >= 1e10) {
+    return { ok: false, error: "السعر أكبر من الحد المسموح في قاعدة البيانات" };
+  }
+
   try {
     const updated = await sb
       .from("products")
-      .update({ selling_price: salePrice })
+      .update({ selling_price: next })
       .eq("id", productId)
       .eq("store_id", storeId);
-    if (updated.error) return { ok: false, error: updated.error.message };
+    if (updated.error) {
+      return { ok: false, error: `تعذر تحديث السعر: ${describePgError(updated.error)}` };
+    }
 
+    // Denormalized copies must follow the parent or stale rows keep charging
+    // the old price at scan time. Both steps are same-store scoped.
+    const failures: string[] = [];
     const variants = await sb
       .from("product_variants")
-      .update({ selling_price: salePrice })
+      .update({ selling_price: next })
       .eq("product_id", productId)
       .eq("store_id", storeId);
-    if (variants.error) return { ok: false, error: variants.error.message };
+    if (variants.error) failures.push(`المتغيرات: ${describePgError(variants.error)}`);
+
+    const units = await sb
+      .from("product_units")
+      .update({ selling_price: next })
+      .eq("product_id", productId)
+      .eq("store_id", storeId)
+      .eq("qty_multiplier", 1);
+    if (units.error) failures.push(`وحدات التغليف: ${describePgError(units.error)}`);
+
+    if (failures.length > 0) {
+      return {
+        ok: false,
+        error: `تم تحديث سعر المنتج لكن فشل نشره على (${failures.join("؛ ")})`,
+      };
+    }
 
     // Converge every device/tab onto the new price immediately.
     notifyLocalCatalogWrite(storeId);
     return { ok: true };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : "network" };
+    return {
+      ok: false,
+      error: `تعذر تحديث السعر: ${error instanceof Error ? error.message : "خطأ شبكة"}`,
+    };
   }
 }

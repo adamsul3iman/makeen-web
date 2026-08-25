@@ -378,6 +378,8 @@ export interface CatalogProductPayload {
     price: number;
     wholesalePrice: number;
     isDefaultSale: boolean;
+    /** Per-barcode opening stock (create only; ledger stays product-scoped). */
+    initialStock: number;
   }>;
 }
 
@@ -402,6 +404,8 @@ function parseCatalogProductPayload(body: unknown): CatalogProductPayload {
         price: asNum(r.price),
         wholesalePrice: asNum(r.wholesalePrice),
         isDefaultSale: typeof r.isDefaultSale === "boolean" ? r.isDefaultSale : false,
+        // Opening stock for THIS barcode (QA redesign: per-color entry).
+        initialStock: Math.max(0, asNum(r.initialStock)),
       };
     })
     .filter((r) => r.barcode.length > 0);
@@ -534,6 +538,15 @@ export async function createInventoryProduct(body: unknown): Promise<InventoryPr
       cost_price: row.costPrice || 0,
       selling_price: row.price || 0,
       wholesale_price: row.wholesalePrice || 0,
+      // Per-barcode opening stock (QA redesign). Single-variant quick-add
+      // keeps the legacy behavior: the product-level stock lands on the one
+      // variant so both columns agree.
+      total_stock:
+        row.initialStock > 0
+          ? row.initialStock
+          : payload.variants.length === 1
+            ? payload.stock
+            : 0,
     })),
   );
   if (varErr) {
@@ -541,14 +554,21 @@ export async function createInventoryProduct(body: unknown): Promise<InventoryPr
     throw new Error(varErr.message);
   }
 
-  if (payload.stock > 0) {
+  // The ledger is product-scoped: one OPENING movement covers the combined
+  // per-row stocks. Rows without explicit stock fall back to the legacy
+  // product-level field, so old flows behave exactly as before.
+  const hasRowStocks = payload.variants.some((v) => v.initialStock > 0);
+  const openingTotal = hasRowStocks
+    ? payload.variants.reduce((sum, v) => sum + v.initialStock, 0)
+    : payload.stock;
+  if (openingTotal > 0) {
     const { error: rpcErr } = await sb.rpc("record_inventory_movement", {
       p_store_id: storeId,
       p_product_id: productId,
-      p_quantity_delta: payload.stock,
+      p_quantity_delta: openingTotal,
       p_movement_type: "OPENING",
       p_idempotency_key: `opening:${productId}`,
-      p_unit_quantity: payload.stock,
+      p_unit_quantity: openingTotal,
       p_reference_type: "PRODUCT",
       p_reference_id: productId,
       p_reason: "رصيد افتتاحي عند إنشاء المنتج",
@@ -804,6 +824,10 @@ export interface AsyncProductOption {
   name: string;
   baseUnit: string;
   stock: number;
+  /** Parent-level unit cost (products.cost_price) for procurement screens. */
+  costPrice?: number | null;
+  /** Parent-level selling price (products.selling_price). */
+  sellingPrice?: number | null;
   barcodes: Array<{
     barcode: string;
     variantLabel: string;
@@ -819,7 +843,7 @@ export async function searchProducts(query: string, limit = 15): Promise<AsyncPr
 
   let productQ = sb
     .from("products")
-    .select("id,name,base_unit,total_stock")
+    .select("id,name,base_unit,total_stock,cost_price,selling_price")
     .eq("store_id", storeId)
     .eq("is_active", true)
     .order("name");
@@ -841,11 +865,13 @@ export async function searchProducts(query: string, limit = 15): Promise<AsyncPr
     variantsByProduct.set(v.product_id, list);
   }
 
-  return products.map((p: { id: string; name: string; base_unit: string; total_stock: number }) => ({
+  return products.map((p: { id: string; name: string; base_unit: string; total_stock: number; cost_price: number | string | null; selling_price: number | string | null }) => ({
     id: p.id,
     name: p.name,
     baseUnit: p.base_unit,
     stock: p.total_stock,
+    costPrice: p.cost_price == null ? null : Number(p.cost_price),
+    sellingPrice: p.selling_price == null ? null : Number(p.selling_price),
     barcodes: (variantsByProduct.get(p.id) ?? []).map((v) => ({
       barcode: v.barcode,
       variantLabel: v.variant_label ?? "",

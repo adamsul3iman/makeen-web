@@ -6,6 +6,7 @@ import { ModalShell } from "@/components/ui/ModalShell";
 import { usePosStore } from "@/store/usePosStore";
 import { formatMoney } from "@/lib/format";
 import { isValidMoneyInput, parseMoneyInput } from "@/lib/moneyInput";
+import { formatProductDisplayName } from "@/lib/productDisplayName";
 import type { DiscountScope, DiscountType } from "@/types/pos.types";
 
 const PRESETS: Record<DiscountType, number[]> = {
@@ -64,7 +65,7 @@ export default function DiscountModal({
     >
       {scope === "ITEM" && item && (
             <div className="rounded-xl bg-surface-muted px-4 py-3">
-              <p className="truncate text-sm font-bold">{item.name}</p>
+              <p className="truncate text-sm font-bold">{formatProductDisplayName(item.name, item.variantLabel)}</p>
               <p className="text-xs text-muted">
                 الإجمالي قبل الخصم:{" "}
                 <span className="tabular-nums font-bold">{formatMoney(gross)}</span>

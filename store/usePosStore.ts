@@ -3538,6 +3538,7 @@ export const usePosStore = create<PosStore>()(
                   products: snapshot.products,
                   barcodes: snapshot.barcodes,
                   barcodeIndex: snapshot.barcodeIndex,
+                  productUnits: snapshot.productUnits,
                   quickKeys: snapshot.quickKeys,
                   cashiers: snapshot.cashiers,
                   pinSalt: snapshot.pinSalt,

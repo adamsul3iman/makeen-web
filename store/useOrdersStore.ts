@@ -69,6 +69,21 @@ interface OrdersState {
 
 const CLOSED_RETENTION = 20;
 
+/**
+ * Per-store-instance guard: retryPending is fired from several places
+ * (hydrate tail, online event, boot) and hydrate itself is re-triggered by
+ * realtime pos_orders echoes. Without this latch every echo re-POSTed every
+ * still-pending mirror — the recurring POST 400 storm seen in QA.
+ */
+let retryInFlight = false;
+
+/** Cheap change signature so no-op server merges skip the set() entirely. */
+function boardSignature(orders: LocalOrder[]): string {
+  return orders
+    .map((o) => `${o.id}:${o.updatedAt}:${o.status}:${o.pendingSync ? 1 : 0}`)
+    .join("|");
+}
+
 function sortByUpdated(orders: LocalOrder[]): LocalOrder[] {
   return [...orders].sort(
     (a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""),
@@ -302,38 +317,46 @@ export const useOrdersStore = create<OrdersState>()((set, get) => ({
   },
 
   retryPending: async () => {
-    const pending = get().orders.filter((o) => o.pendingSync);
-    if (pending.length === 0) return;
-    for (const order of pending) {
-      if (order.status === "CLOSED" && order.invoiceSyncId) {
-        const result = await closeOrderRemote(order.id, order.invoiceSyncId);
-        applyRetryResult(set, get, order.id, result);
-      } else if (order.status === "CANCELLED") {
-        const result = await cancelOrderRemote(order.id, order.cancelReason ?? "");
-        applyRetryResult(set, get, order.id, result);
-      } else {
-        const result = await pushOrder(order);
-        applyRetryResult(set, get, order.id, result);
+    if (retryInFlight) return;
+    retryInFlight = true;
+    try {
+      const pending = get().orders.filter((o) => o.pendingSync);
+      if (pending.length === 0) return;
+      for (const order of pending) {
+        if (order.status === "CLOSED" && order.invoiceSyncId) {
+          const result = await closeOrderRemote(order.id, order.invoiceSyncId);
+          applyRetryResult(set, get, order.id, result);
+        } else if (order.status === "CANCELLED") {
+          const result = await cancelOrderRemote(order.id, order.cancelReason ?? "");
+          applyRetryResult(set, get, order.id, result);
+        } else {
+          const result = await pushOrder(order);
+          applyRetryResult(set, get, order.id, result);
+        }
       }
+    } finally {
+      retryInFlight = false;
     }
   },
 
   mergeServerOrders: (incoming) => {
-    set((state) => {
-      const byId = new Map<string, LocalOrder>();
-      // Server rows win unless the local copy is still pending (it carries
-      // mutations the server has never seen — never clobber them).
-      for (const local of state.orders) {
-        byId.set(local.id, local);
+    const byId = new Map<string, LocalOrder>();
+    // Server rows win unless the local copy is still pending (it carries
+    // mutations the server has never seen — never clobber them).
+    for (const local of get().orders) {
+      byId.set(local.id, local);
+    }
+    for (const remote of incoming) {
+      const local = byId.get(remote.id);
+      if (!local || !local.pendingSync) {
+        byId.set(remote.id, remote);
       }
-      for (const remote of incoming) {
-        const local = byId.get(remote.id);
-        if (!local || !local.pendingSync) {
-          byId.set(remote.id, remote);
-        }
-      }
-      return { orders: pruneBoard(sortByUpdated([...byId.values()])) };
-    });
+    }
+    const next = pruneBoard(sortByUpdated([...byId.values()]));
+    // Realtime echoes of our own writes re-deliver identical boards —
+    // skipping the set() avoids a pointless render of every subscriber.
+    if (boardSignature(next) === boardSignature(get().orders)) return;
+    set({ orders: next });
   },
 }));
 

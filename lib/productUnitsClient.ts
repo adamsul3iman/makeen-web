@@ -25,7 +25,11 @@ export interface ProductUnitRow {
   sortOrder: number;
 }
 
-export type SaveProductUnitInput = Omit<ProductUnitRow, "productId"> & { productId: string };
+/** New rows omit `id`; existing rows carry it for the upsert target. */
+export type SaveProductUnitInput = Omit<ProductUnitRow, "productId" | "id"> & {
+  productId: string;
+  id?: string;
+};
 
 const UNIT_COLUMNS =
   "id,product_id,unit_name,qty_multiplier,cost_price,selling_price,wholesale_price,barcode,is_default_sale,is_active,sort_order";

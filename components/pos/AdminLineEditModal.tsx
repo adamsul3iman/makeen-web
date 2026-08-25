@@ -5,6 +5,7 @@ import { Pencil } from "lucide-react";
 import { usePosStore } from "@/store/usePosStore";
 import { formatMoney } from "@/lib/format";
 import { ModalShell } from "@/components/ui/ModalShell";
+import { formatProductDisplayName } from "@/lib/productDisplayName";
 
 /**
  * Inline unit-price override for a cart line (Admin Mode only).
@@ -39,7 +40,7 @@ export default function AdminLineEditModal() {
   return (
     <ModalShell
       title="تعديل سعر الصنف"
-      description={item.name}
+      description={formatProductDisplayName(item.name, item.variantLabel)}
       icon={
         <div className="grid h-10 w-10 place-items-center rounded-xl bg-sky-500/15 text-sky-600">
           <Pencil className="h-5 w-5" />

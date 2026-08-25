@@ -124,7 +124,7 @@ export default function InventoryMovementsPage() {
   const safePage = Math.min(page, totalPages);
 
   const saveAdjustment = async () => {
-    if (!productId || !amount || reason.trim().length < 3 || saving) return;
+    if (!productId || !amount || saving) return;
     if (!requestKey.current) requestKey.current = crypto.randomUUID();
     setSaving(true);
     setError("");
@@ -176,7 +176,7 @@ export default function InventoryMovementsPage() {
 
       <section className="grid gap-5 xl:grid-cols-[360px_minmax(0,1fr)]">
         <form onSubmit={(event) => { event.preventDefault(); void saveAdjustment(); }} className="h-fit space-y-4 rounded-lg border border-border bg-white p-5 shadow-sm">
-          <div><h2 className="text-base font-black">تسجيل تسوية</h2><p className="mt-1 text-xs font-semibold text-muted">كل تعديل يحتاج سبباً ويُسجّل باسم المدير</p></div>
+          <div><h2 className="text-base font-black">تسجيل تسوية</h2><p className="mt-1 text-xs font-semibold text-muted">الحركة تُسجَّل باسم المدير — السبب اختياري ويساعد في التدقيق</p></div>
           <div className="grid grid-cols-4 gap-1 rounded-lg bg-surface-muted p-1">
             {([
               ["IN", "إضافة"], ["OUT", "سحب"], ["COUNT", "جرد"], ["DAMAGE", "تالف"],
@@ -208,12 +208,12 @@ export default function InventoryMovementsPage() {
           <label className="block text-sm font-bold text-muted">{mode === "COUNT" ? "الكمية الفعلية بوحدة الأساس" : "الكمية بالوحدة المختارة"}
             <input value={amount} onChange={(event) => { setAmount(event.target.value); }} type="number" min="0" step="0.001" dir="ltr" className="mt-1.5 h-12 w-full rounded-lg border border-border px-3 text-lg font-black tabular-nums outline-none focus:border-primary focus:ring-2 focus:ring-primary/20" />
           </label>
-          <label className="block text-sm font-bold text-muted">السبب
+          <label className="block text-sm font-bold text-muted">السبب (اختياري)
             <textarea value={reason} onChange={(event) => { setReason(event.target.value); }} rows={3} maxLength={500} placeholder="مثال: فرق جرد فعلي بتاريخ اليوم" className="mt-1.5 w-full resize-none rounded-lg border border-border px-3 py-2.5 text-sm font-bold outline-none focus:border-primary focus:ring-2 focus:ring-primary/20" />
           </label>
           {error && <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm font-bold text-destructive">{error}</p>}
           {notice && <p className="rounded-md bg-success/10 px-3 py-2 text-sm font-bold text-success">{notice}</p>}
-          <button type="submit" disabled={!productId || !amount || reason.trim().length < 3 || saving} className="flex h-12 w-full items-center justify-center gap-2 rounded-lg bg-primary text-sm font-black text-primary-foreground disabled:opacity-40">
+          <button type="submit" disabled={!productId || !amount || saving} className="flex h-12 w-full items-center justify-center gap-2 rounded-lg bg-primary text-sm font-black text-primary-foreground disabled:opacity-40">
             {saving ? <Loader2 className="h-5 w-5 animate-spin" /> : <Save className="h-5 w-5" />} تسجيل الحركة
           </button>
         </form>
