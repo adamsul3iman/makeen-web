@@ -63,7 +63,7 @@ const CategoryCard = memo(function CategoryCard({
       >
         <FolderOpen className="h-4.5 w-4.5" />
       </span>
-      <span className="min-w-0 flex-1 truncate text-[14px] font-bold text-slate-800">
+      <span className="min-w-0 flex-1 truncate text-[15px] font-bold text-slate-800">
         {category.name}
       </span>
       <ChevronLeft className="h-4 w-4 shrink-0 text-slate-300" />
@@ -92,10 +92,10 @@ const BrandCard = memo(function BrandCard({
         <Building2 className="h-4.5 w-4.5" />
       </span>
       <div className="min-w-0 flex-1">
-        <span className="block truncate text-[14px] font-bold text-slate-800">
+        <span className="block truncate text-[15px] font-bold text-slate-800">
           {brandName}
         </span>
-        <span className="block text-[11px] font-semibold text-slate-400">
+        <span className="block text-[12px] font-semibold text-slate-400">
           {count.toLocaleString("ar-JO")} {count === 1 ? "منتج" : "منتجات"}
         </span>
       </div>
@@ -121,10 +121,10 @@ const ProductCard = memo(function ProductCard({
         <PackageSearch className="h-4.5 w-4.5" />
       </span>
       <div className="min-w-0 flex-1">
-        <span className="block truncate text-[14px] font-bold text-slate-800">
+        <span className="block truncate text-[15px] font-bold text-slate-800">
           {item.label}
         </span>
-        <span className="block text-[11px] font-semibold text-slate-400 tabular-nums">
+        <span className="block text-[12px] font-semibold text-slate-400 tabular-nums">
           {formatMoney(item.price ?? 0)}
         </span>
       </div>
@@ -368,7 +368,7 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
               <ArrowRight className="h-5 w-5" />
             </button>
           )}
-          <h2 className="min-w-0 flex-1 text-[15px] font-black text-slate-800">
+          <h2 className="min-w-0 flex-1 text-[17px] font-black text-slate-800">
             {isSearching
               ? `نتائج البحث: "${searchQuery}"`
               : focusedCategory
@@ -393,7 +393,7 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="ابحث بالاسم أو الباركود أو التصنيف..."
-              className="min-w-0 flex-1 bg-transparent text-[14px] font-bold text-slate-800 outline-none placeholder:text-slate-400"
+              className="min-w-0 flex-1 bg-transparent text-[15px] font-bold text-slate-800 outline-none placeholder:text-slate-400"
             />
             {searchQuery && (
               <button
@@ -414,7 +414,7 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
                   key={q}
                   type="button"
                   onClick={() => setSearchQuery(q)}
-                  className="flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-bold text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 active:scale-95"
+                  className="flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[12px] font-bold text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 active:scale-95"
                 >
                   {q}
                 </button>
@@ -422,7 +422,7 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
               <button
                 type="button"
                 onClick={handleClearRecent}
-                className="rounded-full px-2 py-1 text-[11px] font-bold text-slate-400 transition hover:text-rose-500"
+                className="rounded-full px-2 py-1 text-[12px] font-bold text-slate-400 transition hover:text-rose-500"
               >
                 مسح
               </button>
@@ -448,8 +448,8 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
                         <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-amber-100 text-amber-600">
                           <FolderOpen className="h-4.5 w-4.5" />
                         </span>
-                        <span className="min-w-0 flex-1 text-[14px] font-bold text-slate-800">{result.label}</span>
-                        <span className="shrink-0 rounded-md bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-600">تصنيف</span>
+                        <span className="min-w-0 flex-1 text-[15px] font-bold text-slate-800">{result.label}</span>
+                        <span className="shrink-0 rounded-md bg-amber-100 px-2 py-0.5 text-[11px] font-bold text-amber-600">تصنيف</span>
                       </button>
                     );
                   }
@@ -464,8 +464,8 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
                         <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-sky-100 text-sky-600">
                           <Building2 className="h-4.5 w-4.5" />
                         </span>
-                        <span className="min-w-0 flex-1 text-[14px] font-bold text-slate-800">{result.label}</span>
-                        <span className="shrink-0 rounded-md bg-sky-100 px-2 py-0.5 text-[10px] font-bold text-sky-600">علامة تجارية</span>
+                        <span className="min-w-0 flex-1 text-[15px] font-bold text-slate-800">{result.label}</span>
+                        <span className="shrink-0 rounded-md bg-sky-100 px-2 py-0.5 text-[11px] font-bold text-sky-600">علامة تجارية</span>
                       </button>
                     );
                   }
@@ -478,7 +478,7 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
               <div className="grid h-full place-items-center text-center">
                 <div>
                   <PackageSearch className="mx-auto h-10 w-10 text-slate-300" />
-                  <p className="mt-3 text-[14px] font-bold text-slate-500">
+                  <p className="mt-3 text-[15px] font-bold text-slate-500">
                     لا توجد نتائج مطابقة
                   </p>
                 </div>
@@ -492,7 +492,7 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
                 <div>
                   <div className="mb-2.5 flex items-center gap-2">
                     <Zap className="h-4 w-4 text-amber-500" />
-                    <h3 className="text-[13px] font-black text-slate-700">الأصناف الأكثر طلباً</h3>
+                    <h3 className="text-[15px] font-black text-slate-700">الأصناف الأكثر طلباً</h3>
                   </div>
                   <div className="grid grid-cols-2 gap-2">
                     {frequentItems.map((item) => (
@@ -506,7 +506,7 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
               <div>
                 <div className="mb-2.5 flex items-center gap-2">
                   <FolderOpen className="h-4 w-4 text-slate-400" />
-                  <h3 className="text-[13px] font-black text-slate-700">التصنيفات</h3>
+                  <h3 className="text-[15px] font-black text-slate-700">التصنيفات</h3>
                 </div>
                 {rootCategories.length > 0 ? (
                   <div className="grid grid-cols-2 gap-2">
@@ -522,7 +522,7 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
                   <div className="grid h-32 place-items-center text-center">
                     <div>
                       <FolderOpen className="mx-auto h-10 w-10 text-slate-300" />
-                      <p className="mt-3 text-[14px] font-bold text-slate-500">
+                      <p className="mt-3 text-[15px] font-bold text-slate-500">
                         لا توجد تصنيفات
                       </p>
                     </div>

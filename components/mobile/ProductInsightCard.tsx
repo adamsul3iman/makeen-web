@@ -1,6 +1,8 @@
 "use client";
 
 import { Package, Tag, Layers, TrendingUp, Hash } from "lucide-react";
+import { breakdownStock } from "@/lib/stockDisplay";
+import type { LocalUnit } from "@/types/pos.types";
 
 interface ProductInsightCardProps {
   productName: string;
@@ -9,6 +11,9 @@ interface ProductInsightCardProps {
   currentStock?: number;
   costPrice?: number;
   reorderLevel?: number;
+  units?: LocalUnit[];
+  baseUnit?: string;
+  isWeighed?: boolean;
 }
 
 export function hasInsightData(props: Omit<ProductInsightCardProps, "productName">): boolean {
@@ -27,6 +32,9 @@ export default function ProductInsightCard({
   currentStock,
   costPrice,
   reorderLevel,
+  units,
+  baseUnit,
+  isWeighed,
 }: ProductInsightCardProps) {
   if (!hasInsightData({ categoryName, brandName, currentStock, costPrice, reorderLevel })) {
     return null;
@@ -64,7 +72,11 @@ export default function ProductInsightCard({
           <div className="flex items-center gap-1.5">
             <Package className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
             <span className="text-xs font-black text-foreground">المخزون الحالي</span>
-            <span className={`text-xs font-bold ${stockColor}`}>{currentStock}</span>
+            <span className={`text-xs font-bold ${stockColor}`}>
+              {units && baseUnit
+                ? breakdownStock(currentStock, units, isWeighed ?? false, baseUnit).label
+                : currentStock}
+            </span>
           </div>
         )}
 

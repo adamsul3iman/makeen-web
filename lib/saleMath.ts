@@ -194,7 +194,7 @@ export function computeSaleTotals(
     discount: roundMoney(itemDiscount + invoiceDiscountMoney),
     deliveryFee: fee,
     total: roundMoney(fiscal.total + fee),
-    itemCount: roundMoney(items.reduce((sum, item) => sum + item.qty, 0)),
+    itemCount: roundMoney(items.reduce((sum, item) => sum + Math.round(item.qty / (item.unitMultiplier || 1)), 0)),
   };
 }
 

@@ -6,6 +6,7 @@ import {
   Check,
   Copy,
   Lock,
+  Package,
   Printer,
   RefreshCw,
   ScanLine,
@@ -20,8 +21,10 @@ import { quickUpdateProductPrice } from "@/lib/catalogProducts";
 import { runManualSync } from "@/hooks/useBackgroundSync";
 import { useDeviceHardware } from "@/hooks/useDeviceHardware";
 import { formatMoney } from "@/lib/format";
+import { breakdownStock } from "@/lib/stockDisplay";
 import { useModalEscape } from "@/hooks/useModalEscape";
 import type { LocalProduct } from "@/types/pos.types";
+import ProductQuantitiesModal from "@/components/admin/ProductQuantitiesModal";
 
 interface ScanMatch {
   barcode: string;
@@ -31,6 +34,9 @@ interface ScanMatch {
   qtyMultiplier?: number;
   price: number;
   totalStock?: number;
+  baseUnit?: string;
+  isWeighed?: boolean;
+  productId?: string;
 }
 
 /**
@@ -49,6 +55,7 @@ export default function QuickActionsDrawer({
 }) {
   const products = usePosStore((s) => s.products);
   const barcodeIndex = usePosStore((s) => s.barcodeIndex);
+  const productUnits = usePosStore((s) => s.productUnits);
   const currentCashier = usePosStore((s) => s.currentCashier);
   const adminSession = usePosStore((s) => s.adminSession);
   const activeTerminalId = usePosStore((s) => s.activeTerminalId);
@@ -135,6 +142,7 @@ export default function QuickActionsDrawer({
   const [scanMatch, setScanMatch] = useState<ScanMatch | null>(null);
   const [scanMissing, setScanMissing] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [quantitiesOpen, setQuantitiesOpen] = useState(false);
 
   const resolveScan = () => {
     const code = scanInput.trim();
@@ -147,6 +155,7 @@ export default function QuickActionsDrawer({
       return;
     }
     setScanMissing(false);
+    const product = products[hit.product_id];
     setScanMatch({
       barcode: code,
       productName: hit.name,
@@ -154,7 +163,10 @@ export default function QuickActionsDrawer({
       unitName: hit.unitName,
       qtyMultiplier: hit.qtyMultiplier,
       price: hit.price,
-      totalStock: products[hit.product_id]?.totalStock,
+      totalStock: product?.totalStock,
+      baseUnit: product?.baseUnit,
+      isWeighed: product?.isWeighed,
+      productId: hit.product_id,
     });
   };
 
@@ -202,6 +214,18 @@ export default function QuickActionsDrawer({
         </header>
 
         <div className="min-h-0 flex-1 space-y-0 overflow-y-auto scrollbar-hidden">
+          {/* ── Product Quantities Inspector ── */}
+          <section className="border-b border-border px-4 py-4">
+            <button
+              type="button"
+              onClick={() => setQuantitiesOpen(true)}
+              className="flex h-12 w-full items-center justify-center gap-2 rounded-xl border-2 border-primary/20 bg-primary/5 text-sm font-black text-primary transition hover:bg-primary/10 hover:border-primary/40"
+            >
+              <Package className="h-5 w-5" />
+              كميات المنتجات والاستعلام السريع
+            </button>
+          </section>
+
           {/* ── Quick price update ── */}
           <section className="border-b border-border px-4 py-4">
             <h3 className="flex items-center gap-2 text-sm font-black text-foreground">
@@ -491,7 +515,11 @@ export default function QuickActionsDrawer({
                     ? ` • ${scanMatch.unitName} (${scanMatch.qtyMultiplier} حبة)`
                     : ""}
                   {` • ${formatMoney(scanMatch.price)}`}
-                  {typeof scanMatch.totalStock === "number" ? ` • الرصيد: ${scanMatch.totalStock}` : ""}
+                  {typeof scanMatch.totalStock === "number" && scanMatch.baseUnit
+                    ? ` • الرصيد: ${breakdownStock(scanMatch.totalStock, scanMatch.productId ? productUnits[scanMatch.productId] : undefined, scanMatch.isWeighed ?? false, scanMatch.baseUnit).label}`
+                    : typeof scanMatch.totalStock === "number"
+                      ? ` • الرصيد: ${scanMatch.totalStock}`
+                      : ""}
                 </p>
                 <button
                   type="button"
@@ -511,6 +539,13 @@ export default function QuickActionsDrawer({
           </section>
         </div>
       </aside>
+
+      {quantitiesOpen && (
+        <ProductQuantitiesModal
+          open={quantitiesOpen}
+          onClose={() => setQuantitiesOpen(false)}
+        />
+      )}
     </div>
   );
 }

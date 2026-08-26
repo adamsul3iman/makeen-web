@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Ban,
   CheckCircle2,
+  Package,
   PackageCheck,
   Pencil,
   Plus,
@@ -17,6 +18,8 @@ import { SearchInput } from "@/components/admin/SearchInput";
 import AsyncProductCombobox, {
   type AsyncProductOption,
 } from "@/components/admin/AsyncProductCombobox";
+import POBuilderModal, { type POBuilderItem } from "@/components/admin/POBuilderModal";
+import ReconciliationModal from "@/components/admin/ReconciliationModal";
 import PurchaseOrderPrint from "@/components/admin/PurchaseOrderPrint";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { normalizeArabicText } from "@/lib/arabic";
@@ -26,7 +29,6 @@ import {
   createPurchaseOrder,
   fetchPurchaseOrderDetail,
   fetchPurchaseOrders,
-  receivePurchaseOrder,
   updatePurchaseOrderItems,
 } from "@/lib/purchasesClient";
 import { getSupabaseBrowser } from "@/lib/supabaseBrowser";
@@ -51,6 +53,13 @@ interface LineInput {
   basePrice: number | null;
   /** Optional updated selling price pushed onto the product at receive time. */
   newSellingPrice: string;
+  /** Tier 3.5 enrichment — variant tracking */
+  variantId?: string | null;
+  variantLabel?: string;
+  unitId?: string | null;
+  unitName?: string;
+  unitMultiplier?: number;
+  qtyInUnit?: number;
 }
 
 /**
@@ -127,6 +136,10 @@ export default function AdminPurchasesPage() {
   const debouncedQ = useDebouncedValue(q.trim(), 300);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
+  const [builderOpen, setBuilderOpen] = useState(false);
+  const [reconcileOpen, setReconcileOpen] = useState(false);
+  const [reconcilePoId, setReconcilePoId] = useState<string | null>(null);
+  const [reconcilePoNumber, setReconcilePoNumber] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -202,6 +215,26 @@ export default function AdminPurchasesPage() {
     setLines((prev) => [...prev, emptyLine()]);
   };
 
+  const handleBuilderConfirm = (items: POBuilderItem[]) => {
+    const newLines: LineInput[] = items.map((item) => ({
+      key: makeKey(),
+      productId: item.productId,
+      productName: item.variantLabel !== "—" ? `${item.productName} — ${item.variantLabel}` : item.productName,
+      quantity: String(item.quantity),
+      unitCost: String(item.unitCost),
+      baseCost: item.unitCost,
+      basePrice: null,
+      newSellingPrice: item.newSellingPrice != null ? String(item.newSellingPrice) : "",
+      variantId: item.variantId,
+      variantLabel: item.variantLabel,
+      unitId: item.unitId,
+      unitName: item.unitName,
+      unitMultiplier: item.unitMultiplier,
+      qtyInUnit: item.qtyInUnit,
+    }));
+    setLines((prev) => [...prev, ...newLines]);
+  };
+
   const updateLine = (key: string, patch: Partial<LineInput>) => {
     setLines((prev) => prev.map((line) => (line.key === key ? { ...line, ...patch } : line)));
   };
@@ -263,6 +296,9 @@ export default function AdminPurchasesPage() {
         quantity: parseInt(line.quantity, 10) || 0,
         unit_cost: parseFloat(line.unitCost) || 0,
         new_selling_price: parseFloat(line.newSellingPrice) || undefined,
+        variant_id: line.variantId || undefined,
+        unit_id: line.unitId || undefined,
+        qty_in_unit: line.qtyInUnit || undefined,
       }));
       if (editing) {
         await updatePurchaseOrderItems(editing.order.id, { supplier_id: supplierId, items });
@@ -309,16 +345,10 @@ export default function AdminPurchasesPage() {
   };
 
   const handleReceive = async (id: string) => {
-    setReceivingId(id);
-    setError("");
-    try {
-      await receivePurchaseOrder(id, { actorName: adminEmail });
-      refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "تعذر استلام الأمر — تحقق من الاتصال");
-    } finally {
-      setReceivingId(null);
-    }
+    setReconcilePoId(id);
+    const row = orders.find((o) => o.id === id);
+    setReconcilePoNumber(row?.source === "po" ? id.slice(0, 8) : null);
+    setReconcileOpen(true);
   };
 
   const handlePrint = async (row: PurchasesRow) => {
@@ -415,27 +445,44 @@ export default function AdminPurchasesPage() {
 
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <p className="text-sm font-bold text-muted">البنود</p>
-              <button
-                type="button"
-                onClick={addLine}
-                className="inline-flex items-center gap-1 rounded-lg bg-primary px-2.5 py-1.5 text-xs font-black text-primary-foreground transition hover:bg-primary-hover"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                إضافة صنف
-              </button>
+              <p className="text-sm font-bold text-muted">البنود ({lines.length})</p>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={addLine}
+                  className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs font-bold text-muted transition hover:bg-surface-muted"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  يدوياً
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBuilderOpen(true)}
+                  className="inline-flex items-center gap-1 rounded-lg bg-primary px-2.5 py-1.5 text-xs font-black text-primary-foreground transition hover:bg-primary-hover"
+                >
+                  <Package className="h-3.5 w-3.5" />
+                  إضافة أصناف
+                </button>
+              </div>
             </div>
             {lines.map((line) => (
               <div key={line.key} className="rounded-xl border border-border bg-white p-3">
-                <AsyncProductCombobox
-                  id={`po-product-${line.key}`}
-                  label="الصنف"
-                  value={line.productId}
-                  selectedLabel={line.productName || undefined}
-                  placeholder="ابحث بالاسم…"
-                  required
-                  onChange={(product) => handleProductPicked(line.key, product)}
-                />
+                <div className="flex items-start justify-between gap-2">
+                  <AsyncProductCombobox
+                    id={`po-product-${line.key}`}
+                    label="الصنف"
+                    value={line.productId}
+                    selectedLabel={line.productName || undefined}
+                    placeholder="ابحث بالاسم…"
+                    required
+                    onChange={(product) => handleProductPicked(line.key, product)}
+                  />
+                  {line.unitName && line.unitMultiplier && line.unitMultiplier > 1 && (
+                    <span className="mt-6 shrink-0 rounded-md bg-primary/10 px-1.5 py-0.5 text-[10px] font-black text-primary">
+                      {line.unitName} (×{line.unitMultiplier})
+                    </span>
+                  )}
+                </div>
                 {(line.baseCost != null || line.basePrice != null) && (
                   <p className="mt-1.5 flex flex-wrap gap-x-3 text-[11px] font-bold text-muted">
                     {line.baseCost != null && <span>التكلفة الحالية: <span className="tabular-nums">{formatMoney(line.baseCost)}</span></span>}
@@ -696,6 +743,34 @@ export default function AdminPurchasesPage() {
           withPhone
           onClose={() => setAddingSupplier(false)}
           onCreate={createSupplier}
+        />
+      )}
+
+      {builderOpen && (
+        <POBuilderModal
+          open={builderOpen}
+          onClose={() => setBuilderOpen(false)}
+          onConfirm={handleBuilderConfirm}
+        />
+      )}
+
+      {reconcileOpen && reconcilePoId && (
+        <ReconciliationModal
+          open={reconcileOpen}
+          poId={reconcilePoId}
+          poNumber={reconcilePoNumber}
+          actorName={adminEmail}
+          onClose={() => {
+            setReconcileOpen(false);
+            setReconcilePoId(null);
+            setReconcilePoNumber(null);
+          }}
+          onConfirmed={() => {
+            setReconcileOpen(false);
+            setReconcilePoId(null);
+            setReconcilePoNumber(null);
+            refresh();
+          }}
         />
       )}
     </div>

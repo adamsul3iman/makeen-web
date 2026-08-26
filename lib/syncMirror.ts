@@ -377,7 +377,7 @@ async function recordSalesInvoiceLedger(
     const costTotal = round2(qty * costPrice);
     const lineProfit = round2(netTotal - costTotal);
     grossProfit = round2(grossProfit + lineProfit);
-    itemCount = round2(itemCount + Math.abs(qty));
+    itemCount = round2(itemCount + Math.abs(qty) / (meta?.multiplier || 1));
     itemRows.push({
       store_id: storeId,
       line_no: index + 1,
@@ -1791,9 +1791,9 @@ async function applyInvoiceStock(
       typeof item.qty === "number" && Number.isFinite(item.qty) ? item.qty : 0;
     if (qty === 0 || !productId) continue;
 
-    // Phase 2: sale lines are priced in a packaging unit, so stock is
-    // consumed in base pieces: qty × multiplier. Legacy lines without a
-    // multiplier are base-unit sales and stay exactly as before.
+    // Phase 2: sale lines store qty in base pieces, so stock is consumed
+    // directly from the qty field. The multiplier is kept for display but
+    // does not multiply into the delta.
     const rawMultiplier = item.unitMultiplier;
     const multiplier =
       typeof rawMultiplier === "number" && Number.isFinite(rawMultiplier) && rawMultiplier > 0
@@ -1801,7 +1801,7 @@ async function applyInvoiceStock(
         : 1;
     const barcode = (item.barcode ?? "").trim();
 
-    const delta = Number((-qty * multiplier).toFixed(3));
+    const delta = Number((-qty).toFixed(3));
     if (delta === 0) continue;
 
     const movementType = qty > 0 ? "SALE" : "RETURN";

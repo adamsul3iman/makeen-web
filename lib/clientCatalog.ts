@@ -155,6 +155,7 @@ async function fetchCashierRowsPublic(
 }
 
 const BASE_UNIT_FALLBACK = "حبة";
+const round2 = (n: number): number => Math.round((n + Number.EPSILON) * 100) / 100;
 
 /**
  * Build the per-product UoM map from server rows with a synthesis fallback.
@@ -183,19 +184,54 @@ export function buildProductUnits(
           String(a.unit_name).localeCompare(String(b.unit_name)),
       );
 
-    let units: LocalUnit[] = rowsForProduct.map((r) => ({
-      id: r.id,
-      productId: product.id,
-      unitName: String(r.unit_name ?? "").trim() || BASE_UNIT_FALLBACK,
-      qtyMultiplier: Math.max(Number(r.qty_multiplier) || 1, 0.001),
-      costPrice: Number(r.cost_price ?? 0) || product.costPrice,
-      sellingPrice: Number(r.selling_price ?? 0) || product.price,
-      wholesalePrice: Number(r.wholesale_price ?? 0) || product.wholesalePrice,
-      barcode: r.barcode?.trim() || undefined,
-      isDefaultSale: !!r.is_default_sale,
-      isActive: true,
-      sortOrder: Number(r.sort_order ?? 0),
-    }));
+    let units: LocalUnit[] = rowsForProduct.map((r) => {
+      const mult = Math.max(Number(r.qty_multiplier) || 1, 0.001);
+      const rawSelling = Number(r.selling_price);
+      const rawWholesale = Number(r.wholesale_price);
+      // Pricing fallback chain: explicit selling_price → wholesale_price →
+      // auto-derived (basePrice × multiplier for packaging tiers) → base price.
+      // Never skip a user-set wholesale price.
+      const derivedSelling =
+        rawSelling > 0
+          ? rawSelling
+          : rawWholesale > 0
+            ? rawWholesale
+            : mult > 1
+              ? round2(product.price * mult)
+              : product.price;
+      return {
+        id: r.id,
+        productId: product.id,
+        unitName: String(r.unit_name ?? "").trim() || BASE_UNIT_FALLBACK,
+        qtyMultiplier: mult,
+        costPrice: Number(r.cost_price ?? 0) || product.costPrice,
+        sellingPrice: derivedSelling,
+        wholesalePrice: Number(r.wholesale_price ?? 0) || product.wholesalePrice,
+        barcode: r.barcode?.trim() || undefined,
+        isDefaultSale: !!r.is_default_sale,
+        isActive: true,
+        sortOrder: Number(r.sort_order ?? 0),
+      };
+    });
+
+    // Always ensure a base-unit entry (multiplier=1) is present so the POS
+    // cart badge and VariantPickerModal can show the base piece alongside
+    // packaging tiers.  Without this, products that only have packaging rows
+    // (e.g. Carton ×15) would be missing the implicit piece tier.
+    if (!units.some((u) => Math.abs(u.qtyMultiplier - 1) < 0.001)) {
+      units.unshift({
+        id: `${product.id}:base`,
+        productId: product.id,
+        unitName: product.baseUnit?.trim() || BASE_UNIT_FALLBACK,
+        qtyMultiplier: 1,
+        costPrice: product.costPrice,
+        sellingPrice: product.price,
+        wholesalePrice: product.wholesalePrice,
+        isDefaultSale: true,
+        isActive: true,
+        sortOrder: 0,
+      });
+    }
 
     if (units.length === 0) {
       units = [
@@ -354,6 +390,7 @@ export async function fetchCatalogSnapshot(storeId: string): Promise<PosSnapshot
         wholesalePrice: Number(v.wholesale_price ?? 0) || product.wholesalePrice,
         isDefaultSale: true,
         isDefaultPurchase: true,
+        totalStock: Number(v.total_stock ?? 0),
       };
       barcodeIndex[v.barcode] = {
         product_id: v.product_id,
@@ -361,6 +398,7 @@ export async function fetchCatalogSnapshot(storeId: string): Promise<PosSnapshot
         name: product.name,
         price: Number(v.selling_price ?? 0) || product.price,
         variantLabel: v.variant_label,
+        totalStock: Number(v.total_stock ?? 0),
       };
       if (!defaultVariant.has(v.product_id)) defaultVariant.set(v.product_id, v);
     }

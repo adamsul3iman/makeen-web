@@ -23,6 +23,8 @@ import {
 import { formatMoney } from "@/lib/format";
 import { formatProductDisplayName } from "@/lib/productDisplayName";
 import { flattenHierarchy } from "@/lib/categoryTree";
+import { breakdownStock } from "@/lib/stockDisplay";
+import type { ProductUnitsMap } from "@/types/pos.types";
 import {
   fetchPaginatedInventory,
   fetchAllInventoryForExport,
@@ -48,6 +50,8 @@ import { Badge } from "@/components/ui/Badge";
 import { SearchInput } from "@/components/admin/SearchInput";
 import { StatCardSkeleton } from "@/components/ui/Skeleton";
 import { ListPagination } from "@/components/admin/ListPagination";
+import CostHistoryPopover from "@/components/admin/CostHistoryPopover";
+import ProductQuantitiesModal from "@/components/admin/ProductQuantitiesModal";
 import ProductModal, {
   type InventoryProduct,
   type ProductEntryDefaults,
@@ -119,6 +123,33 @@ const IMPORT_PREVIEW_COLUMNS: AdminDataTableColumn<ImportPreviewRow>[] = [
   { id: "stock", header: "المخزون", cell: (row) => <span className="tabular-nums">{row.totalStock}</span> },
 ];
 
+const WEIGHED_UNIT_NAMES = new Set(["كجم", "kg", "kg.", "kilogram", "g", "غرام", "gram", "لتر", "l", "ltr", "liter"]);
+
+function isProductWeighed(baseUnit: string): boolean {
+  return WEIGHED_UNIT_NAMES.has(baseUnit.trim().toLowerCase());
+}
+
+const StockBreakdownDisplay = memo(function StockBreakdownDisplay({
+  stock,
+  units,
+  baseUnit,
+  isWeighed,
+  className,
+}: {
+  stock: number;
+  units?: import("@/types/pos.types").LocalUnit[];
+  baseUnit: string;
+  isWeighed: boolean;
+  className?: string;
+}) {
+  const bd = breakdownStock(stock, units, isWeighed, baseUnit);
+  return (
+    <span className={className ?? "font-black tabular-nums"}>
+      {bd.label}
+    </span>
+  );
+});
+
 function buildRefs(data: InventoryPageData): InventoryRefs {
   const categoryTree = flattenHierarchy(
     Object.values(data.categories).map((item) => ({
@@ -162,6 +193,7 @@ const InventoryMobileCard = memo(function InventoryMobileCard({
   expanded: boolean;
   onToggleExpand: (id: string) => void;
 }) {
+  const productUnits = usePosStore((s) => s.productUnits);
   const firstVariant = product.variants[0];
   const expandable = isParent && childCount > 0;
   return (
@@ -205,13 +237,23 @@ const InventoryMobileCard = memo(function InventoryMobileCard({
           {expandable ? (
             <>
               <span className="rounded-lg bg-surface-muted px-2.5 py-1 text-xs font-black tabular-nums text-foreground">
-                {aggregateStock} {product.baseUnit}
+                <StockBreakdownDisplay
+                  stock={aggregateStock}
+                  units={productUnits[product.id] ?? productUnits[firstVariant?.id ?? ""]}
+                  baseUnit={product.baseUnit}
+                  isWeighed={isProductWeighed(product.baseUnit)}
+                />
               </span>
               <span className="mt-1 block text-xs font-black text-muted">مجموع {childCount} متغير</span>
             </>
           ) : (
             <span className="rounded-lg bg-surface-muted px-2.5 py-1 text-xs font-black tabular-nums text-muted">
-              {product.stock} {product.baseUnit}
+              <StockBreakdownDisplay
+                stock={product.stock}
+                units={productUnits[product.id] ?? productUnits[product.parentId ?? ""] ?? productUnits[firstVariant?.id ?? ""]}
+                baseUnit={product.baseUnit}
+                isWeighed={isProductWeighed(product.baseUnit)}
+              />
             </span>
           )}
         </div>
@@ -234,6 +276,16 @@ const InventoryMobileCard = memo(function InventoryMobileCard({
         <div className="mt-2 flex items-center justify-between gap-2 rounded-lg bg-surface-muted px-3 py-2 text-xs font-bold">
           <span className="min-w-0 truncate text-muted" dir="ltr">{firstVariant.barcode}</span>
           <span className="shrink-0 tabular-nums text-foreground">{formatMoney(firstVariant.price)}</span>
+        </div>
+      )}
+
+      {(firstVariant?.costPrice ?? 0) > 0 && (
+        <div className="mt-2 flex items-center justify-between gap-2 rounded-lg bg-surface-muted px-3 py-2 text-xs font-bold">
+          <span className="text-muted">التكلفة</span>
+          <span className="inline-flex items-center gap-1 tabular-nums text-foreground">
+            {formatMoney(firstVariant.costPrice)}
+            <CostHistoryPopover productId={product.id} productName={product.name} />
+          </span>
         </div>
       )}
 
@@ -268,6 +320,7 @@ const InventoryMobileCard = memo(function InventoryMobileCard({
 export default function AdminInventoryPage() {
   const adminSession = usePosStore((s) => s.adminSession);
   const hydrateCatalog = usePosStore((s) => s.hydrateCatalog);
+  const productUnits = usePosStore((s) => s.productUnits);
 
   const [page, setPage] = useState(1);
   const [searchQuery, setSearchQuery] = useState("");
@@ -328,6 +381,7 @@ export default function AdminInventoryPage() {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [mergeOpen, setMergeOpen] = useState(false);
+  const [quantitiesOpen, setQuantitiesOpen] = useState(false);
   const [mergeParentName, setMergeParentName] = useState("");
   const [mergeBaseCost, setMergeBaseCost] = useState("");
   const [mergeBasePrice, setMergeBasePrice] = useState("");
@@ -772,6 +826,32 @@ export default function AdminInventoryPage() {
       cell: ({ product }) => <span className="tabular-nums text-muted">{product.baseUnit}</span>,
     },
     {
+      id: "cost-price",
+      header: "التكلفة",
+      cell: ({ product }) => {
+        const cost = product.variants[0]?.costPrice ?? 0;
+        return (
+          <span className="inline-flex items-center gap-1 tabular-nums">
+            {formatMoney(cost)}
+            <CostHistoryPopover productId={product.id} productName={product.name} />
+          </span>
+        );
+      },
+    },
+    {
+      id: "selling-price",
+      header: "سعر البيع",
+      cell: ({ product }) => {
+        const price = product.variants[0]?.price ?? 0;
+        return (
+          <span className="inline-flex items-center gap-1 tabular-nums">
+            {formatMoney(price)}
+            <CostHistoryPopover productId={product.id} productName={product.name} />
+          </span>
+        );
+      },
+    },
+    {
       id: "variants",
       header: "وحدات الباركود",
       cell: ({ product }) => <Badge tone="default">{product.variants.length} وحدة</Badge>,
@@ -781,10 +861,23 @@ export default function AdminInventoryPage() {
       header: "إجمالي المخزون",
       cell: (row) => row.isParent && row.childCount > 0 ? (
         <div className="tabular-nums">
-          <div className="font-black text-foreground">{row.aggregateStock}</div>
+          <StockBreakdownDisplay
+            stock={row.aggregateStock}
+            units={productUnits[row.product.id] ?? productUnits[row.product.variants[0]?.id ?? ""]}
+            baseUnit={row.product.baseUnit}
+            isWeighed={isProductWeighed(row.product.baseUnit)}
+            className="font-black text-foreground"
+          />
           <div className="mt-0.5 text-xs font-black text-muted">مجموع {row.childCount} متغير</div>
         </div>
-      ) : <span className="font-black tabular-nums">{row.product.stock}</span>,
+      ) : (
+        <StockBreakdownDisplay
+          stock={row.product.stock}
+          units={productUnits[row.product.id] ?? productUnits[row.product.parentId ?? ""] ?? productUnits[row.product.variants[0]?.id ?? ""]}
+          baseUnit={row.product.baseUnit}
+          isWeighed={isProductWeighed(row.product.baseUnit)}
+        />
+      ),
     },
     {
       id: "actions",
@@ -825,7 +918,7 @@ export default function AdminInventoryPage() {
         </AdminTableActions>
       ),
     },
-  ], [deletingId, expanded, handleDelete, openEdit, selectableById, selectedIds, toggleExpand, toggleSelect]);
+  ], [deletingId, expanded, handleDelete, openEdit, productUnits, selectableById, selectedIds, toggleExpand, toggleSelect]);
 
   return (
     <div className="space-y-6">
@@ -834,6 +927,14 @@ export default function AdminInventoryPage() {
         subtitle="إدارة الأصناف ووحدات التغليف والباركود من قاعدة بيانات المتجر النشط"
         action={
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setQuantitiesOpen(true)}
+              className="flex h-10 items-center justify-center gap-2 rounded-lg border border-primary/30 bg-primary/10 px-4 text-sm font-black text-primary transition hover:bg-primary/20"
+            >
+              <Barcode className="h-4 w-4" />
+              كميات المنتجات
+            </button>
             <button
               type="button"
               onClick={() => void refetch()}
@@ -1175,7 +1276,7 @@ export default function AdminInventoryPage() {
         loading={loading}
         loadingRows={8}
         viewportClassName="max-h-[calc(100dvh-20rem)]"
-        tableClassName="min-w-[920px]"
+        tableClassName="min-w-[1100px]"
         rowClassName={(row) => row.depth > 0 ? "bg-surface-muted/40" : ""}
         emptyState={loadError ? <span className="text-destructive">{loadError}</span> : normalizedQuery ? "لا توجد نتائج مطابقة للبحث" : "لا توجد منتجات محفوظة لهذا المتجر بعد"}
         footer={(
@@ -1303,6 +1404,13 @@ export default function AdminInventoryPage() {
             void hydrateCatalog();
             void refetch();
           }}
+        />
+      )}
+
+      {quantitiesOpen && (
+        <ProductQuantitiesModal
+          open={quantitiesOpen}
+          onClose={() => setQuantitiesOpen(false)}
         />
       )}
     </div>

@@ -21,7 +21,8 @@ export default function AdminLineEditModal() {
   const setLineEditTarget = usePosStore((s) => s.setLineEditTarget);
 
   const item = typeof index === "number" ? items[index] : undefined;
-  const [value, setValue] = useState(item ? String(item.unitPrice) : "");
+  const displayUnitPrice = item ? item.unitPrice * (item.unitMultiplier || 1) : 0;
+  const [value, setValue] = useState(item ? String(displayUnitPrice) : "");
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -70,7 +71,7 @@ export default function AdminLineEditModal() {
       }
     >
       <p className="text-sm font-semibold text-muted">
-        السعر الحالي: {formatMoney(item.unitPrice)} • الكمية: {item.qty}
+        السعر الحالي: {formatMoney(displayUnitPrice)} • الكمية: {Math.round(item.qty / (item.unitMultiplier || 1))}
       </p>
 
       <div className="mt-3 flex items-center gap-2 rounded-xl border border-border bg-surface-muted/60 px-3 py-2.5 focus-within:ring-2 focus-within:ring-primary/30">

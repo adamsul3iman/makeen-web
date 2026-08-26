@@ -119,6 +119,8 @@ export interface LocalBarcode {
   isDefaultPurchase?: boolean;
   /** Set when this entry is a package unit (product_units row). */
   unitId?: string;
+  /** Per-variant stock in base pieces (absent for unit barcodes). */
+  totalStock?: number;
 }
 
 /** O(1) barcode metadata lookup, keyed by barcode string. */
@@ -141,6 +143,8 @@ export interface BarcodeLookup {
   qtyMultiplier?: QtyMultiplier;
   /** Owning product_units row for package barcodes (absent for variants). */
   unitId?: string;
+  /** Per-variant stock in base pieces (absent for unit barcodes). */
+  totalStock?: number;
 }
 
 /**

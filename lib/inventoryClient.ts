@@ -909,3 +909,91 @@ export function generateEan13(): string {
   const data = prefix + rest;
   return data + ean13CheckDigit(data);
 }
+
+// ---------------------------------------------------------------------------
+// PO Builder — enriched product search with per-variant stock
+// ---------------------------------------------------------------------------
+
+export interface POBuilderVariant {
+  variantId: string;
+  barcode: string;
+  variantLabel: string;
+  totalStock: number;
+}
+
+export interface POBuilderProduct {
+  id: string;
+  name: string;
+  baseUnit: string;
+  totalStock: number;
+  costPrice: number | null;
+  sellingPrice: number | null;
+  isWeighed: boolean;
+  variants: POBuilderVariant[];
+}
+
+/**
+ * Enriched search for the PO Builder modal: returns parent products with
+ * per-variant stock breakdown, so the modal can display "5 cartons + 11 pieces"
+ * for each variant and let the buyer specify qty+cost per tier.
+ */
+export async function searchProductsForPO(query: string, limit = 20): Promise<POBuilderProduct[]> {
+  const sb = getSupabaseBrowser();
+  const storeId = getTenantStoreId();
+  if (!sb || !storeId) return [];
+
+  let productQ = sb
+    .from("products")
+    .select("id,name,base_unit,total_stock,cost_price,selling_price,is_weighed")
+    .eq("store_id", storeId)
+    .eq("is_active", true)
+    .order("name");
+  if (query.trim()) productQ = productQ.ilike("name", `%${query.trim()}%`);
+  const { data: products, error: prodErr } = await productQ.limit(limit);
+  if (prodErr || !products?.length) return [];
+
+  const productIds = products.map((p: { id: string }) => p.id);
+
+  const { data: variants } = await sb
+    .from("product_variants")
+    .select("id,product_id,barcode,variant_label,total_stock")
+    .eq("store_id", storeId)
+    .in("product_id", productIds);
+
+  const variantsByProduct = new Map<string, POBuilderVariant[]>();
+  for (const v of (variants ?? []) as Array<{
+    id: string;
+    product_id: string;
+    barcode: string;
+    variant_label: string;
+    total_stock: number | string | null;
+  }>) {
+    const list = variantsByProduct.get(v.product_id) ?? [];
+    list.push({
+      variantId: v.id,
+      barcode: v.barcode,
+      variantLabel: v.variant_label ?? "",
+      totalStock: typeof v.total_stock === "number" ? v.total_stock : Number(v.total_stock) || 0,
+    });
+    variantsByProduct.set(v.product_id, list);
+  }
+
+  return products.map((p: {
+    id: string;
+    name: string;
+    base_unit: string;
+    total_stock: number;
+    cost_price: number | string | null;
+    selling_price: number | string | null;
+    is_weighed: boolean;
+  }) => ({
+    id: p.id,
+    name: p.name,
+    baseUnit: p.base_unit,
+    totalStock: p.total_stock,
+    costPrice: p.cost_price == null ? null : Number(p.cost_price),
+    sellingPrice: p.selling_price == null ? null : Number(p.selling_price),
+    isWeighed: Boolean(p.is_weighed),
+    variants: variantsByProduct.get(p.id) ?? [],
+  }));
+}

@@ -60,6 +60,7 @@ import DebtSettlementModal from "./DebtSettlementModal";
 import ExpenseModal from "./ExpenseModal";
 import CashMovementModal from "./CashMovementModal";
 import SmartSearchModal from "./SmartSearchModal";
+import VariantPickerModal from "./VariantPickerModal";
 import AdminHubModal from "./AdminHubModal";
 import SecondaryAuthModal from "../auth/SecondaryAuthModal";
 import PreviousInvoicesModal from "./PreviousInvoicesModal";
@@ -514,7 +515,7 @@ export default function PosLayout() {
         dir="rtl"
         lang="ar"
         onMouseDown={keepFocusOnScanner}
-        className={`relative isolate flex min-h-dvh w-full flex-col bg-background text-foreground print:hidden ${
+        className={`relative isolate flex h-dvh w-full flex-col overflow-hidden bg-background text-foreground print:hidden ${
           isReturnMode
             ? "bg-destructive-soft ring-2 ring-inset ring-destructive/70"
             : ""
@@ -528,7 +529,7 @@ export default function PosLayout() {
             />
             <div className="min-w-0 leading-tight">
               <div className="flex items-center gap-2">
-                <span className="max-w-32 truncate text-sm font-extrabold tracking-normal 2xl:max-w-40">
+                <span className="max-w-32 truncate text-[15px] font-extrabold tracking-normal 2xl:max-w-40">
                   {currentCashier.name}
                 </span>
                 {(adminSession || currentCashier.roleName) && (
@@ -877,7 +878,7 @@ export default function PosLayout() {
 
         {noticeToast}
 
-        <main className="relative z-0 grid min-h-0 min-w-[860px] flex-1 grid-cols-[minmax(620px,1fr)_clamp(240px,25vw,320px)] items-stretch gap-3 p-3 xl:gap-4 xl:p-4">
+        <main className="relative z-0 grid min-h-0 min-w-[860px] flex-1 grid-cols-[minmax(620px,1fr)_clamp(240px,25vw,320px)] items-stretch gap-3 overflow-hidden p-3 xl:gap-4 xl:p-4">
           {isShiftClosedSuccess ? (
             <div className="col-span-2 min-h-0">
               <ShiftClosedSuccess />
@@ -903,6 +904,7 @@ export default function PosLayout() {
         <DebtSettlementModal key={`debt-${modalSession}`} />
         <ExpenseModal key={`expense-${modalSession}`} />
         <SmartSearchModal key={`search-${modalSession}`} />
+        <VariantPickerModal key={`variant-picker-${modalSession}`} />
         <AdminHubModal key={`hub-${modalSession}`} />
         <PreviousInvoicesModal />
         <AuditLogTimeline />

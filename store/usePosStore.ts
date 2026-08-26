@@ -31,6 +31,7 @@ import type {
    TerminalInvoiceCounter,
  } from "@/types/pos.types";
 import {
+  bypassAllStuckIstd,
   countIstdFailed,
   countIstdPending,
   countPoisonSyncRecords,
@@ -84,7 +85,7 @@ import {
 } from "@/lib/cashierSessionCache";
 import { hasCapability, STAFF_ROLE_PRESETS, normalizeStaffRoleCode, homePathForDevice } from "@/lib/permissions";
 import { updateSettings, updateTaxSettings, type StoreSettings } from "@/lib/settingsClient";
-import { pushInvoiceToIstd } from "@/lib/clientIstd";
+import { BYPASS_ISTD, pushInvoiceToIstd } from "@/lib/clientIstd";
 
 /** Legacy fallback VAT percent for stores without fiscal settings. */
 const TAX_RATE = 16;
@@ -412,6 +413,8 @@ interface PosStoreState {
   activeB2BAccountName: string;
   /** Markup percent applied to the whole cart while a B2B account is active. */
   b2bMarkupPct: number;
+  /** Product id of the currently open Smart Variant Picker modal (Phase 2). */
+  variantPickerProductId: string | null;
 }
 
 interface PosStoreActions {
@@ -462,6 +465,8 @@ interface PosStoreActions {
   refreshIstdCounts: () => Promise<void>;
   /** Re-submit all FAILED ISTD invoices for the active store (owner retry). */
   retryPendingIstd: () => Promise<{ retried: number }>;
+  /** Mark all stuck PENDING/FAILED ISTD rows as ISTD_BYPASSED (JoFotara bypass). */
+  bypassAllStuckIstd: () => Promise<{ bypassed: number }>;
   /** Switch the quick-keys category filter (null = show all). */
   setActiveCategoryId: (categoryId: string | null) => void;
   openShift: (startingCash: number, branchId?: string, terminalId?: string) => Promise<void>;
@@ -482,6 +487,9 @@ interface PosStoreActions {
   closeExpenseModal: () => void;
   openSmartSearch: () => void;
   closeSmartSearch: () => void;
+  openVariantPicker: (productId: string) => void;
+  closeVariantPicker: () => void;
+  addVariantMatrixItems: (rows: Array<{ productId: string; name: string; barcode: string; variantLabel: string; unitName: string; unitMultiplier: number; unitId?: string; unitPrice: number; qty: number; taxPercent?: number; taxIncluded?: boolean }>) => void;
   openAdminHub: () => void;
   closeAdminHub: () => void;
   toggleSmartSearch: () => void;
@@ -743,10 +751,22 @@ export function anyPosModalOpen(s: PosStore): boolean {
     s.isCashMovementModalOpen ||
     s.isSmartSearchOpen ||
     s.isAdminHubOpen ||
+    s.variantPickerProductId !== null ||
     s.isSecondaryAuthOpen ||
     s.isPreviousInvoicesModalOpen ||
     s.isAuditLogOpen
   );
+}
+
+/** Returns true if a product has more than one distinct variant in the barcode index. */
+function hasMultipleVariants(barcodeIndex: BarcodeIndex, productId: string): boolean {
+  let count = 0;
+  for (const entry of Object.values(barcodeIndex)) {
+    if (entry.product_id === productId) {
+      if (++count > 1) return true;
+    }
+  }
+  return false;
 }
 
 function round2(n: number): number {
@@ -1074,6 +1094,7 @@ function resetTransactionalRuntime(state: PosStoreState) {
     isExpenseModalOpen: false,
     isSmartSearchOpen: false,
     isAdminHubOpen: false,
+    variantPickerProductId: null,
     isReturnMode: false,
     invoiceDiscount: null,
     deliveryFee: 0,
@@ -1161,6 +1182,12 @@ function applyLoginPayloadToStore(
   });
   persistDurablePosState(get());
   void get().hydrateCatalog();
+  // Retroactive JoFotara bypass: mark any stuck PENDING/FAILED ISTD rows as
+  // ISTD_BYPASSED so the badge instantly clears. Only fires when the bypass
+  // flag is active — a no-op on production with live JoFotara.
+  if (BYPASS_ISTD) {
+    void get().bypassAllStuckIstd();
+  }
 }
 
 type StaffLoginLookup = {
@@ -1463,6 +1490,7 @@ export const usePosStore = create<PosStore>()(
       isExpenseModalOpen: false,
       isSmartSearchOpen: false,
       isAdminHubOpen: false,
+      variantPickerProductId: null,
       isReturnMode: false,
       invoiceDiscount: null,
       deliveryFee: 0,
@@ -1565,6 +1593,7 @@ export const usePosStore = create<PosStore>()(
             ? scannedMeta.qtyMultiplier
             : 1;
         const product = get().products[lookup.product_id];
+        const baseQty = sign * unitMultiplier;
         const items = addLine(
           get().items,
           {
@@ -1572,15 +1601,15 @@ export const usePosStore = create<PosStore>()(
             name: lookup.name,
             barcode,
             variantLabel: lookup.variantLabel ?? scannedMeta?.variantLabel,
-            qty: sign,
+            qty: baseQty,
             unitName,
             unitMultiplier,
             unitId: scannedMeta?.unitId,
-            unitPrice: lookup.price,
+            unitPrice: lookup.price / unitMultiplier,
             taxPercent: product?.taxPercent ?? effectiveTaxPercent(get().currentStore),
             taxIncluded: product?.taxIncluded ?? false,
           },
-          sign,
+          baseQty,
         );
 
         set({ items, totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee, get().b2bMarkupPct) });
@@ -1593,6 +1622,11 @@ export const usePosStore = create<PosStore>()(
           return;
         }
 
+        if (!key.variantLabel && hasMultipleVariants(get().barcodeIndex, key.productId)) {
+          get().openVariantPicker(key.productId);
+          return;
+        }
+
         const sign = get().isReturnMode ? -1 : 1;
         const unitPrice = key.price ?? 0;
         const code = key.barcode ?? "";
@@ -1601,6 +1635,7 @@ export const usePosStore = create<PosStore>()(
           typeof keyMeta?.qtyMultiplier === "number" && keyMeta.qtyMultiplier > 0
             ? keyMeta.qtyMultiplier
             : 1;
+        const baseQty = sign * keyMultiplier;
         const items = addLine(
           get().items,
           {
@@ -1608,15 +1643,15 @@ export const usePosStore = create<PosStore>()(
             name: key.label,
             barcode: code,
             variantLabel: key.variantLabel,
-            qty: sign,
+            qty: baseQty,
             unitName: key.unitName ?? "",
             unitMultiplier: keyMultiplier,
             unitId: keyMeta?.unitId,
-            unitPrice,
+            unitPrice: unitPrice / keyMultiplier,
             taxPercent: key.taxPercent ?? get().products[key.productId]?.taxPercent ?? effectiveTaxPercent(get().currentStore),
             taxIncluded: key.taxIncluded ?? get().products[key.productId]?.taxIncluded ?? false,
           },
-          sign,
+          baseQty,
         );
 
         set({ items, totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee, get().b2bMarkupPct) });
@@ -1625,6 +1660,11 @@ export const usePosStore = create<PosStore>()(
       addSearchItem: (productId, qty = 1, barcode) => {
         const product = get().products[productId];
         if (!product) return;
+
+        if (!barcode && hasMultipleVariants(get().barcodeIndex, productId)) {
+          get().openVariantPicker(productId);
+          return;
+        }
 
         const code = (barcode ?? "").trim();
         let unitPrice = product.price ?? 0;
@@ -1661,7 +1701,7 @@ export const usePosStore = create<PosStore>()(
         }
 
         const sign = get().isReturnMode ? -1 : 1;
-        const q = Math.max(1, Math.round(qty || 1)) * sign;
+        const q = Math.max(1, Math.round(qty || 1)) * sign * unitMultiplier;
         const items = addLine(
           get().items,
           {
@@ -1673,7 +1713,7 @@ export const usePosStore = create<PosStore>()(
             unitName,
             unitMultiplier,
             unitId,
-            unitPrice,
+            unitPrice: unitPrice / unitMultiplier,
             taxPercent: product.taxPercent ?? effectiveTaxPercent(get().currentStore),
             taxIncluded: product.taxIncluded ?? false,
           },
@@ -1685,9 +1725,9 @@ export const usePosStore = create<PosStore>()(
 
       updateQty: (index, qty) => {
         if (!Number.isFinite(qty)) return;
-        // Zero quantity removes the line; negative quantities are only
-        // reachable in Return Mode and must stay valid there.
-        if (qty === 0) {
+        // Zero or negative quantity removes the line outside Return Mode.
+        // In Return Mode, negative quantities are valid (returns).
+        if (qty === 0 || (!get().isReturnMode && qty < 0)) {
           get().removeItem(index);
           return;
         }
@@ -1805,6 +1845,13 @@ export const usePosStore = create<PosStore>()(
         if (retried > 0) await get().refreshIstdCounts();
         return { retried };
       },
+      bypassAllStuckIstd: async () => {
+        const storeId = getTenantStoreId();
+        if (!storeId) return { bypassed: 0 };
+        const bypassed = await bypassAllStuckIstd(storeId);
+        if (bypassed > 0) await get().refreshIstdCounts();
+        return { bypassed };
+      },
       setActiveCategoryId: (categoryId) => set({ activeCategoryId: categoryId }),
 
       openCheckout: () => {
@@ -1891,9 +1938,6 @@ export const usePosStore = create<PosStore>()(
         const unit = (get().productUnits[item.productId] ?? []).find((u) => u.id === unitId);
         if (!unit || !unit.isActive) return;
 
-        // Convert the quantity so the physical amount of product on the line
-        // stays constant across the swap (3 cartons ⇄ 36 pieces), then
-        // re-price at the target unit. Discount percentage carries over.
         const fromMultiplier =
           typeof item.unitMultiplier === "number" && item.unitMultiplier > 0
             ? item.unitMultiplier
@@ -1902,22 +1946,25 @@ export const usePosStore = create<PosStore>()(
           typeof unit.qtyMultiplier === "number" && unit.qtyMultiplier > 0
             ? unit.qtyMultiplier
             : 1;
-        const convertedQty = round2(
-          Math.round(((item.qty * fromMultiplier) / toMultiplier) * 1000) / 1000,
-        );
-        if (!Number.isFinite(convertedQty) || convertedQty === 0) return;
+
+        // Auto-scale: calculate the current display quantity in the OLD unit,
+        // then express it in the NEW unit. When the new unit has a higher
+        // multiplier (e.g. piece → carton), this prevents the display from
+        // showing "0" by automatically bumping the base qty to match.
+        const displayQty = Math.max(1, Math.round(item.qty / fromMultiplier));
+        const newQty = displayQty * toMultiplier;
 
         const next: SaleItem = {
           ...item,
-          qty: convertedQty,
+          qty: newQty,
           unitName: unit.unitName,
           unitMultiplier: toMultiplier,
           unitId: unit.id,
-          unitPrice: round2(unit.sellingPrice),
+          unitPrice: unit.sellingPrice / toMultiplier,
         };
         // Reuse the qty-change math so line discounts re-derive identically.
         const items = get().items.map((it, i) =>
-          i !== index ? it : applyQtyToLine(next, convertedQty),
+          i !== index ? it : applyQtyToLine(next, newQty),
         );
         set({ items, totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee, get().b2bMarkupPct) });
       },
@@ -2541,6 +2588,42 @@ export const usePosStore = create<PosStore>()(
 
       openSmartSearch: () => set((s) => ({ isSmartSearchOpen: true, modalSession: s.modalSession + 1 })),
       closeSmartSearch: () => set({ isSmartSearchOpen: false }),
+      openVariantPicker: (productId) => set((s) => ({ variantPickerProductId: productId, modalSession: s.modalSession + 1 })),
+      closeVariantPicker: () => set({ variantPickerProductId: null }),
+      addVariantMatrixItems: (rows) => {
+        const state = get();
+        if (!rows.length) return;
+        const sign = state.isReturnMode ? -1 : 1;
+        let items = [...state.items];
+        for (const r of rows) {
+          const baseQty = sign * Math.abs(r.qty) * r.unitMultiplier;
+          // Generate a unit-scoped synthetic barcode so different UoM lines
+          // for the same product never merge into each other via the
+          // barcode-less merge path in findMergeIndex.
+          const syntheticBarcode = r.unitId
+            ? `UOM:${r.unitId}:${r.variantLabel}`
+            : "";
+          items = addLine(
+            items,
+            {
+              productId: r.productId,
+              name: r.name,
+              barcode: syntheticBarcode,
+              unitPrice: r.unitPrice / r.unitMultiplier,
+              qty: baseQty,
+              discount: 0,
+              taxPercent: r.taxPercent ?? effectiveTaxPercent(state.currentStore),
+              taxIncluded: r.taxIncluded ?? false,
+              unitName: r.unitName,
+              unitMultiplier: r.unitMultiplier,
+              unitId: r.unitId,
+              variantLabel: r.variantLabel,
+            },
+            baseQty,
+          );
+        }
+        set({ items, totals: computeTotals(items, state.invoiceDiscount, effectiveTaxPercent(state.currentStore), state.deliveryFee, state.b2bMarkupPct) });
+      },
       openAdminHub: () => set((s) => ({ isAdminHubOpen: true, modalSession: s.modalSession + 1 })),
       closeAdminHub: () => set({ isAdminHubOpen: false }),
       toggleSmartSearch: () => {
@@ -3907,7 +3990,10 @@ export const usePosStore = create<PosStore>()(
         }
         const item = get().items[index];
         if (!item) return;
-        const gross = round2(item.qty * price);
+        // `price` from the admin modal is per display unit; convert to per base piece.
+        const mult = item.unitMultiplier || 1;
+        const perBasePiece = price / mult;
+        const gross = round2(item.qty * perBasePiece);
         const previousPrice = item.unitPrice;
         let discount = 0;
         if (item.discountPct) {
@@ -3920,7 +4006,7 @@ export const usePosStore = create<PosStore>()(
             ? it
             : {
                 ...it,
-                unitPrice: round2(price),
+                unitPrice: perBasePiece,
                 discount,
                 lineTotal: round2(gross - discount),
               },
@@ -4142,7 +4228,7 @@ export const usePosStore = create<PosStore>()(
             get().b2bMarkupPct,
           ),
           notice: {
-            message: `تم تطبيق آخر سعر للزبون: ${round2(price).toFixed(2)}`,
+            message: `تم تطبيق آخر سعر للزبون: ${round2(price * (item.unitMultiplier || 1)).toFixed(2)}`,
             tone: "success",
           },
         });

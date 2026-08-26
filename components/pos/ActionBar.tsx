@@ -22,7 +22,7 @@ export default function ActionBar() {
         <button
           type="button"
           onClick={openExpenseModal}
-          className="flex h-11 flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 text-xs font-bold text-warning-strong transition hover:bg-warning-soft active:scale-[0.96]"
+          className="flex h-11 flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 text-[13px] font-bold text-warning-strong transition hover:bg-warning-soft active:scale-[0.96]"
         >
           <ReceiptText className="h-3.5 w-3.5 shrink-0" />
           مصروف
@@ -33,7 +33,7 @@ export default function ActionBar() {
         <button
           type="button"
           onClick={openDebtSettlementModal}
-          className="flex h-11 flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 text-xs font-bold text-info-strong transition hover:bg-info-soft active:scale-[0.96]"
+          className="flex h-11 flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 text-[13px] font-bold text-info-strong transition hover:bg-info-soft active:scale-[0.96]"
         >
           <HandCoins className="h-3.5 w-3.5 shrink-0" />
           سداد ذمة
@@ -44,7 +44,7 @@ export default function ActionBar() {
         <button
           type="button"
           onClick={requestReturnModeToggle}
-          className={`flex h-11 flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 text-xs font-bold transition active:scale-[0.96] ${
+          className={`flex h-11 flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 text-[13px] font-bold transition active:scale-[0.96] ${
             isReturnMode
               ? "bg-destructive-soft text-destructive hover:bg-destructive/15"
               : "text-muted hover:bg-surface-muted"

@@ -432,7 +432,7 @@ export interface B2BCache {
 }
 
 /** Per-invoice ISTD/JoFotara submission state (Risk 9: no invisible failures). */
-export type IstdStatus = "PENDING" | "SUBMITTING" | "SUBMITTED" | "FAILED";
+export type IstdStatus = "PENDING" | "SUBMITTING" | "SUBMITTED" | "FAILED" | "ISTD_BYPASSED";
 
 export interface IstdState {
   sync_id: string;
@@ -1379,15 +1379,16 @@ export async function getIstdStates(storeId?: string | null): Promise<IstdState[
     return (await db.getAll(ISTD_STORE)) as IstdState[];
   }
   // MEM-2: indexed per-status reads instead of deserializing every row on
-  // every call. The status enum is closed, so four range probes over the
+  // every call. The status enum is closed, so range probes over the
   // `store_status` index cover all of the tenant's rows.
-  const [pending, submitting, submitted, failed] = await Promise.all([
+  const [pending, submitting, submitted, failed, bypassed] = await Promise.all([
     db.getAllFromIndex(ISTD_STORE, "store_status", IDBKeyRange.only([storeId, "PENDING"])),
     db.getAllFromIndex(ISTD_STORE, "store_status", IDBKeyRange.only([storeId, "SUBMITTING"])),
     db.getAllFromIndex(ISTD_STORE, "store_status", IDBKeyRange.only([storeId, "SUBMITTED"])),
     db.getAllFromIndex(ISTD_STORE, "store_status", IDBKeyRange.only([storeId, "FAILED"])),
+    db.getAllFromIndex(ISTD_STORE, "store_status", IDBKeyRange.only([storeId, "ISTD_BYPASSED"])),
   ]);
-  return [...pending, ...submitting, ...submitted, ...failed] as IstdState[];
+  return [...pending, ...submitting, ...submitted, ...failed, ...bypassed] as IstdState[];
 }
 
 /**
@@ -1435,6 +1436,7 @@ export async function pruneIstdStates(
 /**
  * Invoices not yet cleared with JoFotara: PENDING/SUBMITTING (never sent or in
  * flight) plus FAILED (sent but rejected — still visible, never silent).
+ * ISTD_BYPASSED rows are excluded — they were intentionally skipped.
  * Indexed counts only — this runs on the 15 s background tick (MEM-2).
  */
 export async function countIstdPending(storeId: string): Promise<number> {
@@ -1445,6 +1447,34 @@ export async function countIstdPending(storeId: string): Promise<number> {
     db.countFromIndex(ISTD_STORE, "store_status", [storeId, "FAILED"]),
   ]);
   return pending + submitting + failed;
+}
+
+/**
+ * Retroactive bypass: mark ALL stuck PENDING/FAILED ISTD rows as ISTD_BYPASSED
+ * so the badge instantly drops to 0. Used at POS boot when the JoFotara
+ * integration is intentionally disabled.
+ */
+export async function bypassAllStuckIstd(storeId: string): Promise<number> {
+  const db = await getDb();
+  const [pendingRows, failedRows] = await Promise.all([
+    db.getAllFromIndex(ISTD_STORE, "store_status", IDBKeyRange.only([storeId, "PENDING"])),
+    db.getAllFromIndex(ISTD_STORE, "store_status", IDBKeyRange.only([storeId, "FAILED"])),
+  ]);
+  const rows = [...pendingRows, ...failedRows];
+  if (rows.length === 0) return 0;
+  const tx = db.transaction(ISTD_STORE, "readwrite");
+  let count = 0;
+  for (const row of rows) {
+    await tx.store.put({
+      ...row,
+      status: "ISTD_BYPASSED" as const,
+      error: undefined,
+      updated_at: new Date().toISOString(),
+    });
+    count++;
+  }
+  await tx.done;
+  return count;
 }
 
 /** Invoices whose ISTD submission was rejected — must be surfaced, not silent. */

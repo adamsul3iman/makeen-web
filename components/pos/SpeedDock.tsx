@@ -49,8 +49,8 @@ const QuickKeyButton = memo(function QuickKeyButton({
         <Zap className="h-5 w-5" />
       </span>
       <div className="min-w-0 flex-1 text-start">
-        <p className="truncate text-[13px] font-bold text-slate-800">{item.label}</p>
-        <p className="text-[11px] font-semibold text-slate-400 tabular-nums">
+        <p className="truncate text-sm font-bold text-slate-800">{item.label}</p>
+        <p className="text-xs font-semibold text-slate-500 tabular-nums">
           {formatMoney(item.price ?? 0)}
         </p>
       </div>
@@ -84,7 +84,7 @@ export default memo(function SpeedDock() {
         <button
           type="button"
           onClick={openDrawer}
-          className="flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl bg-slate-800 px-4 text-[13px] font-bold text-white shadow-md transition hover:bg-slate-700 active:scale-[0.98]"
+          className="flex h-11 shrink-0 items-center justify-center gap-2 rounded-xl bg-slate-800 px-4 text-sm font-bold text-white shadow-md transition hover:bg-slate-700 active:scale-[0.98]"
         >
           <LayoutGrid className="h-4 w-4 shrink-0" />
           تصفح الأصناف
@@ -93,7 +93,7 @@ export default memo(function SpeedDock() {
         <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto scrollbar-hidden">
           <div className="flex items-center gap-1.5 px-1">
             <Package className="h-3 w-3 text-slate-400" />
-            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
               أصناف سريعة
             </span>
           </div>

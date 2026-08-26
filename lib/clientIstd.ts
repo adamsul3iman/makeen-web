@@ -13,6 +13,13 @@ export type ClientIstdOutcome = {
 /** Legacy marker for "no submission path available" (unconfigured/offline env). */
 const ISTD_UNAVAILABLE = "istd_unavailable";
 
+/**
+ * JoFotara bypass flag. When true, pushInvoiceToIstd marks every invoice as
+ * ISTD_BYPASSED instead of attempting the Edge Function call. Set to false
+ * (or remove the flag) to re-enable live JoFotara submission.
+ */
+export const BYPASS_ISTD = true;
+
 interface InvoiceSubmitResponse {
   ok: boolean;
   uuid?: string;
@@ -42,6 +49,15 @@ export async function pushInvoiceToIstd(
     console.warn("[istd] لا يوجد متجر نشط — تعذّر إرسال الفاتورة إلى JoFotara", invoice.syncId);
     await markFailed(invoice.syncId, ISTD_UNAVAILABLE);
     return { cleared: false, code: ISTD_UNAVAILABLE };
+  }
+
+  if (BYPASS_ISTD) {
+    try {
+      await setIstdState(invoice.syncId, { status: "ISTD_BYPASSED" });
+    } catch {
+      // IndexedDB unavailable — the invoice still completes locally.
+    }
+    return { cleared: false, code: "istd_bypassed" };
   }
 
   try {

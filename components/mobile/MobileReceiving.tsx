@@ -96,6 +96,9 @@ function LineCard({
   const catalogCategory = usePosStore((s) =>
     catalogProduct?.categoryId ? s.categories[catalogProduct.categoryId] : undefined,
   );
+  const productUnits = usePosStore((s) =>
+    line.productId ? s.productUnits[line.productId] : undefined,
+  );
   const [costText, setCostText] = useState(() => formatMoney(line.unitCost));
   const [prevCost, setPrevCost] = useState(line.unitCost);
   const [qtyText, setQtyText] = useState(() => String(line.quantity));
@@ -169,6 +172,9 @@ function LineCard({
             currentStock={catalogProduct.totalStock}
             costPrice={catalogProduct.costPrice}
             reorderLevel={catalogProduct.reorderLevel}
+            units={productUnits}
+            baseUnit={catalogProduct.baseUnit}
+            isWeighed={catalogProduct.isWeighed}
           />
         </div>
       )}

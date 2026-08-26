@@ -32,6 +32,12 @@ export interface PurchaseOrderItem {
   total_price: number;
   /** Selling price captured at PO time and pushed onto the product at receive. */
   new_selling_price: number | null;
+  /** Tier 3.5 enrichment — which variant was ordered. */
+  variant_id: string | null;
+  /** Tier 3.5 enrichment — which packaging unit tier was ordered. */
+  unit_id: string | null;
+  /** Tier 3.5 enrichment — qty expressed in the unit's own scale (e.g. 3 cartons). */
+  qty_in_unit: number | null;
 }
 
 export interface SupplierOption {
@@ -54,6 +60,9 @@ export interface PurchaseOrderItemInput {
   quantity?: unknown;
   unit_cost?: unknown;
   new_selling_price?: unknown;
+  variant_id?: unknown;
+  unit_id?: unknown;
+  qty_in_unit?: unknown;
 }
 
 interface PurchaseOrderRow {
@@ -78,6 +87,9 @@ interface PurchaseOrderItemRow {
   unit_cost: number | string | null;
   total_price: number | string | null;
   new_selling_price: number | string | null;
+  variant_id: string | null;
+  unit_id: string | null;
+  qty_in_unit: number | string | null;
 }
 
 interface StoredPoItemRow {
@@ -86,12 +98,15 @@ interface StoredPoItemRow {
   quantity: number | string | null;
   unit_cost: number | string | null;
   new_selling_price: number | string | null;
+  variant_id: string | null;
+  unit_id: string | null;
+  qty_in_unit: number | string | null;
 }
 
 const PO_SELECT =
   "id,store_id,supplier_id,order_number,status,total_amount,paid_amount,notes,expected_date,created_at";
 const PO_ITEM_SELECT =
-  "id,store_id,purchase_order_id,product_id,quantity,unit_cost,total_price,new_selling_price";
+  "id,store_id,purchase_order_id,product_id,quantity,unit_cost,total_price,new_selling_price,variant_id,unit_id,qty_in_unit";
 const INVOICE_OPTION_SELECT =
   "id,supplier_id,invoice_number,total_amount,paid_amount,status,due_date";
 const RECEIVED_STATUSES = new Set(["received", "RECEIVED"]);
@@ -120,6 +135,9 @@ function parsePoItems(input: unknown): Array<{
   unit_cost: number;
   total_price: number;
   new_selling_price: number | null;
+  variant_id: string | null;
+  unit_id: string | null;
+  qty_in_unit: number | null;
 }> {
   const list = Array.isArray(input)
     ? (input as PurchaseOrderItemInput[]).filter((it) => it && typeof it === "object")
@@ -130,6 +148,9 @@ function parsePoItems(input: unknown): Array<{
     unit_cost: number;
     total_price: number;
     new_selling_price: number | null;
+    variant_id: string | null;
+    unit_id: string | null;
+    qty_in_unit: number | null;
   }> = [];
   for (const it of list) {
     const productId = typeof it.product_id === "string" ? it.product_id.trim() : "";
@@ -142,12 +163,20 @@ function parsePoItems(input: unknown): Array<{
     if (!productId || quantity <= 0 || unitCost < 0) {
       throw new Error("بنود أمر شراء غير صالحة");
     }
+    const variantId = typeof it.variant_id === "string" && it.variant_id.trim() ? it.variant_id.trim() : null;
+    const unitId = typeof it.unit_id === "string" && it.unit_id.trim() ? it.unit_id.trim() : null;
+    const qtyInUnit = typeof it.qty_in_unit === "number" && Number.isFinite(it.qty_in_unit) && it.qty_in_unit > 0
+      ? round2(it.qty_in_unit)
+      : null;
     parsed.push({
       product_id: productId,
       quantity,
       unit_cost: round2(unitCost),
       total_price: round2(quantity * unitCost),
       new_selling_price: newSellingPrice,
+      variant_id: variantId,
+      unit_id: unitId,
+      qty_in_unit: qtyInUnit,
     });
   }
   return parsed;
@@ -167,6 +196,11 @@ function toPurchaseOrderItem(row: PurchaseOrderItemRow): PurchaseOrderItem {
       row.new_selling_price === null || row.new_selling_price === undefined
         ? null
         : asNum(row.new_selling_price, 0) || null,
+    variant_id: row.variant_id ?? null,
+    unit_id: row.unit_id ?? null,
+    qty_in_unit: row.qty_in_unit === null || row.qty_in_unit === undefined
+      ? null
+      : asNum(row.qty_in_unit, 0) || null,
   };
 }
 
@@ -517,7 +551,7 @@ export async function receivePurchaseOrder(
 
   const { data: storedItems, error: itemsError } = await sb
     .from("purchase_order_items")
-    .select("id,product_id,quantity,unit_cost,new_selling_price")
+    .select("id,product_id,quantity,unit_cost,new_selling_price,variant_id,unit_id,qty_in_unit")
     .eq("purchase_order_id", orderId)
     .eq("store_id", storeId);
   if (itemsError) throw new Error(itemsError.message);
@@ -552,6 +586,7 @@ export async function receivePurchaseOrder(
       p_actor_name: data.actorName ?? null,
       p_reason: data.reason ?? "استلام أمر شراء",
       p_metadata: { purchaseOrderItemId: item.id, unitCost: asNum(item.unit_cost) },
+      p_variant_id: (item as StoredPoItemRow).variant_id ?? null,
     });
     if (movementError) throw new Error(movementError.message);
   }
@@ -627,6 +662,192 @@ export async function receivePurchaseOrder(
   return toPurchaseOrder(updated as PurchaseOrderRow, supplierNames);
 }
 
+/* ─── Reconciliation receiving ──────────────────────────────────── */
+
+export interface ReconciliationLineOverride {
+  poItemId: string;
+  productId: string | null;
+  receivedQty: number;
+  unitCost: number;
+  newSellingPrice: number | null;
+  variantId: string | null;
+  unitId: string | null;
+  qtyInUnit: number | null;
+  productName?: string;
+}
+
+/**
+ * Receive a PO with reconciliation overrides — each line can have a different
+ * received qty, unit cost and selling price from the original PO values.
+ *
+ * Before updating product prices the function fires `log_cost_history` for
+ * every product whose cost or selling price actually changed, preserving the
+ * old → new audit trail.
+ *
+ * Inventory movements use the *received* qty (base pieces), not the PO qty.
+ */
+export async function receivePurchaseOrderWithReconciliation(
+  id: string,
+  overrides: ReconciliationLineOverride[],
+  opts: { actorName?: string | null; reason?: string } = {},
+): Promise<PurchaseOrder> {
+  const sb = getSupabaseBrowser();
+  const storeId = getTenantStoreId();
+  if (!sb || !storeId) throw new Error("Supabase غير مهيأة");
+
+  const orderId = typeof id === "string" ? id.trim() : "";
+  if (!orderId) throw new Error("معرف أمر الشراء مطلوب");
+
+  const { data: po, error: readError } = await sb
+    .from("purchase_orders")
+    .select("id,status,supplier_id,order_number")
+    .eq("id", orderId)
+    .eq("store_id", storeId)
+    .maybeSingle();
+  if (readError) throw new Error(readError.message);
+  if (!po) throw new Error("أمر الشراء غير موجود");
+  if (RECEIVED_STATUSES.has((po as { status: string }).status)) {
+    throw new Error("أمر الشراء مستلم بالفعل");
+  }
+
+  const { data: storedItems, error: itemsError } = await sb
+    .from("purchase_order_items")
+    .select("id,product_id,quantity,unit_cost,new_selling_price,variant_id,unit_id,qty_in_unit")
+    .eq("purchase_order_id", orderId)
+    .eq("store_id", storeId);
+  if (itemsError) throw new Error(itemsError.message);
+
+  const overrideMap = new Map<string, ReconciliationLineOverride>();
+  for (const o of overrides) overrideMap.set(o.poItemId, o);
+
+  const rows = (storedItems ?? []) as StoredPoItemRow[];
+
+  // 1) Stock ledger — fire log_cost_history BEFORE updating prices, then
+  //    push stock through record_inventory_movement.
+  for (const row of rows) {
+    if (!row.product_id) continue;
+    const ov = overrideMap.get(row.id);
+    const receivedQty = ov ? ov.receivedQty : asNum(row.quantity);
+    const unitCost = ov ? ov.unitCost : asNum(row.unit_cost);
+    const newSellingPrice = ov
+      ? ov.newSellingPrice
+      : row.new_selling_price === null || row.new_selling_price === undefined
+        ? null
+        : asNum(row.new_selling_price, 0) || null;
+
+    // log_cost_history — Security Definer reads old prices before we update.
+    const pricePatch: Record<string, number> = {};
+    if (unitCost > 0) pricePatch.cost_price = round2(unitCost);
+    if (newSellingPrice !== null && newSellingPrice > 0) pricePatch.selling_price = newSellingPrice;
+    if (Object.keys(pricePatch).length > 0) {
+      const { error: logErr } = await sb.rpc("log_cost_history", {
+        p_store_id: storeId,
+        p_product_id: row.product_id,
+        p_new_cost: pricePatch.cost_price ?? null,
+        p_new_selling: pricePatch.selling_price ?? null,
+        p_source: "PO_RECEIPT",
+        p_ref_type: "PURCHASE_ORDER",
+        p_ref_id: orderId,
+        p_actor: opts.actorName ?? "",
+      });
+      if (logErr) console.warn("[po] log_cost_history failed:", logErr.message);
+    }
+
+    // Inventory movement — received qty (base pieces).
+    if (receivedQty > 0) {
+      const { error: movementError } = await sb.rpc("record_inventory_movement", {
+        p_store_id: storeId,
+        p_product_id: row.product_id,
+        p_quantity_delta: receivedQty,
+        p_movement_type: "PURCHASE_RECEIPT",
+        p_idempotency_key: `purchase:${orderId}:${row.id}`,
+        p_unit_quantity: receivedQty,
+        p_reference_type: "PURCHASE_ORDER",
+        p_reference_id: orderId,
+        p_actor_id: null,
+        p_actor_name: opts.actorName ?? null,
+        p_reason: opts.reason ?? "استلام أمر شراء (تسوية)",
+        p_metadata: { purchaseOrderItemId: row.id, unitCost, reconciled: ov != null },
+        p_variant_id: row.variant_id ?? null,
+      });
+      if (movementError) throw new Error(movementError.message);
+    }
+
+    // Apply price updates to product.
+    if (Object.keys(pricePatch).length > 0) {
+      const { error: priceError } = await sb
+        .from("products")
+        .update(pricePatch)
+        .eq("id", row.product_id)
+        .eq("store_id", storeId);
+      if (priceError) throw new Error(priceError.message);
+    }
+  }
+
+  // 2) Linked supplier invoice → accounts payable.
+  const { data: existingInvoice } = await sb
+    .from("supplier_invoices")
+    .select("id")
+    .eq("purchase_order_id", orderId)
+    .eq("store_id", storeId)
+    .maybeSingle();
+
+  const poRecord = po as { supplier_id: string; order_number: string | null };
+  if (!existingInvoice && rows.length > 0) {
+    const today = new Date().toISOString().slice(0, 10);
+    const invoiceNumber =
+      cleanText(poRecord.order_number) ??
+      `PO-${orderId.replace(/-/g, "").slice(0, 12).toUpperCase()}`;
+
+    const productIds = [...new Set(rows.map((r) => r.product_id).filter((v): v is string => Boolean(v)))];
+    const nameMap = new Map<string, string>();
+    if (productIds.length > 0) {
+      const { data: products } = await sb
+        .from("products")
+        .select("id,name")
+        .eq("store_id", storeId)
+        .in("id", productIds);
+      for (const p of (products ?? []) as Array<{ id: string; name: string }>) nameMap.set(p.id, p.name);
+    }
+
+    const invoiceItems = rows.map((item) => {
+      const ov = overrideMap.get(item.id);
+      return {
+        productId: item.product_id ?? "",
+        description: item.product_id ? nameMap.get(item.product_id) ?? "بند أمر شراء" : "بند أمر شراء",
+        quantity: ov ? ov.receivedQty : asNum(item.quantity),
+        unitCost: ov ? ov.unitCost : asNum(item.unit_cost),
+        taxPercent: 0,
+      };
+    });
+    const { error: invoiceError } = await sb.rpc("create_supplier_invoice", {
+      p_store_id: storeId,
+      p_supplier_id: poRecord.supplier_id,
+      p_invoice_number: invoiceNumber,
+      p_invoice_date: today,
+      p_due_date: today,
+      p_notes: `فاتورة استلام أمر شراء${cleanText(poRecord.order_number) ? ` رقم ${cleanText(poRecord.order_number)}` : ""}`,
+      p_purchase_order_id: orderId,
+      p_items: invoiceItems,
+    });
+    if (invoiceError) throw new Error(`تعذر إنشاء فاتورة المورد: ${invoiceError.message}`);
+  }
+
+  // 3) Flip status.
+  const { data: updated, error: updateError } = await sb
+    .from("purchase_orders")
+    .update({ status: "received", received_at: new Date().toISOString() })
+    .eq("id", orderId)
+    .eq("store_id", storeId)
+    .select(PO_SELECT)
+    .maybeSingle();
+  if (updateError) throw new Error(updateError.message);
+  if (!updated) throw new Error("أمر الشراء غير موجود");
+
+  const supplierNames = await getSupplierNames(sb, storeId, [(updated as PurchaseOrderRow).supplier_id]);
+  return toPurchaseOrder(updated as PurchaseOrderRow, supplierNames);
+}
+
 /** Lightweight supplier picker list (id + name), ordered alphabetically. */
 export async function fetchSuppliers(): Promise<SupplierOption[]> {
   const sb = getSupabaseBrowser();
@@ -672,5 +893,55 @@ export async function fetchSupplierInvoices(): Promise<SupplierInvoiceOption[]> 
     paid_amount: asNum(row.paid_amount),
     status: row.status,
     due_date: row.due_date,
+  }));
+}
+
+/* ─── Cost History ──────────────────────────────────────────────── */
+
+export interface CostHistoryRow {
+  id: string;
+  oldCostPrice: number | null;
+  newCostPrice: number | null;
+  oldSellingPrice: number | null;
+  newSellingPrice: number | null;
+  source: string;
+  referenceType: string | null;
+  referenceId: string | null;
+  changedBy: string;
+  changedAt: string;
+}
+
+/**
+ * Fetch the last `limit` price-change records for a product from the
+ * append-only `product_cost_history` table (Migration 087).
+ */
+export async function fetchCostHistory(
+  productId: string,
+  limit = 10,
+): Promise<CostHistoryRow[]> {
+  const sb = getSupabaseBrowser();
+  const storeId = getTenantStoreId();
+  if (!sb || !storeId) throw new Error("Supabase غير مهيأة");
+
+  const { data, error } = await sb
+    .from("product_cost_history")
+    .select("id,old_cost_price,new_cost_price,old_selling_price,new_selling_price,source,reference_type,reference_id,changed_by,changed_at")
+    .eq("store_id", storeId)
+    .eq("product_id", productId)
+    .order("changed_at", { ascending: false })
+    .limit(limit);
+  if (error) throw new Error(error.message);
+
+  return (data ?? []).map((row) => ({
+    id: row.id,
+    oldCostPrice: row.old_cost_price == null ? null : Number(row.old_cost_price),
+    newCostPrice: row.new_cost_price == null ? null : Number(row.new_cost_price),
+    oldSellingPrice: row.old_selling_price == null ? null : Number(row.old_selling_price),
+    newSellingPrice: row.new_selling_price == null ? null : Number(row.new_selling_price),
+    source: row.source,
+    referenceType: row.reference_type,
+    referenceId: row.reference_id,
+    changedBy: row.changed_by ?? "",
+    changedAt: row.changed_at,
   }));
 }

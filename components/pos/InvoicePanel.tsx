@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BadgePercent, Barcode, Building2, ClipboardList, CreditCard, Pause, Pencil, ReceiptText, X, XCircle, Zap } from "lucide-react";
+import { BadgePercent, Barcode, Building2, ChevronDown, ClipboardList, CreditCard, Pause, Pencil, ReceiptText, X, XCircle, Zap } from "lucide-react";
 import { anyPosModalOpen, usePosStore } from "@/store/usePosStore";
 import { useOrdersStore } from "@/store/useOrdersStore";
 import { formatMoney } from "@/lib/format";
@@ -18,12 +18,11 @@ import QuickCreateEntityModal from "@/components/shared/QuickCreateEntityModal";
 import { useCustomerOptions } from "@/components/pos/useCustomerOptions";
 
 /**
- * Unit chips (Phase 2): tap to re-price a cart line in another packaging
- * tier (حبة ⇄ كرتون). Quantity converts so the physical amount on the line
- * stays constant. Rendered only when the product has more than one active
- * unit, keeping single-unit products visually unchanged.
+ * Unit badge (Phase 2A): inline dropdown that replaces the old full-width
+ * chip row. Shows only the active unit name + chevron; clicking opens a
+ * small popover listing all available units. Keeps the cart row compact.
  */
-const UnitChips = memo(function UnitChips({
+const UnitBadge = memo(function UnitBadge({
   units,
   item,
   index,
@@ -34,31 +33,59 @@ const UnitChips = memo(function UnitChips({
   index: number;
   onSetLineUnit: (index: number, unitId: string) => void;
 }) {
-  const activeId =
-    item.unitId ??
-    (units.find((u) => u.isDefaultSale) ?? units[0])?.id;
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  const activeUnit =
+    units.find((u) => u.id === item.unitId) ??
+    units.find((u) => u.isDefaultSale) ??
+    units[0];
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler, { passive: true });
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  if (!activeUnit) return null;
+
   return (
-    <div className="mt-0.5 flex w-fit flex-wrap items-center gap-1">
-      {units.map((unit) => {
-        const isActive = unit.id === activeId;
-        return (
-          <button
-            key={unit.id}
-            type="button"
-            onClick={() => {
-              if (!isActive) onSetLineUnit(index, unit.id);
-            }}
-            className={`rounded-md px-1.5 py-0.5 text-[10px] font-black leading-4 transition ${
-              isActive
-                ? "bg-primary text-primary-foreground"
-                : "border border-slate-200 bg-slate-50 text-slate-500 hover:border-primary/40 hover:text-primary"
-            }`}
-            title={`${unit.unitName} — ${formatMoney(unit.sellingPrice)}`}
-          >
-            {unit.unitName}
-          </button>
-        );
-      })}
+    <div ref={ref} className="relative mt-0.5 inline-block">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="inline-flex items-center gap-0.5 rounded-md bg-primary/10 px-1.5 py-0.5 text-[10px] font-black leading-4 text-primary transition hover:bg-primary/20"
+      >
+        {activeUnit.unitName}{activeUnit.qtyMultiplier > 1 ? ` (×${activeUnit.qtyMultiplier})` : ''}
+        <ChevronDown className="h-2.5 w-2.5" />
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full z-50 mt-1 min-w-[100px] rounded-lg border border-border bg-surface py-1 shadow-lg">
+          {units.map((unit) => {
+            const isActive = unit.id === activeUnit.id;
+            return (
+              <button
+                key={unit.id}
+                type="button"
+                onClick={() => {
+                  if (!isActive) onSetLineUnit(index, unit.id);
+                  setOpen(false);
+                }}
+                className={`block w-full px-3 py-1.5 text-right text-xs font-bold transition ${
+                  isActive
+                    ? "bg-primary/10 text-primary"
+                    : "text-foreground hover:bg-muted"
+                }`}
+              >
+                {unit.unitName}{unit.qtyMultiplier > 1 ? ` (×${unit.qtyMultiplier})` : ''}
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 });
@@ -77,6 +104,7 @@ const CartRow = memo(function CartRow({
   onSetDiscountTarget: (target: { scope: DiscountScope; index?: number }) => void;
 }) {
   const adminSession = usePosStore((s) => s.adminSession);
+  const isReturnMode = usePosStore((s) => s.isReturnMode);
   const setLineEditTarget = usePosStore((s) => s.setLineEditTarget);
   const updateQty = usePosStore((s) => s.updateQty);
   const removeItem = usePosStore((s) => s.removeItem);
@@ -91,21 +119,13 @@ const CartRow = memo(function CartRow({
       <td className="py-1.5 ps-3 pe-2">
         <div className="flex flex-col gap-0.5">
           <div className="flex items-baseline gap-1.5">
-            <span className="text-sm font-bold leading-tight text-slate-800">
+            <span className="text-[15px] font-bold leading-tight text-slate-800">
               {formatProductDisplayName(item.name, item.variantLabel)}
             </span>
             {item.barcode && item.barcode !== item.variantLabel && (
               <span className="font-mono text-xs text-slate-400">{item.barcode}</span>
             )}
           </div>
-          {activeUnits.length > 1 && (
-            <UnitChips
-              units={activeUnits}
-              item={item}
-              index={index}
-              onSetLineUnit={setLineUnit}
-            />
-          )}
           {item.discount ? (
             <span className="inline-flex w-fit items-center rounded bg-primary/10 px-1.5 py-0.5 text-xs font-black text-primary">
               خصم
@@ -114,12 +134,25 @@ const CartRow = memo(function CartRow({
         </div>
       </td>
       <td className="py-1.5 px-1 text-center">
+        {activeUnits.length > 1 ? (
+          <UnitBadge
+            units={activeUnits}
+            item={item}
+            index={index}
+            onSetLineUnit={setLineUnit}
+          />
+        ) : (
+          <span className="text-[13px] font-semibold text-slate-500">{item.unitName}</span>
+        )}
+      </td>
+      <td className="py-1.5 px-1 text-center">
         <div className="inline-flex items-center gap-0.5">
           <button
             type="button"
             aria-label="إنقاص الكمية"
-            onClick={() => updateQty(index, item.qty - 1)}
-            className="grid h-11 w-11 place-items-center rounded-lg border border-slate-200 text-sm font-bold text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 active:scale-95"
+            onClick={() => updateQty(index, item.qty - (item.unitMultiplier || 1))}
+            disabled={!isReturnMode && item.qty <= (item.unitMultiplier || 1)}
+            className="grid h-11 w-11 place-items-center rounded-lg border border-slate-200 text-sm font-bold text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 active:scale-95 disabled:opacity-30"
           >
             −
           </button>
@@ -127,20 +160,20 @@ const CartRow = memo(function CartRow({
             type="text"
             inputMode="numeric"
             readOnly
-            value={item.qty}
-            className="w-7 text-center text-sm font-black tabular-nums text-slate-800 outline-none"
+            value={Math.max(1, Math.round(item.qty / (item.unitMultiplier || 1)))}
+            className="w-7 text-center text-[15px] font-black tabular-nums text-slate-800 outline-none"
           />
           <button
             type="button"
             aria-label="زيادة الكمية"
-            onClick={() => updateQty(index, item.qty + 1)}
+            onClick={() => updateQty(index, item.qty + (item.unitMultiplier || 1))}
             className="grid h-11 w-11 place-items-center rounded-lg border border-green-200 text-sm font-bold text-green-600 transition hover:bg-green-50 hover:text-green-700 active:scale-95"
           >
             +
           </button>
         </div>
       </td>
-      <td className="whitespace-nowrap py-1.5 px-2 text-center text-sm tabular-nums text-slate-600">
+      <td className="whitespace-nowrap py-1.5 px-2 text-center text-[15px] tabular-nums text-slate-600">
         {adminSession ? (
           <button
             type="button"
@@ -148,14 +181,14 @@ const CartRow = memo(function CartRow({
             className="inline-flex min-h-11 items-center gap-1 rounded-lg px-2.5 font-bold text-primary transition hover:bg-primary/10"
             title="تعديل السعر"
           >
-            {formatMoney(item.unitPrice)}
+            {formatMoney(item.unitPrice * (item.unitMultiplier || 1))}
             <Pencil className="h-3 w-3" />
           </button>
         ) : (
-          formatMoney(item.unitPrice)
+          formatMoney(item.unitPrice * (item.unitMultiplier || 1))
         )}
       </td>
-      <td className="whitespace-nowrap py-1.5 px-2 text-center text-sm font-black tabular-nums text-slate-900">
+      <td className="whitespace-nowrap py-1.5 px-2 text-center text-[15px] font-black tabular-nums text-slate-900">
         {formatMoney(item.lineTotal)}
       </td>
       <td className="py-1.5 pe-3 ps-2 text-center">
@@ -337,7 +370,7 @@ export default function InvoicePanel() {
               <button
                 type="button"
                 onClick={() => switchCart(idx)}
-                className={`flex h-11 items-center gap-1.5 rounded-t-xl border border-b-0 px-3 text-xs font-bold transition ${
+                className={`flex h-11 items-center gap-1.5 rounded-t-xl border border-b-0 px-3 text-[13px] font-bold transition ${
                   isActive
                     ? "border-green-400 bg-white text-green-700 shadow-sm"
                     : "border-transparent bg-slate-100/70 text-slate-500 hover:bg-slate-200/70"
@@ -396,7 +429,7 @@ export default function InvoicePanel() {
             spellCheck={false}
             dir="ltr"
             placeholder="امسح الباركود أو ابحث عن صنف..."
-            className="min-w-0 flex-1 bg-transparent text-sm font-bold tracking-wider text-slate-800 outline-none placeholder:text-slate-400"
+            className="min-w-0 flex-1 bg-transparent text-[15px] font-bold tracking-wider text-slate-800 outline-none placeholder:text-slate-400"
           />
           {omnibarInput && (
             <button
@@ -418,23 +451,25 @@ export default function InvoicePanel() {
             <div className="animate-pos-float grid h-20 w-20 place-items-center rounded-full bg-gradient-to-br from-green-50 via-white to-slate-50 shadow-inner ring-1 ring-green-100/80">
               <ReceiptText className="h-10 w-10 text-green-300" />
             </div>
-            <p className="text-base font-black text-slate-700">لا توجد أصناف بعد</p>
-            <p className="max-w-60 text-sm font-semibold leading-relaxed text-slate-500">
+            <p className="text-lg font-black text-slate-700">لا توجد أصناف بعد</p>
+            <p className="max-w-60 text-[15px] font-semibold leading-relaxed text-slate-500">
               امسح باركوداً أو اضغط على صنف سريع لإضافته للفاتورة
             </p>
           </div>
         ) : (
           <table className="w-full table-fixed text-start">
             <colgroup>
-              <col className="w-[40%]" />
-              <col className="w-[20%]" />
+              <col className="w-[34%]" />
+              <col className="w-[13%]" />
               <col className="w-[18%]" />
-              <col className="w-[14%]" />
-              <col className="w-[8%]" />
+              <col className="w-[17%]" />
+              <col className="w-[13%]" />
+              <col className="w-[5%]" />
             </colgroup>
             <thead className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur">
-              <tr className="border-b border-slate-200 text-xs font-black uppercase tracking-wider text-slate-400">
+              <tr className="border-b border-slate-200 text-[13px] font-black uppercase tracking-wider text-slate-400">
                 <th className="px-3 py-1.5">الصنف</th>
+                <th className="px-2 py-1.5 text-center">الوحدة</th>
                 <th className="px-2 py-1.5 text-center">الكمية</th>
                 <th className="px-2 py-1.5 text-center">السعر</th>
                 <th className="px-2 py-1.5 text-center">المجموع</th>
@@ -455,7 +490,7 @@ export default function InvoicePanel() {
         )}
       </div>
 
-      <footer className="space-y-1 border-t border-slate-200 bg-slate-50/80 px-3 py-1.5">
+      <footer className="shrink-0 space-y-1.5 border-t border-slate-200 bg-slate-50/80 px-3 py-2">
         {activeB2BAccountName && b2bMarkupPct > 0 && (
           <div className="flex items-center gap-1.5 rounded-lg bg-primary/10 px-2.5 py-1.5 text-xs font-black text-primary">
             <Building2 className="h-3.5 w-4 shrink-0" />
@@ -467,7 +502,7 @@ export default function InvoicePanel() {
           <button
             type="button"
             onClick={() => setQuickItemOpen(true)}
-            className="flex h-11 flex-1 items-center justify-center gap-1.5 rounded-lg border border-primary/25 bg-primary/5 px-3 text-xs font-bold text-primary transition hover:bg-primary/10 active:scale-[0.98]"
+            className="flex h-11 flex-1 items-center justify-center gap-1.5 rounded-lg border border-primary/25 bg-primary/5 px-3 text-[13px] font-bold text-primary transition hover:bg-primary/10 active:scale-[0.98]"
           >
             <Zap className="h-4 w-4 shrink-0" />
             صنف سريع
@@ -475,7 +510,7 @@ export default function InvoicePanel() {
           <button
             type="button"
             onClick={() => setDiscountTarget({ scope: "TOTAL" })}
-            className="flex h-11 flex-1 items-center justify-center gap-1.5 rounded-lg border border-primary/25 bg-primary/5 px-3 text-xs font-bold text-primary transition hover:bg-primary/10 active:scale-[0.98]"
+            className="flex h-11 flex-1 items-center justify-center gap-1.5 rounded-lg border border-primary/25 bg-primary/5 px-3 text-[13px] font-bold text-primary transition hover:bg-primary/10 active:scale-[0.98]"
           >
             <BadgePercent className="h-4 w-4 shrink-0" />
             خصم الفاتورة
@@ -491,15 +526,15 @@ export default function InvoicePanel() {
           </button>
         </div>
 
-        <div className="flex items-center justify-between text-xs text-slate-500">
+        <div className="flex items-center justify-between text-sm font-semibold text-slate-600">
           <span>الصافي</span>
           <span className="tabular-nums">{formatMoney(totals.subtotal)}</span>
         </div>
-        <div className="flex items-center justify-between text-xs text-slate-500">
+        <div className="flex items-center justify-between text-sm font-semibold text-slate-600">
           <span>الضريبة</span>
           <span className="tabular-nums">{formatMoney(totals.tax)}</span>
         </div>
-        <div className={`flex items-center justify-between text-xs font-bold text-rose-600 ${totals.discount > 0 ? "" : "invisible"}`}>
+        <div className={`flex items-center justify-between text-sm font-bold text-rose-600 ${totals.discount > 0 ? "" : "invisible"}`}>
           <span>الخصم</span>
           <span className="tabular-nums">-{formatMoney(totals.discount)}</span>
         </div>
@@ -508,7 +543,7 @@ export default function InvoicePanel() {
           type="button"
           disabled={empty}
           onClick={openCheckout}
-          className={`flex h-12 w-full items-center justify-center gap-2 whitespace-nowrap rounded-xl px-4 text-base font-black shadow-card transition-colors duration-150 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 ${
+          className={`flex h-12 w-full items-center justify-center gap-2 whitespace-nowrap rounded-xl px-4 text-lg font-black shadow-card transition-colors duration-150 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 ${
             isReturnMode
               ? "bg-destructive text-destructive-foreground hover:bg-destructive-hover"
               : "bg-primary text-primary-foreground hover:bg-primary-hover"
@@ -517,7 +552,7 @@ export default function InvoicePanel() {
           <CreditCard className="h-5 w-5 shrink-0" />
           {isReturnMode ? "إرجاع" : "دفع الفاتورة"}
           {!empty && (
-            <span className="tabular-nums">• {formatMoney(totals.total)}</span>
+            <span className="tabular-nums text-[15px]">• {formatMoney(totals.total)}</span>
           )}
         </button>
 
@@ -525,7 +560,7 @@ export default function InvoicePanel() {
           <button
             type="button"
             onClick={handleHoldClick}
-            className="relative flex h-11 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-200 bg-white text-xs font-bold text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 active:scale-[0.97]"
+            className="relative flex h-11 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-200 bg-white text-[13px] font-bold text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 active:scale-[0.97]"
           >
             <Pause className="h-4 w-4 shrink-0" />
             تعليق
@@ -540,7 +575,7 @@ export default function InvoicePanel() {
             disabled={empty}
             onClick={handleHoldClick}
             title="تسجيل الطلب كمفتوح لاستكماله لاحقاً من صفحة الطلبات"
-            className="flex h-11 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-primary/30 bg-primary/5 text-xs font-bold text-primary transition hover:border-primary/50 hover:bg-primary/10 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40"
+            className="flex h-11 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-primary/30 bg-primary/5 text-[13px] font-bold text-primary transition hover:border-primary/50 hover:bg-primary/10 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40"
           >
             <ClipboardList className="h-4 w-4 shrink-0" />
             طلب مفتوح
@@ -550,7 +585,7 @@ export default function InvoicePanel() {
             disabled={empty}
             onClick={handleClearInvoice}
             onMouseLeave={() => { if (confirmClear) { if (confirmClearTimer.current) clearTimeout(confirmClearTimer.current); setConfirmClear(false); } }}
-            className={`flex h-11 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border text-xs font-bold transition active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40 ${
+            className={`flex h-11 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border text-[13px] font-bold transition active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40 ${
               confirmClear
                 ? "border-rose-300 bg-rose-500 text-white hover:bg-rose-600"
                 : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50"

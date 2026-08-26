@@ -40,23 +40,23 @@ const QuickKeyCard = memo(function QuickKeyCard({
     <button
       type="button"
       onClick={() => onAdd(item)}
-      className="group flex h-full min-h-[84px] w-full flex-col justify-between gap-1.5 overflow-hidden rounded-lg border border-slate-200 bg-white p-2.5 text-start shadow-sm transition hover:border-green-300 hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary active:scale-[0.98]"
+      className="group flex h-full min-h-[92px] w-full flex-col justify-between gap-1.5 overflow-hidden rounded-lg border border-slate-200 bg-white p-2.5 text-start shadow-sm transition hover:border-green-300 hover:shadow-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary active:scale-[0.98]"
     >
       <div className="min-h-0">
         {item.variantLabel && (
-          <span className="block truncate text-xs font-bold text-slate-500">
+          <span className="block truncate text-[13px] font-bold text-slate-500">
             {item.variantLabel}
           </span>
         )}
-        <span className="line-clamp-2 text-sm font-bold leading-5 text-slate-800">
+        <span className="line-clamp-2 text-[15px] font-bold leading-5 text-slate-800">
           {item.label}
         </span>
       </div>
       <div className="flex items-end justify-between gap-1">
-        <span className="max-w-16 truncate text-xs font-semibold text-slate-400">
+        <span className="max-w-16 truncate text-xs font-semibold text-slate-500">
           {item.unitName ?? ""}
         </span>
-        <span className="shrink-0 rounded bg-green-50 px-1.5 py-0.5 text-sm font-black tabular-nums text-green-600">
+        <span className="shrink-0 rounded bg-green-50 px-1.5 py-0.5 text-[15px] font-black tabular-nums text-green-600">
           {formatMoney(item.price ?? 0)}
         </span>
       </div>
