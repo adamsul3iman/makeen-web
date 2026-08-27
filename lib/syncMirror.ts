@@ -366,8 +366,9 @@ async function recordSalesInvoiceLedger(
     const barcode = text(item.barcode);
     const meta = barcodeMeta.get(barcode);
     const qty = Number.isFinite(item.qty) ? item.qty : 0;
-    const unitPrice = money(item.unitPrice);
-    const lineSubtotal = round2(qty * unitPrice);
+    const multiplier = meta?.multiplier ?? 1;
+    const unitPricePerPiece = round2(money(item.unitPrice) / multiplier);
+    const lineSubtotal = round2(qty * unitPricePerPiece);
     const fiscalLine = fiscal.lines[index];
     const lineDiscount = round2(money(item.discount) + (fiscalLine?.invoiceDiscount ?? 0));
     const lineTotal = fiscalLine?.gross ?? money(item.lineTotal);
@@ -388,7 +389,7 @@ async function recordSalesInvoiceLedger(
       unit_name: text(item.unitName),
       qty,
       multiplier: meta?.multiplier ?? 1,
-      unit_price: unitPrice,
+      unit_price: unitPricePerPiece,
       line_subtotal: lineSubtotal,
       line_discount: lineDiscount,
       line_total: lineTotal,
@@ -1767,7 +1768,7 @@ async function applyInvoiceStock(
 ): Promise<{ applied: boolean; error?: string }> {
   if (event.action_type !== "INVOICE_CREATED") return { applied: false };
   const payload = event.payload as {
-    items?: Array<{ productId?: string; barcode?: string; qty?: number; unitName?: string; variantLabel?: string; unitMultiplier?: number }>;
+    items?: Array<{ productId?: string; barcode?: string; variantId?: string; qty?: number; unitName?: string; variantLabel?: string; unitMultiplier?: number }>;
     branchId?: string;
     terminalId?: string;
     cashierId?: string;
@@ -1825,6 +1826,7 @@ async function applyInvoiceStock(
       // A sale must never be blocked by 0/negative stock: allow total_stock
       // to decrement into negative integers (e.g. -5).
       p_allow_negative: true,
+      p_variant_id: uuidOrNull(item.variantId),
     });
     if (movement.error) {
       // Deterministic data/config failures (unknown product P0002, barcode or

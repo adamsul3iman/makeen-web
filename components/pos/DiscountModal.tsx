@@ -32,8 +32,8 @@ export default function DiscountModal({
   const item = scope === "ITEM" ? items[index ?? -1] : null;
   const gross =
     scope === "ITEM" && item
-      ? item.qty * item.unitPrice
-      : items.reduce((s, it) => s + it.qty * it.unitPrice, 0);
+      ? (item.qty / (item.unitMultiplier || 1)) * item.unitPrice
+      : items.reduce((s, it) => s + (it.qty / (it.unitMultiplier || 1)) * it.unitPrice, 0);
 
   const submit = (val?: number) => {
     const parsed = val ?? parseMoneyInput(value);

@@ -68,8 +68,11 @@ async function pollCatalogDrift(): Promise<void> {
 
 async function syncIfOnline(): Promise<void> {
   if (!usePosStore.getState().isOnline) return;
-  await processSyncQueue();
+  const result = await processSyncQueue();
   await refreshPendingCount();
+  if (result.syncedCount > 0) {
+    await usePosStore.getState().hydrateCatalog();
+  }
   // Post-ack is the ideal sweep point: anything just marked SYNCED ages from
   // now, and a drained queue makes room before the next burst.
   await runRetentionSweeps();
@@ -86,8 +89,11 @@ export async function runManualSync(): Promise<{
   pending: number;
 }> {
   try {
-    await processSyncQueue();
+    const result = await processSyncQueue();
     await refreshPendingCount();
+    if (result.syncedCount > 0) {
+      await usePosStore.getState().hydrateCatalog();
+    }
     await runRetentionSweeps();
     await pollCatalogDrift();
     void useOrdersStore.getState().retryPending();

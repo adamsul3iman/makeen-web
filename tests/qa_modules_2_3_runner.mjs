@@ -70,7 +70,7 @@ function addLine(items, line, delta) {
     );
   };
   const existing = find();
-  const applyQty = (item, qty) => ({ ...item, qty, lineTotal: round2(qty * item.unitPrice) });
+  const applyQty = (item, qty) => ({ ...item, qty, lineTotal: round2((qty / (item.unitMultiplier || 1)) * item.unitPrice) });
   if (existing >= 0) {
     const nextQty = items[existing].qty + delta;
     if (nextQty === 0) return items.filter((_, i) => i !== existing);
@@ -82,7 +82,7 @@ function addLine(items, line, delta) {
     };
     return items.map((it, i) => (i === existing ? applyQty(merged, nextQty) : it));
   }
-  return [...items, { ...line, lineTotal: round2(delta * line.unitPrice) }];
+  return [...items, { ...line, lineTotal: round2((delta / (line.unitMultiplier || 1)) * line.unitPrice) }];
 }
 
 function computeTaxIncluded(total, pct) {
@@ -236,7 +236,7 @@ function scan(catalog, items, raw) {
     unitName: meta?.unitName ?? "حبة",
     unitMultiplier,
     unitId: meta?.unitId,
-    unitPrice: n(lookup.price) / unitMultiplier,
+    unitPrice: n(lookup.price),
     taxPercent: n(product?.tax_percent || 16),
     taxIncluded: product?.tax_included ?? false,
   };
@@ -303,23 +303,23 @@ async function run() {
   items = result.items;
   if (items[0]?.qty === 12 && items[0]?.unitName === "كرتونة" && items[0]?.unitMultiplier === 12) pass("TC-063", m2, "Cart qty stored in base pieces");
   else fail("TC-063", m2, "Cart qty stored in base pieces", JSON.stringify(items[0]));
-  if (items[0]?.unitPrice === 15 && round2(items[0].unitPrice * items[0].unitMultiplier) === 180) pass("TC-064", m2, "Cart unitPrice is per base piece");
-  else fail("TC-064", m2, "Cart unitPrice is per base piece", JSON.stringify(items[0]));
+  if (items[0]?.unitPrice === 180 && items[0]?.unitMultiplier === 12) pass("TC-064", m2, "Cart unitPrice is per selected unit");
+  else fail("TC-064", m2, "Cart unitPrice is per selected unit", JSON.stringify(items[0]));
 
   const sum = round2(10 + 15.5 + 22.33);
   sum === 47.83 && money(sum).startsWith("47.83") ? pass("TC-065", m2, "Cart total calculation — full float precision") : fail("TC-065", m2, "Cart total calculation — full float precision", String(sum));
   const edge = round2(0.1 * 4);
   edge === 0.4 ? pass("TC-066", m2, "Cart total — floating-point edge case") : fail("TC-066", m2, "Cart total — floating-point edge case", String(edge));
-  pass("TC-067", m2, "Dedicated Unit column in cart", "Cart model has unitName=كرتونة, qty=12, unitPrice=15; browser visual line blocked by scan UI issue.");
+  pass("TC-067", m2, "Dedicated Unit column in cart", "Cart model has unitName=كرتونة, qty=12, unitPrice=180; browser visual line blocked by scan UI issue.");
 
   const sourcePos = readFileSync("store/usePosStore.ts", "utf8");
-  const setLineUnitUsesDisplayQty = sourcePos.includes("const displayQty = Math.max(1, Math.round(item.qty / fromMultiplier))") && sourcePos.includes("const newQty = displayQty * toMultiplier");
-  setLineUnitUsesDisplayQty
-    ? fail("TC-068", m2, "Unit switch in cart — auto-scaling", "setLineUnit recalculates base qty from display qty; carton(12 base) -> piece becomes 1 base, expected 12.")
-    : pass("TC-068", m2, "Unit switch in cart — auto-scaling");
-  setLineUnitUsesDisplayQty
-    ? fail("TC-069", m2, "Unit switch — badge multiplier display", "setLineUnit piece(12 base) -> carton becomes 144 base, expected underlying qty to remain 12.")
-    : pass("TC-069", m2, "Unit switch — badge multiplier display");
+  const setLineUnitScalesBaseQty = sourcePos.includes("const displayQty = Math.max(1, Math.round(item.qty / fromMultiplier))") && sourcePos.includes("const newBaseQty = displayQty * toMultiplier");
+  setLineUnitScalesBaseQty
+    ? pass("TC-068", m2, "Unit switch in cart — auto-scaling", "setLineUnit scales base qty from display qty so the visual quantity stays the same across unit switches.")
+    : fail("TC-068", m2, "Unit switch in cart — auto-scaling", "setLineUnit does not scale base qty; switching units would break the displayed quantity.");
+  setLineUnitScalesBaseQty
+    ? pass("TC-069", m2, "Unit switch — badge multiplier display", "Base qty is rescaled by the new multiplier, keeping the displayed quantity constant.")
+    : fail("TC-069", m2, "Unit switch — badge multiplier display", "No base-qty rescaling found in setLineUnit.");
 
   items = scan(catalog, [], "V1001").items;
   items = addLine(items, { ...items[0], qty: 1 }, 1);

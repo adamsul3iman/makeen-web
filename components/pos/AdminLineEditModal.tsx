@@ -21,7 +21,7 @@ export default function AdminLineEditModal() {
   const setLineEditTarget = usePosStore((s) => s.setLineEditTarget);
 
   const item = typeof index === "number" ? items[index] : undefined;
-  const displayUnitPrice = item ? item.unitPrice * (item.unitMultiplier || 1) : 0;
+  const displayUnitPrice = item ? item.unitPrice : 0;
   const [value, setValue] = useState(item ? String(displayUnitPrice) : "");
   const inputRef = useRef<HTMLInputElement>(null);
 

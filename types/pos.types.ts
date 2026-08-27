@@ -198,6 +198,8 @@ export interface SaleItem {
   productId: string;
   name: string;
   barcode: string;
+  /** Real product_variants UUID when the sold SKU is known. */
+  variantId?: string;
   /** Barcode-level variation such as flavor or scent. */
   variantLabel?: string;
   qty: number;

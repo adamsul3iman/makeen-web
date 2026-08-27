@@ -61,14 +61,17 @@ export function priceMemoryKey(
 }
 
 /**
- * What the customer actually paid per unit: the line total (net of the line
- * discount) divided by the quantity, so a discounted sale is remembered at
- * its real price rather than the shelf price. Falls back to unitPrice when
- * the quantity is missing or zero.
+ * What the customer actually paid per selected unit: the line total (net of the
+ * line discount) divided by the display quantity, so a discounted sale is
+ * remembered at its real per-unit price rather than the shelf price.  Falls
+ * back to unitPrice when the quantity is missing or zero.
  */
-export function effectiveUnitPrice(item: { qty: number; lineTotal: number; unitPrice: number }): number {
+export function effectiveUnitPrice(item: { qty: number; lineTotal: number; unitPrice: number; unitMultiplier?: number }): number {
   if (!item.qty || !Number.isFinite(item.lineTotal)) return round2(item.unitPrice);
-  return round2(Math.abs(item.lineTotal) / Math.abs(item.qty));
+  const mult = item.unitMultiplier && item.unitMultiplier > 0 ? item.unitMultiplier : 1;
+  const displayQty = Math.abs(item.qty) / mult;
+  if (displayQty === 0) return round2(item.unitPrice);
+  return round2(Math.abs(item.lineTotal) / displayQty);
 }
 
 /**

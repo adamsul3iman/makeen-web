@@ -181,11 +181,11 @@ const CartRow = memo(function CartRow({
             className="inline-flex min-h-11 items-center gap-1 rounded-lg px-2.5 font-bold text-primary transition hover:bg-primary/10"
             title="تعديل السعر"
           >
-            {formatMoney(item.unitPrice * (item.unitMultiplier || 1))}
+            {formatMoney(item.unitPrice)}
             <Pencil className="h-3 w-3" />
           </button>
         ) : (
-          formatMoney(item.unitPrice * (item.unitMultiplier || 1))
+          formatMoney(item.unitPrice)
         )}
       </td>
       <td className="whitespace-nowrap py-1.5 px-2 text-center text-[15px] font-black tabular-nums text-slate-900">

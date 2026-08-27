@@ -264,10 +264,12 @@ export default function ReconciliationModal({
                       <input
                         type="number"
                         min={0}
+                        step="0.001"
+                        inputMode="decimal"
                         value={line.receivedQty}
                         onChange={(e) =>
                           updateLine(line.poItemId, {
-                            receivedQty: Math.max(0, parseInt(e.target.value, 10) || 0),
+                            receivedQty: Math.max(0, parseFloat(e.target.value) || 0),
                           })
                         }
                         className={`w-full rounded-lg border bg-white px-2 py-2 text-sm font-bold tabular-nums outline-none focus:border-primary ${

@@ -353,8 +353,9 @@ async function recordSalesInvoiceLedger(
     const barcode = text(item.barcode);
     const meta = barcodeMeta.get(barcode);
     const qty = Number.isFinite(item.qty) ? item.qty : 0;
-    const unitPrice = money(item.unitPrice);
-    const lineSubtotal = round2(qty * unitPrice);
+    const multiplier = meta?.multiplier ?? 1;
+    const unitPricePerPiece = round2(money(item.unitPrice) / multiplier);
+    const lineSubtotal = round2(qty * unitPricePerPiece);
     const fiscalLine = fiscal.lines[index];
     const lineDiscount = round2(money(item.discount) + (fiscalLine?.invoiceDiscount ?? 0));
     const lineTotal = fiscalLine?.gross ?? money(item.lineTotal);
@@ -375,7 +376,7 @@ async function recordSalesInvoiceLedger(
       unit_name: text(item.unitName),
       qty,
       multiplier: meta?.multiplier ?? 1,
-      unit_price: unitPrice,
+      unit_price: unitPricePerPiece,
       line_subtotal: lineSubtotal,
       line_discount: lineDiscount,
       line_total: lineTotal,

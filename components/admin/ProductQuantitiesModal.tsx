@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Barcode, Search, X, Package, ScanLine } from "lucide-react";
 import { ModalShell } from "@/components/ui/ModalShell";
 import { formatMoney } from "@/lib/format";
@@ -54,9 +54,41 @@ export default function ProductQuantitiesModal({
 
   const inputRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
-  const [resolved, setResolved] = useState<ResolvedProduct | null>(null);
+  const [resolvedSeed, setResolved] = useState<ResolvedProduct | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [history, setHistory] = useState<ScanHistoryItem[]>([]);
+
+  const resolved = useMemo<ResolvedProduct | null>(() => {
+    if (!resolvedSeed) return null;
+    const product = products[resolvedSeed.productId];
+    if (!product) return null;
+
+    const variants: ResolvedVariant[] = Object.values(barcodes)
+      .filter(
+        (entry) =>
+          entry.productId === resolvedSeed.productId &&
+          typeof entry.totalStock === "number",
+      )
+      .map((entry) => ({
+        barcode: entry.barcode,
+        variantLabel: entry.variantLabel || "أساسي",
+        totalStock: entry.totalStock ?? 0,
+        price: entry.price,
+        costPrice: entry.costPrice,
+      }));
+
+    return {
+      ...resolvedSeed,
+      productName: product.name,
+      baseUnit: product.baseUnit,
+      isWeighed: product.isWeighed,
+      totalStock: product.totalStock ?? 0,
+      costPrice: product.costPrice,
+      sellingPrice: product.price,
+      units: productUnits[resolvedSeed.productId] ?? [],
+      variants: variants.length > 0 ? variants : resolvedSeed.variants,
+    };
+  }, [resolvedSeed, products, barcodes, productUnits]);
 
   // Auto-focus the input whenever the modal opens or a scan resolves.
   const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -87,7 +119,7 @@ export default function ProductQuantitiesModal({
         // Collect ALL variant barcodes for this parent product.
         const variantList: ResolvedVariant[] = [];
         for (const bc of Object.values(barcodes)) {
-          if (bc.productId === pid) {
+          if (bc.productId === pid && typeof bc.totalStock === "number") {
             variantList.push({
               barcode: bc.barcode,
               variantLabel: bc.variantLabel || "أساسي",
@@ -138,7 +170,7 @@ export default function ProductQuantitiesModal({
         const pid = match.id;
         const variantList: ResolvedVariant[] = [];
         for (const bc of Object.values(barcodes)) {
-          if (bc.productId === pid) {
+          if (bc.productId === pid && typeof bc.totalStock === "number") {
             variantList.push({
               barcode: bc.barcode,
               variantLabel: bc.variantLabel || "أساسي",

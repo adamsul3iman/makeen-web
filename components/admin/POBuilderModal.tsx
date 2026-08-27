@@ -20,6 +20,7 @@ import {
   type POBuilderVariant,
 } from "@/lib/inventoryClient";
 import { normalizeArabicText } from "@/lib/arabic";
+import { normalizePoUuidReference } from "@/lib/uuid";
 import type { LocalUnit } from "@/types/pos.types";
 
 // ---------------------------------------------------------------------------
@@ -233,9 +234,9 @@ export default function POBuilderModal({
         newItems.push({
           productId: product.id,
           productName: product.name,
-          variantId: m.variant.variantId || null,
+          variantId: normalizePoUuidReference(m.variant.variantId, "variant"),
           variantLabel: m.variant.variantLabel,
-          unitId: m.unit.id === "_base" ? null : m.unit.id,
+          unitId: m.unit.id === "_base" ? null : normalizePoUuidReference(m.unit.id, "unit"),
           unitName: m.unit.unitName,
           unitMultiplier: m.unit.qtyMultiplier,
           quantity: qty * m.unit.qtyMultiplier,

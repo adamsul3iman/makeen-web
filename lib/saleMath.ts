@@ -215,6 +215,6 @@ export function withB2BMarkup(items: SaleItem[], markupPct: number): SaleItem[] 
   const factor = 1 + markupPct / 100;
   return items.map((item) => {
     const unitPrice = roundMoney(item.unitPrice * factor);
-    return { ...item, unitPrice, lineTotal: roundMoney(unitPrice * item.qty) };
+    return { ...item, unitPrice, lineTotal: roundMoney((item.qty / (item.unitMultiplier || 1)) * unitPrice) };
   });
 }

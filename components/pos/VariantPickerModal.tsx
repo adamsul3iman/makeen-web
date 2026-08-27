@@ -101,6 +101,7 @@ export default function VariantPickerModal() {
       productId: string;
       name: string;
       barcode: string;
+      variantId: string;
       variantLabel: string;
       unitName: string;
       unitMultiplier: number;
@@ -117,6 +118,7 @@ export default function VariantPickerModal() {
         productId,
         name: product.name,
         barcode: "",
+        variantId: m.variantId,
         variantLabel: m.variantLabel,
         unitName: m.unitName,
         unitMultiplier: m.unitMultiplier,

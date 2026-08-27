@@ -404,8 +404,10 @@ function parseCatalogProductPayload(body: unknown): CatalogProductPayload {
         price: asNum(r.price),
         wholesalePrice: asNum(r.wholesalePrice),
         isDefaultSale: typeof r.isDefaultSale === "boolean" ? r.isDefaultSale : false,
-        // Opening stock for THIS barcode (QA redesign: per-color entry).
-        initialStock: Math.max(0, asNum(r.initialStock)),
+        // Opening stock for THIS barcode. The UI may send either `initialStock`
+        // (the canonical field) or `stock` (legacy / quick-add modal). Accept
+        // both to avoid a silent zero when the modal uses the wrong key.
+        initialStock: Math.max(0, asNum(r.initialStock) || asNum(r.stock)),
       };
     })
     .filter((r) => r.barcode.length > 0);

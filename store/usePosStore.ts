@@ -62,6 +62,7 @@ import { loadDeviceHardwareSettings } from "@/lib/deviceHardware";
 import { pushAudit } from "@/lib/audit";
 import { requestPersistentStorage } from "@/lib/storageGuard";
 import { newUuid } from "@/lib/uuid";
+import { projectSaleStock, resolveStockVariantId } from "@/lib/localStockProjection";
 import { getTenantStoreId, setTenantStoreId } from "@/lib/tenantClient";
 import { fetchCatalogStamp, rememberCatalogStamp } from "@/lib/catalogInvalidation";
 import { fetchCatalogSnapshot, fetchCustomersPayload } from "@/lib/clientCatalog";
@@ -489,7 +490,7 @@ interface PosStoreActions {
   closeSmartSearch: () => void;
   openVariantPicker: (productId: string) => void;
   closeVariantPicker: () => void;
-  addVariantMatrixItems: (rows: Array<{ productId: string; name: string; barcode: string; variantLabel: string; unitName: string; unitMultiplier: number; unitId?: string; unitPrice: number; qty: number; taxPercent?: number; taxIncluded?: boolean }>) => void;
+  addVariantMatrixItems: (rows: Array<{ productId: string; name: string; barcode: string; variantId: string; variantLabel: string; unitName: string; unitMultiplier: number; unitId?: string; unitPrice: number; qty: number; taxPercent?: number; taxIncluded?: boolean }>) => void;
   openAdminHub: () => void;
   closeAdminHub: () => void;
   toggleSmartSearch: () => void;
@@ -895,7 +896,8 @@ function discountMoney(input: DiscountInput, gross: number): number {
  * (percent re-derives from discountPct; fixed stays but clamps to the gross).
  */
 function applyQtyToLine(item: SaleItem, qty: number): SaleItem {
-  const gross = round2(qty * item.unitPrice);
+  const mult = item.unitMultiplier || 1;
+  const gross = round2((qty / mult) * item.unitPrice);
   if (item.discountPct) {
     const discount = round2((Math.abs(gross) * item.discountPct) / 100);
     return { ...item, qty, discount, lineTotal: round2(gross - discount) };
@@ -987,7 +989,7 @@ function addLine(
     };
     return items.map((it, i) => (i !== existing ? it : applyQtyToLine(merged, nextQty)));
   }
-  return [...items, { ...line, lineTotal: round2(delta * line.unitPrice) }];
+  return [...items, { ...line, lineTotal: round2((delta / (line.unitMultiplier || 1)) * line.unitPrice) }];
 }
 
 function computeTotals(
@@ -1593,6 +1595,11 @@ export const usePosStore = create<PosStore>()(
             ? scannedMeta.qtyMultiplier
             : 1;
         const product = get().products[lookup.product_id];
+        const variantId = resolveStockVariantId(get().barcodes, lookup.product_id, {
+          barcode,
+          variantId: scannedMeta?.unitId ? undefined : lookup.variantId,
+          variantLabel: lookup.variantLabel ?? scannedMeta?.variantLabel,
+        });
         const baseQty = sign * unitMultiplier;
         const items = addLine(
           get().items,
@@ -1600,12 +1607,13 @@ export const usePosStore = create<PosStore>()(
             productId: lookup.product_id,
             name: lookup.name,
             barcode,
+            variantId: variantId ?? undefined,
             variantLabel: lookup.variantLabel ?? scannedMeta?.variantLabel,
             qty: baseQty,
             unitName,
             unitMultiplier,
             unitId: scannedMeta?.unitId,
-            unitPrice: lookup.price / unitMultiplier,
+            unitPrice: lookup.price,
             taxPercent: product?.taxPercent ?? effectiveTaxPercent(get().currentStore),
             taxIncluded: product?.taxIncluded ?? false,
           },
@@ -1628,13 +1636,18 @@ export const usePosStore = create<PosStore>()(
         }
 
         const sign = get().isReturnMode ? -1 : 1;
-        const unitPrice = key.price ?? 0;
         const code = key.barcode ?? "";
         const keyMeta = code ? get().barcodes[code] : undefined;
+        const unitPrice = keyMeta?.price ?? key.price ?? 0;
         const keyMultiplier =
           typeof keyMeta?.qtyMultiplier === "number" && keyMeta.qtyMultiplier > 0
             ? keyMeta.qtyMultiplier
             : 1;
+        const variantId = resolveStockVariantId(get().barcodes, key.productId, {
+          barcode: code,
+          variantId: keyMeta?.unitId ? undefined : keyMeta?.variantId,
+          variantLabel: key.variantLabel,
+        });
         const baseQty = sign * keyMultiplier;
         const items = addLine(
           get().items,
@@ -1642,12 +1655,13 @@ export const usePosStore = create<PosStore>()(
             productId: key.productId,
             name: key.label,
             barcode: code,
+            variantId: variantId ?? undefined,
             variantLabel: key.variantLabel,
             qty: baseQty,
             unitName: key.unitName ?? "",
             unitMultiplier: keyMultiplier,
             unitId: keyMeta?.unitId,
-            unitPrice: unitPrice / keyMultiplier,
+            unitPrice: unitPrice,
             taxPercent: key.taxPercent ?? get().products[key.productId]?.taxPercent ?? effectiveTaxPercent(get().currentStore),
             taxIncluded: key.taxIncluded ?? get().products[key.productId]?.taxIncluded ?? false,
           },
@@ -1671,6 +1685,7 @@ export const usePosStore = create<PosStore>()(
         let unitName = product.baseUnit ?? "";
         let unitMultiplier = 1;
         let unitId: string | undefined;
+        let variantId: string | undefined;
         let variantLabel = "";
         if (code) {
           const meta = get().barcodes[code];
@@ -1682,6 +1697,7 @@ export const usePosStore = create<PosStore>()(
                 ? meta.qtyMultiplier
                 : 1;
             unitId = meta.unitId;
+            variantId = meta.unitId ? undefined : meta.variantId;
             variantLabel = meta.variantLabel ?? "";
           }
         }
@@ -1701,6 +1717,11 @@ export const usePosStore = create<PosStore>()(
         }
 
         const sign = get().isReturnMode ? -1 : 1;
+        variantId = resolveStockVariantId(get().barcodes, productId, {
+          barcode: code,
+          variantId,
+          variantLabel,
+        }) ?? undefined;
         const q = Math.max(1, Math.round(qty || 1)) * sign * unitMultiplier;
         const items = addLine(
           get().items,
@@ -1708,12 +1729,13 @@ export const usePosStore = create<PosStore>()(
             productId,
             name: product.name,
             barcode: code,
+            variantId,
             variantLabel,
             qty: q,
             unitName,
             unitMultiplier,
             unitId,
-            unitPrice: unitPrice / unitMultiplier,
+            unitPrice: unitPrice,
             taxPercent: product.taxPercent ?? effectiveTaxPercent(get().currentStore),
             taxIncluded: product.taxIncluded ?? false,
           },
@@ -1947,24 +1969,22 @@ export const usePosStore = create<PosStore>()(
             ? unit.qtyMultiplier
             : 1;
 
-        // Auto-scale: calculate the current display quantity in the OLD unit,
-        // then express it in the NEW unit. When the new unit has a higher
-        // multiplier (e.g. piece → carton), this prevents the display from
-        // showing "0" by automatically bumping the base qty to match.
+        // Scale the underlying base qty so the displayed quantity stays
+        // unchanged after the unit switch.  E.g. 1 Piece (1 base) →
+        // Carton (×12) becomes 12 base pieces, display still reads "1".
         const displayQty = Math.max(1, Math.round(item.qty / fromMultiplier));
-        const newQty = displayQty * toMultiplier;
+        const newBaseQty = displayQty * toMultiplier;
 
         const next: SaleItem = {
           ...item,
-          qty: newQty,
+          qty: newBaseQty,
           unitName: unit.unitName,
           unitMultiplier: toMultiplier,
           unitId: unit.id,
-          unitPrice: unit.sellingPrice / toMultiplier,
+          unitPrice: unit.sellingPrice,
         };
-        // Reuse the qty-change math so line discounts re-derive identically.
         const items = get().items.map((it, i) =>
-          i !== index ? it : applyQtyToLine(next, newQty),
+          i !== index ? it : applyQtyToLine(next, newBaseQty),
         );
         set({ items, totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee, get().b2bMarkupPct) });
       },
@@ -2100,6 +2120,17 @@ export const usePosStore = create<PosStore>()(
           // cashier re-rings the sale and both copies mirror (duplicated
           // revenue + double stock deduction).
           await enqueueSync(record);
+
+          // The durable queue record is now the source of truth. Mirror the
+          // same base-piece deltas into the local catalog immediately so all
+          // open inspectors and O(1) barcode lookups react before sync.
+          const catalog = get();
+          set(projectSaleStock(
+            catalog.products,
+            catalog.barcodes,
+            catalog.barcodeIndex,
+            saleItems,
+          ));
 
           // Phase 2: if this checkout settles a restored parked order, close
           // it against pos_orders (best-effort mirror; pendingSync covers
@@ -2609,7 +2640,8 @@ export const usePosStore = create<PosStore>()(
               productId: r.productId,
               name: r.name,
               barcode: syntheticBarcode,
-              unitPrice: r.unitPrice / r.unitMultiplier,
+              variantId: r.variantId,
+              unitPrice: r.unitPrice,
               qty: baseQty,
               discount: 0,
               taxPercent: r.taxPercent ?? effectiveTaxPercent(state.currentStore),
@@ -2852,9 +2884,9 @@ export const usePosStore = create<PosStore>()(
             set({ notice: { message: "لا يمكن خصم سطر سالب (مرتجع)", tone: "error" } });
             return;
           }
-          gross = item.qty * item.unitPrice;
+          gross = (item.qty / (item.unitMultiplier || 1)) * item.unitPrice;
         } else {
-          gross = items.reduce((s, it) => s + it.qty * it.unitPrice, 0);
+          gross = items.reduce((s, it) => s + (it.qty / (it.unitMultiplier || 1)) * it.unitPrice, 0);
           if (gross <= 0) {
             set({ notice: { message: "لا يمكن خصم فاتورة مرتجع", tone: "error" } });
             return;
@@ -2894,7 +2926,7 @@ export const usePosStore = create<PosStore>()(
           const idx = input.index ?? -1;
           const item = get().items[idx];
           if (!item) return;
-          const gross = item.qty * item.unitPrice;
+          const gross = (item.qty / (item.unitMultiplier || 1)) * item.unitPrice;
           const discount = discountMoney(input, gross);
           const items = get().items.map((it, i) =>
             i !== idx
@@ -2919,7 +2951,7 @@ export const usePosStore = create<PosStore>()(
       clearDiscount: () => {
         const items = get().items.map((it) =>
           it.discount || it.discountPct
-            ? { ...it, discount: 0, discountPct: undefined, lineTotal: round2(it.qty * it.unitPrice) }
+            ? { ...it, discount: 0, discountPct: undefined, lineTotal: round2((it.qty / (it.unitMultiplier || 1)) * it.unitPrice) }
             : it,
         );
         set({
@@ -3990,10 +4022,10 @@ export const usePosStore = create<PosStore>()(
         }
         const item = get().items[index];
         if (!item) return;
-        // `price` from the admin modal is per display unit; convert to per base piece.
+        // `price` from the admin modal is per display unit — store it directly
+        // as unitPrice (new contract: unitPrice = price per selected unit).
         const mult = item.unitMultiplier || 1;
-        const perBasePiece = price / mult;
-        const gross = round2(item.qty * perBasePiece);
+        const gross = round2((item.qty / mult) * price);
         const previousPrice = item.unitPrice;
         let discount = 0;
         if (item.discountPct) {
@@ -4006,7 +4038,7 @@ export const usePosStore = create<PosStore>()(
             ? it
             : {
                 ...it,
-                unitPrice: perBasePiece,
+                unitPrice: round2(price),
                 discount,
                 lineTotal: round2(gross - discount),
               },
@@ -4201,7 +4233,7 @@ export const usePosStore = create<PosStore>()(
         }
         const price = entry.unitPrice;
         const previousPrice = item.unitPrice;
-        const gross = round2(item.qty * price);
+        const gross = round2((item.qty / (item.unitMultiplier || 1)) * price);
         let discount = 0;
         if (item.discountPct) {
           discount = round2((Math.abs(gross) * item.discountPct) / 100);
@@ -4228,7 +4260,7 @@ export const usePosStore = create<PosStore>()(
             get().b2bMarkupPct,
           ),
           notice: {
-            message: `تم تطبيق آخر سعر للزبون: ${round2(price * (item.unitMultiplier || 1)).toFixed(2)}`,
+            message: `تم تطبيق آخر سعر للزبون: ${round2(price).toFixed(2)}`,
             tone: "success",
           },
         });

@@ -1,5 +1,6 @@
 import { getSupabaseBrowser } from "./supabaseBrowser";
 import { getTenantStoreId } from "./tenantClient";
+import { normalizePoUuidReference } from "./uuid";
 
 /**
  * Store-scoped procurement ledger (purchase orders + supplier pickers), queried
@@ -154,7 +155,9 @@ function parsePoItems(input: unknown): Array<{
   }> = [];
   for (const it of list) {
     const productId = typeof it.product_id === "string" ? it.product_id.trim() : "";
-    const quantity = typeof it.quantity === "number" ? Math.floor(it.quantity) : 0;
+    const quantity = typeof it.quantity === "number" && Number.isFinite(it.quantity) && it.quantity > 0
+      ? Math.round(it.quantity * 1000) / 1000
+      : 0;
     const unitCost = typeof it.unit_cost === "number" && Number.isFinite(it.unit_cost) ? it.unit_cost : 0;
     const newSellingPrice =
       typeof it.new_selling_price === "number" && Number.isFinite(it.new_selling_price) && it.new_selling_price > 0
@@ -163,8 +166,8 @@ function parsePoItems(input: unknown): Array<{
     if (!productId || quantity <= 0 || unitCost < 0) {
       throw new Error("بنود أمر شراء غير صالحة");
     }
-    const variantId = typeof it.variant_id === "string" && it.variant_id.trim() ? it.variant_id.trim() : null;
-    const unitId = typeof it.unit_id === "string" && it.unit_id.trim() ? it.unit_id.trim() : null;
+    const variantId = normalizePoUuidReference(it.variant_id, "variant");
+    const unitId = normalizePoUuidReference(it.unit_id, "unit");
     const qtyInUnit = typeof it.qty_in_unit === "number" && Number.isFinite(it.qty_in_unit) && it.qty_in_unit > 0
       ? round2(it.qty_in_unit)
       : null;

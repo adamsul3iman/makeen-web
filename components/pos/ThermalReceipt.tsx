@@ -374,12 +374,12 @@ export default function ThermalReceipt({
                         {template.showLineNumbers ? `${i + 1}. ` : ""}
                         {formatProductDisplayName(item.name, item.variantLabel)}
                       </p>
-                      {!fullItemColumns && <p className={`${META} ${MONEY} mt-0.5`}>سعر الوحدة {formatMoney(item.unitPrice * (item.unitMultiplier || 1))}</p>}
+                      {!fullItemColumns && <p className={`${META} ${MONEY} mt-0.5`}>سعر الوحدة {formatMoney(item.unitPrice)}</p>}
                       {template.showItemDiscount && discountHint && <p className={`${META} mt-0.5`}>{discountHint}</p>}
                       {template.showItemTax && <p className={`${META} mt-0.5`}>{taxHint}</p>}
                       {template.showItemBarcode && item.barcode && <p dir="ltr" className={`${META} mt-0.5`}>{item.barcode}</p>}
                     </td>
-                    {fullItemColumns && <td dir="ltr" className={`${template.itemStyle === "grid" ? CELL : ""} ${itemPad} px-0.5 text-center align-top text-[10px] font-bold ${MONEY}`}>{formatMoney(item.unitPrice * (item.unitMultiplier || 1))}</td>}
+                    {fullItemColumns && <td dir="ltr" className={`${template.itemStyle === "grid" ? CELL : ""} ${itemPad} px-0.5 text-center align-top text-[10px] font-bold ${MONEY}`}>{formatMoney(item.unitPrice)}</td>}
                     <td dir="ltr" className={`${template.itemStyle === "grid" ? CELL : ""} ${itemPad} px-0.5 text-center align-top text-[11px] font-black ${MONEY}`}>
                       {Math.round(item.qty / (item.unitMultiplier || 1))}
                       {template.showItemUnit && <span dir="rtl" className="mt-0.5 block text-[8px] font-bold">{item.unitName}</span>}
