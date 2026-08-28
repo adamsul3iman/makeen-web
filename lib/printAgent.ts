@@ -21,7 +21,7 @@ interface ElectronPrintAPI {
     printerName?: string;
     printerKind?: PrinterKind;
   }): Promise<{ success: boolean; error?: string }>;
-  getPrinters(): Promise<Array<{ name: string }>>;
+  getPrinters(): Promise<Array<{ name: string; isDefault?: boolean }>>;
 }
 
 declare global {
@@ -48,6 +48,7 @@ async function printViaElectron(
   shift: ShiftAudit | undefined,
   jobType: PrintJobKind,
   printerKind?: PrinterKind,
+  printerName?: string,
 ): Promise<boolean> {
   if (!isElectron() || !window.electronAPI) return false;
 
@@ -90,7 +91,7 @@ async function printViaElectron(
   try {
     const result = await window.electronAPI.printSilent({
       html: fullHtml,
-      printerName: undefined,
+      printerName,
       printerKind,
     });
     if (!result.success && result.error) {
@@ -190,6 +191,87 @@ export function captureReceiptHtml(): string | null {
   ].join("\n");
 }
 
+// ── Browser print (async-safe, via hidden iframe) ─────────────────
+
+let printIframe: HTMLIFrameElement | null = null;
+let printIframeSeq = 0;
+
+/**
+ * Print rendered HTML via a hidden same-origin iframe. This is the robust
+ * browser fallback: it does NOT depend on window.print() running inside a
+ * synchronous user gesture. Chrome blocks window.print() once the originating
+ * gesture is consumed by awaits/timers (which is exactly what checkout does),
+ * so we render the receipt in an isolated iframe and call print() on its own
+ * window instead. Returns true once the iframe handed off to the print dialog.
+ */
+export function printInBrowser(html: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (typeof document === "undefined") return resolve(false);
+
+    try {
+      const seq = ++printIframeSeq;
+      const iframe = document.createElement("iframe");
+      printIframe = iframe;
+      iframe.setAttribute("aria-hidden", "true");
+      iframe.style.position = "fixed";
+      iframe.style.right = "0";
+      iframe.style.bottom = "0";
+      iframe.style.width = "0";
+      iframe.style.height = "0";
+      iframe.style.border = "0";
+      iframe.style.visibility = "hidden";
+      document.body.appendChild(iframe);
+
+      const contentDoc = iframe.contentDocument || iframe.contentWindow?.document;
+      if (!contentDoc || !iframe.contentWindow) {
+        iframe.remove();
+        printIframe = null;
+        return resolve(false);
+      }
+
+      contentDoc.open();
+      contentDoc.write(html);
+      contentDoc.close();
+
+      // Give the iframe document a beat to lay out before calling print.
+      const finish = () => {
+        try {
+          iframe.contentWindow?.print();
+        } catch {
+          // Iframe print is not reliable here — fall back to a direct call.
+          try {
+            window.print();
+          } catch {
+            /* both paths rejected; surface as failure */
+          }
+        } finally {
+          if (printIframe === iframe) printIframe = null;
+          // Keep the iframe off-screen until the dialog is dismissed, then
+          // remove it so it never leaks into layout/accessibility.
+          setTimeout(() => iframe.remove(), 1000);
+        }
+      };
+
+      if (contentDoc.readyState === "complete") {
+        finish();
+      } else {
+        // Older WebKit/Blink can drop the dialog if print() is deferred too
+        // far; a RAF + microtask keeps us as close to the gesture as possible.
+        requestAnimationFrame(() => requestAnimationFrame(finish));
+        if (seq === printIframeSeq) setTimeout(finish, 300);
+      }
+      resolve(true);
+    } catch {
+      try {
+        window.print();
+      } catch {
+        /* ignored */
+      }
+      resolve(false);
+    }
+  });
+}
+
 // ── Submit print job ───────────────────────────────────────────────
 
 export interface PrintJobRequest {
@@ -267,22 +349,35 @@ export interface PrintOptions {
   renderedHtml?: string;
   /** Override printer kind (auto-detected from jobType if omitted). */
   printerKind?: PrinterKind;
+  /** Explicit printer name (as returned by getPrinters()) to route to.
+   *  Mirrors the Devices-page selection; empty means auto-resolution. */
+  printerName?: string;
   /** Called when the agent successfully accepted the job (no fallback needed). */
   onAgentSuccess?: () => void;
-  /** Called when falling back to window.print(). */
-  onFallback?: () => void;
+  /** Called when falling back to browser printing. Receives the rendered
+   *  HTML when available (RECEIPT/INVOICE), so the caller can open the dialog
+   *  via the async-safe hidden-iframe printer; null otherwise (report flows
+   *  that print a live DOM element). */
+  onFallback?: (renderedHtml?: string) => void;
 }
 
 /**
  * Smart print — three-tier strategy:
  *   1. Electron IPC silent print (no dialog, direct to thermal printer)
  *   2. Standalone print agent via Supabase print_jobs table
- *   3. Fallback: window.print() (native dialog) — BROWSER ONLY.
+ *   3. Fallback: window.print() (native dialog) — ALWAYS in a plain browser.
  *
- * Returns true if a silent path handled it (caller should NOT call window.print()).
- * Inside Electron the fallback tier is suppressed: a native dialog freezes a
- * checkout lane, so a failed silent print surfaces as an error notice instead
- * (callers key off the `false` return while isElectron() is true).
+ * Returns true if a silent path handled it AND no further printing is needed
+ * (i.e. the job reached a real spooler). Returns false in a plain browser so
+ * callers can show the native dialog.
+ *
+ * BROWSER POLICY (decision): a print_jobs queue INSERT is meaningless without
+ * a spooler draining it, so it is never treated as "printed". In a non-Electron
+ * browser this function ALWAYS falls through to the fallback tier (native
+ * window.print()) so the receipt is actually produced. Inside Electron a failed
+ * silent print must surface as an in-app notice instead of a native dialog
+ * (which would block the checkout lane), so the fallback tier is suppressed
+ * there — callers key off the false return while isElectron() is true.
  */
 export async function smartPrint(options: PrintOptions): Promise<boolean> {
   // ── Tier 1: Electron silent print ────────────────────────────────
@@ -292,6 +387,7 @@ export async function smartPrint(options: PrintOptions): Promise<boolean> {
       options.shift,
       options.jobType,
       options.printerKind,
+      options.printerName,
     ).catch(() => false);
     if (ok) {
       options.onAgentSuccess?.();
@@ -300,9 +396,13 @@ export async function smartPrint(options: PrintOptions): Promise<boolean> {
   }
 
   // ── Tier 2: Supabase print agent ────────────────────────────────
+  // Only treated as "printed" inside Electron (a true local spooler). In a
+  // plain browser a print_jobs INSERT does not mean anything actually printed
+  // (the localhost:9100 health probe can be a warm 30s cache, not a live
+  // spooler), so it must never suppress the native dialog.
   const available = await isPrintAgentAvailable();
 
-  if (available) {
+  if (isElectron() && available) {
     try {
       const result = await submitPrintJob({
         terminal_id: options.terminalId,
@@ -321,12 +421,13 @@ export async function smartPrint(options: PrintOptions): Promise<boolean> {
     }
   }
 
-  // ── Tier 3: window.print() fallback (browser only) ──────────────
-  // Hard constraint: never inside the Electron wrapper. The native
-  // dialog blocks the cashier until dismissed; a failed silent print
-  // must surface as an in-app notice instead.
-  if (!isElectron()) {
-    options.onFallback?.();
-  }
-  return false;
+  // ── Tier 3: browser fallback (ALWAYS reached in a plain browser) ──
+  // In a non-Electron browser this is the only guaranteed way to produce
+  // output. We use the async-safe iframe printer when we have rendered HTML
+  // (bypasses Chrome's user-gesture block on window.print() after awaits);
+  // otherwise delegate to the caller's onFallback (report flows that render
+  // their own live DOM and dialogs). Inside Electron the fallback stays
+  // suppressed so the cashier lane is never frozen by a native dialog.
+  if (options.onFallback) options.onFallback(options.renderedHtml);
+  return !isElectron();
 }

@@ -12,6 +12,10 @@ export interface DeviceHardwareSettings {
   scannerSubmitKey: ScannerSubmitKey;
   soundEnabled: boolean;
   soundVolume: number;
+  /** Name of the OS printer (from electron getPrinters) used for receipts.
+   *  Empty string means the app auto-resolves by device kind. Stored per
+   *  terminal in localStorage alongside the other hardware settings. */
+  receiptPrinterName?: string;
 }
 
 export const DEFAULT_DEVICE_HARDWARE_SETTINGS: DeviceHardwareSettings = {
@@ -23,6 +27,7 @@ export const DEFAULT_DEVICE_HARDWARE_SETTINGS: DeviceHardwareSettings = {
   scannerSubmitKey: "ENTER_OR_TAB",
   soundEnabled: true,
   soundVolume: 60,
+  receiptPrinterName: "",
 };
 
 export const DEVICE_HARDWARE_EVENT = "pos:device-hardware";
@@ -82,6 +87,10 @@ export function normalizeDeviceHardwareSettings(value: unknown): DeviceHardwareS
       typeof input.soundVolume === "number" && Number.isFinite(input.soundVolume)
         ? Math.round(Math.min(100, Math.max(0, input.soundVolume)))
         : DEFAULT_DEVICE_HARDWARE_SETTINGS.soundVolume,
+    receiptPrinterName:
+      typeof input.receiptPrinterName === "string"
+        ? input.receiptPrinterName
+        : DEFAULT_DEVICE_HARDWARE_SETTINGS.receiptPrinterName,
   };
 }
 

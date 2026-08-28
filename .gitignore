@@ -64,3 +64,5 @@ dist-electron-final/
 
 # Python Environment
 .venv/
+playwright-report/
+test-results/

@@ -30,6 +30,7 @@
     "verify:shift-recovery": "node --env-file=.env tests/shift.recovery.integration.mjs",
     "verify": "node tests/run.mjs",
     "verify:e2e": "node scripts/e2e_lifecycle_audit.mjs",
+    "verify:print-fallback": "playwright test tests/e2e/print-fallback.spec.ts",
     "deploy:phase5": "tsx scripts/deploy_phase5.ts",
     "deploy:phase5:dry": "tsx scripts/deploy_phase5.ts --dry-run",
     "deploy:phase5:local": "tsx scripts/deploy_phase5.ts --local-only",
@@ -72,6 +73,7 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4",
     "@types/jsbarcode": "^3.11.4",
     "@types/node": "^20",

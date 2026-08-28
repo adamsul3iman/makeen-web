@@ -71,7 +71,7 @@ import {
   getStoragePressure,
   type StoragePressureDetail,
 } from "@/lib/storageGuard";
-import { smartPrint, captureReceiptHtml, isElectron } from "@/lib/printAgent";
+import { smartPrint, captureReceiptHtml, isElectron, printInBrowser } from "@/lib/printAgent";
 
 export default function PosLayout() {
   const router = useRouter();
@@ -314,36 +314,41 @@ export default function PosLayout() {
   }, [modalOpen]);
 
   const printReceipt = useCallback(() => {
-    // Silent printing only. There is deliberately NO window.print() path
-    // here: the native dialog blocks the checkout lane, and inside the
-    // Electron wrapper it is forbidden outright (smartPrint suppresses its
-    // fallback tier there too). A failed silent print surfaces as a notice.
+    // Silent printing with a robust browser fallback. In a plain browser
+    // smartPrint ALWAYS reaches the fallback (a print_jobs queue insert is
+    // never treated as "printed"), and we print via a hidden iframe so the
+    // dialog opens even though the original click gesture was consumed by the
+    // checkout flow's awaits (Chrome blocks window.print() in that case).
+    // Inside Electron the fallback stays suppressed and a failed silent print
+    // surfaces as a notice (no dialog may block a checkout lane).
     if (!activeTerminalId || !lastCompletedInvoice) return;
     const html = captureReceiptHtml();
     if (!html) return;
+
     void smartPrint({
       terminalId: activeTerminalId,
       jobType: "RECEIPT",
       renderedHtml: html,
       printerKind: "THERMAL",
+      printerName: hardwareSettings.receiptPrinterName || undefined,
+      onFallback: (fallbackHtml) => {
+        if (fallbackHtml) void printInBrowser(fallbackHtml);
+        else window.print();
+      },
     }).then((printed) => {
       if (printed) return;
+      // Every silent tier failed. Inside the wrapper no dialog may appear —
+      // tell the cashier the receipt did not print instead.
       if (isElectron()) {
-        // Every silent tier failed inside the wrapper — the cashier must
-        // know the receipt did not print (no dialog may appear here).
         usePosStore.setState({
           notice: {
             message: "تم البيع، لكن فشلت الطباعة الصامتة — تحقق من الطابعة ثم أعد الطباعة",
             tone: "error",
           },
         });
-        return;
       }
-      // Plain browser without Electron/agent: the native dialog is the
-      // only remaining way to produce the receipt.
-      requestAnimationFrame(() => window.print());
     });
-  }, [activeTerminalId, lastCompletedInvoice]);
+  }, [activeTerminalId, lastCompletedInvoice, hardwareSettings.receiptPrinterName]);
 
   // Settle local hardware after a completed sale. The drawer call never opens
   // a chooser here; it only uses a port explicitly authorized in Devices.
@@ -407,7 +412,7 @@ export default function PosLayout() {
 
   const noticeToast = notice ? (
     <div
-      className={`animate-pos-toast absolute start-1/2 top-4 z-[70] flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-2 rounded-xl px-4 py-3 text-sm font-extrabold leading-6 shadow-overlay ring-1 ring-surface/20 ${
+      className={`animate-pos-toast fixed left-1/2 top-4 z-[90] flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-2 rounded-xl px-4 py-3 text-sm font-extrabold leading-6 shadow-overlay ring-1 ring-surface/20 ${
         isError
           ? "bg-destructive text-destructive-foreground"
           : "bg-success text-success-foreground"

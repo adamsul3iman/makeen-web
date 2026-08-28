@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Barcode,
   Cable,
@@ -31,6 +31,7 @@ import { useDeviceHardware } from "@/hooks/useDeviceHardware";
 import { usePosStore } from "@/store/usePosStore";
 import type { CompletedInvoice } from "@/types/pos.types";
 import { playPosSound, type PosSoundCue } from "@/lib/posSound";
+import { captureReceiptHtml, isElectron, smartPrint } from "@/lib/printAgent";
 
 const BAUD_RATES: DeviceHardwareSettings["drawerBaudRate"][] = [
   9600,
@@ -153,6 +154,10 @@ export default function DevicesPage() {
   const [scannerInput, setScannerInput] = useState("");
   const [scannerResult, setScannerResult] = useState<{ code: string; duration: number } | null>(null);
   const scanStartedAt = useRef(0);
+  const [printers, setPrinters] = useState<Array<{ name: string; isDefault: boolean }>>([]);
+  const [printersLoading, setPrintersLoading] = useState(false);
+  const [printerMessage, setPrinterMessage] = useState("");
+  const [testPrintBusy, setTestPrintBusy] = useState(false);
 
   const testInvoice = useMemo<CompletedInvoice>(() => ({
     syncId: "TEST-RECEIPT-2026",
@@ -245,6 +250,63 @@ export default function DevicesPage() {
     void playPosSound(cue, settings.soundVolume);
   };
 
+  const refreshPrinters = useCallback(async () => {
+    if (!isElectron()) {
+      setPrinters([]);
+      setPrintersLoading(false);
+      return;
+    }
+    setPrintersLoading(true);
+    try {
+      const list = await window.electronAPI?.getPrinters();
+      setPrinters(
+        (list ?? []).map((p) => ({ name: p.name, isDefault: Boolean(p.isDefault) })),
+      );
+    } catch {
+      setPrinters([]);
+    } finally {
+      setPrintersLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    // Defer to a microtask so no setState runs synchronously inside the effect
+    // body (React lint guard) — the printer fetch itself is async anyway.
+    const id = requestAnimationFrame(() => void refreshPrinters());
+    return () => cancelAnimationFrame(id);
+  }, [refreshPrinters]);
+
+  const testPrint = async () => {
+    if (testPrintBusy) return;
+    setTestPrintBusy(true);
+    setPrinterMessage("");
+    if (isElectron()) {
+      const html = captureReceiptHtml();
+      if (!html) {
+        setPrinterMessage("تعذر التقاط الإيصال التجريبي من الصفحة");
+        setTestPrintBusy(false);
+        return;
+      }
+      const printed = await smartPrint({
+        terminalId: activeTerminalId ?? "",
+        jobType: "RECEIPT",
+        renderedHtml: html,
+        printerKind: "THERMAL",
+        printerName: settings.receiptPrinterName || undefined,
+      });
+      setPrinterMessage(
+        printed
+          ? "تم إرسال الإيصال التجريبي إلى الطابعة"
+          : "تعذر الطباعة الصامتة — تحقق من الطابعة ثم أعد المحاولة",
+      );
+    } else {
+      // Plain browser: native dialog is the only silent-free option.
+      setPrinterMessage("خارج تطبيق سطح المكتب تُطبع عبر نافذة المستعرض");
+      window.print();
+    }
+    setTestPrintBusy(false);
+  };
+
   return (
     <div className="mx-auto max-w-5xl space-y-5">
       <header className="flex flex-col gap-3 border-b border-border pb-5 sm:flex-row sm:items-end sm:justify-between">
@@ -286,6 +348,48 @@ export default function DevicesPage() {
             <p className="mt-2 flex items-center gap-2 text-sm font-bold text-green-700">
               <StatusDot ok /> الطباعة عبر نظام التشغيل جاهزة
             </p>
+            {isElectron() ? (
+              <div className="mt-4">
+                <div className="flex items-end gap-2">
+                  <label className="block min-w-0 flex-1 text-xs font-black text-muted">
+                    الطابعة المختارة
+                    <div className="relative mt-2">
+                      <select
+                        value={settings.receiptPrinterName ?? ""}
+                        onChange={(event) =>
+                          updateSettings({ receiptPrinterName: event.target.value })
+                        }
+                        className="h-10 w-full appearance-none rounded-lg border border-border bg-white px-3 text-sm font-black text-foreground"
+                      >
+                        <option value="">تلقائي (حسب نوع الطابعة)</option>
+                        {printers.map((p) => (
+                          <option key={p.name} value={p.name}>
+                            {p.name}
+                            {p.isDefault ? " (افتراضي)" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => void refreshPrinters()}
+                    disabled={printersLoading}
+                    className="inline-flex h-10 items-center gap-2 rounded-lg border border-border bg-white px-3 text-xs font-black text-muted hover:bg-surface-muted disabled:opacity-40"
+                  >
+                    <RotateCcw className="h-4 w-4" />
+                    تحديث
+                  </button>
+                </div>
+                <p className="mt-2 text-xs font-bold text-muted">
+                  {printersLoading
+                    ? "جاري جلب الطابعات…"
+                    : printers.length === 0
+                      ? "لم يتم العثور على طابعات مثبتة"
+                      : `تم العثور على ${printers.length} طابعة ملحقة بالنظام`}
+                </p>
+              </div>
+            ) : null}
           </div>
 
           <div className="grid w-full min-w-0 gap-4 sm:grid-cols-2 lg:max-w-[560px] lg:flex-1">
@@ -317,14 +421,18 @@ export default function DevicesPage() {
           </div>
         </div>
 
-        <div className="mt-4 flex justify-end border-t border-border pt-4">
+        <div className="mt-4 flex items-center justify-end gap-3 border-t border-border pt-4">
+          {printerMessage ? (
+            <span className="text-sm font-bold text-muted">{printerMessage}</span>
+          ) : null}
           <button
             type="button"
-            onClick={() => window.print()}
-            className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-900 px-4 text-sm font-black text-white hover:bg-slate-800"
+            disabled={testPrintBusy}
+            onClick={() => void testPrint()}
+            className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-900 px-4 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-40"
           >
             <Printer className="h-4 w-4" />
-            طباعة إيصال اختبار
+            {testPrintBusy ? "جاري الطباعة…" : "طباعة إيصال اختبار"}
           </button>
         </div>
       </section>

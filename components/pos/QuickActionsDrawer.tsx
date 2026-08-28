@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Barcode,
   Check,
@@ -22,6 +22,7 @@ import { runManualSync } from "@/hooks/useBackgroundSync";
 import { useDeviceHardware } from "@/hooks/useDeviceHardware";
 import { formatMoney } from "@/lib/format";
 import { breakdownStock } from "@/lib/stockDisplay";
+import { isElectron } from "@/lib/printAgent";
 import { useModalEscape } from "@/hooks/useModalEscape";
 import type { LocalProduct } from "@/types/pos.types";
 import ProductQuantitiesModal from "@/components/admin/ProductQuantitiesModal";
@@ -63,6 +64,32 @@ export default function QuickActionsDrawer({
   const pendingSyncCount = usePosStore((s) => s.pendingSyncCount);
 
   const { settings: hardware, updateSettings } = useDeviceHardware(activeTerminalId);
+
+  // Native (Electron) printer enumeration — browsers cannot see OS printers.
+  const [printers, setPrinters] = useState<Array<{ name: string; isDefault: boolean }>>([]);
+  const [printersLoading, setPrintersLoading] = useState(false);
+
+  const refreshPrinters = useCallback(async () => {
+    if (!isElectron()) {
+      setPrinters([]);
+      setPrintersLoading(false);
+      return;
+    }
+    setPrintersLoading(true);
+    try {
+      const list = await window.electronAPI?.getPrinters();
+      setPrinters((list ?? []).map((p) => ({ name: p.name, isDefault: Boolean(p.isDefault) })));
+    } catch {
+      setPrinters([]);
+    } finally {
+      setPrintersLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const id = requestAnimationFrame(() => void refreshPrinters());
+    return () => cancelAnimationFrame(id);
+  }, [refreshPrinters]);
 
   const canManageCatalog = Boolean(
     adminSession || hasCapability(currentCashier, "catalog.manage"),
@@ -370,6 +397,53 @@ export default function QuickActionsDrawer({
               <Printer className="h-4 w-4 text-primary" />
               إعدادات الطابعة والجهاز
             </h3>
+            {isElectron() ? (
+              <div className="mt-3">
+                <div className="flex items-end gap-2">
+                  <label className="block min-w-0 flex-1 text-[11px] font-bold text-muted">
+                    الطابعة المختارة
+                    <div className="relative mt-1">
+                      <select
+                        value={hardware.receiptPrinterName ?? ""}
+                        onChange={(event) =>
+                          updateSettings({ receiptPrinterName: event.target.value })
+                        }
+                        className="h-9 w-full appearance-none rounded-lg border border-border bg-white px-2 text-xs font-bold outline-none focus:border-primary"
+                      >
+                        <option value="">تلقائي (حسب نوع الطابعة)</option>
+                        {printers.map((p) => (
+                          <option key={p.name} value={p.name}>
+                            {p.name}
+                            {p.isDefault ? " (افتراضي)" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => void refreshPrinters()}
+                    disabled={printersLoading}
+                    className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-border bg-white px-2 text-[11px] font-bold text-muted hover:bg-surface-muted disabled:opacity-40"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${printersLoading ? "animate-spin" : ""}`} />
+                    تحديث
+                  </button>
+                </div>
+                <p className="mt-1.5 text-[11px] font-semibold text-muted">
+                  {printersLoading
+                    ? "جاري جلب الطابعات…"
+                    : printers.length === 0
+                      ? "لم يتم العثور على طابعات مثبتة"
+                      : `تم العثور على ${printers.length} طابعة ملحقة بالنظام`}
+                </p>
+              </div>
+            ) : (
+              <p className="mt-3 rounded-lg border border-dashed border-border bg-surface-muted px-3 py-2 text-[11px] font-bold text-muted">
+                <Lock className="h-3.5 w-3.5 inline-block align-[-2px] me-1" />
+                متاح فقط في نسخة الويندوز — المستعرض لا يمكنه رؤية طابعات النظام
+              </p>
+            )}
             <div className="mt-2 grid grid-cols-2 gap-2">
               <label className="block">
                 <span className="mb-1 block text-[11px] font-bold text-muted">عرض الورق</span>

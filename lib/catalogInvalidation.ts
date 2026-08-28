@@ -35,6 +35,7 @@ const CATALOG_REALTIME_TABLES = [
   "categories",
   "product_brands",
   "product_units",
+  "product_categories",
 ] as const;
 
 /** Debounce for realtime bursts (bulk imports fire hundreds of rows). */

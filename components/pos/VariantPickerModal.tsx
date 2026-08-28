@@ -108,6 +108,8 @@ export default function VariantPickerModal() {
       unitId?: string;
       unitPrice: number;
       qty: number;
+      taxPercent?: number;
+      taxIncluded?: boolean;
     }> = [];
 
     for (const m of matrix) {
@@ -125,6 +127,8 @@ export default function VariantPickerModal() {
         unitId: m.unitId,
         unitPrice: m.unitPrice,
         qty,
+        taxPercent: product.taxPercent,
+        taxIncluded: product.taxIncluded,
       });
     }
 

@@ -605,6 +605,50 @@ async function cartMath(): Promise<void> {
   state = st();
   check("tax: explicit barcode lookup uses its unit", state.items[0].barcode === "44444" && state.items[0].unitName === "كرتونة");
   check("tax: VAT-inclusive 10 -> net 8.62 + tax 1.38", state.totals.subtotal === 8.62 && state.totals.tax === 1.38 && state.totals.total === 10);
+  store.getState().clearInvoice();
+
+  // Regression: variant-matrix add (VariantPicker path) must NOT drop the
+  // product's taxIncluded flag. p4 is VAT-inclusive (10.00), so a matrix
+  // add must stay 10.00 total, never 11.60 (the exclusive-add bug).
+  store.getState().addVariantMatrixItems([
+    {
+      productId: "p4",
+      name: "منتج شامل الضريبة",
+      barcode: "44444",
+      variantId: "v-44444",
+      variantLabel: "أحمر",
+      unitName: "كرتونة",
+      unitMultiplier: 12,
+      unitPrice: 10,
+      qty: 1,
+      taxPercent: products.p4.taxPercent,
+      taxIncluded: products.p4.taxIncluded,
+    },
+  ]);
+  state = st();
+  check("tax: matrix add preserves taxIncluded flag", state.items[0].taxIncluded === true);
+  check("tax: VAT-inclusive matrix 10 -> net 8.62 + tax 1.38", state.totals.subtotal === 8.62 && state.totals.tax === 1.38 && state.totals.total === 10);
+  store.getState().clearInvoice();
+
+  // Same path but rows omit taxIncluded/taxPercent — store must fall back to
+  // the product map (the original bug scenario).
+  store.getState().addVariantMatrixItems([
+    {
+      productId: "p4",
+      name: "منتج شامل الضريبة",
+      barcode: "44444",
+      variantId: "v-44444",
+      variantLabel: "أحمر",
+      unitName: "كرتونة",
+      unitMultiplier: 12,
+      unitPrice: 10,
+      qty: 1,
+    },
+  ]);
+  state = st();
+  check("tax: matrix fallback reads product.taxIncluded", state.items[0].taxIncluded === true);
+  check("tax: matrix fallback totals stay inclusive 10", state.totals.subtotal === 8.62 && state.totals.tax === 1.38 && state.totals.total === 10);
+  store.getState().clearInvoice();
 }
 
 async function discounts(): Promise<void> {
