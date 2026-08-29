@@ -89,7 +89,7 @@ export function renderShiftPrintHtml(
   const isThermal = kind === "Z_REPORT" || kind === "X_REPORT";
 
   const componentHtml = isThermal
-    ? renderToString(<ThermalShiftPrintView shift={shift} />)
+    ? renderToString(<ThermalShiftPrintView shift={shift} kind={kind} />)
     : renderToString(<ShiftPrintView shift={shift} />);
 
   // Strip the original <style> tag injected by the component — we supply

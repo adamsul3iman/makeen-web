@@ -71,7 +71,13 @@ import {
   getStoragePressure,
   type StoragePressureDetail,
 } from "@/lib/storageGuard";
-import { smartPrint, captureReceiptHtml, isElectron, printInBrowser } from "@/lib/printAgent";
+import {
+  smartPrint,
+  captureReceiptHtml,
+  isElectron,
+  printInBrowser,
+  waitForReceiptSettle,
+} from "@/lib/printAgent";
 
 export default function PosLayout() {
   const router = useRouter();
@@ -114,7 +120,6 @@ export default function PosLayout() {
   const istdFailedCount = usePosStore((s) => s.istdFailedCount);
   const retryPendingIstd = usePosStore((s) => s.retryPendingIstd);
   const openCloseShiftModal = usePosStore((s) => s.openCloseShiftModal);
-  const isReturnMode = usePosStore((s) => s.isReturnMode);
   const checkoutSession = usePosStore((s) => s.checkoutSession);
   const lastCompletedInvoice = usePosStore((s) => s.lastCompletedInvoice);
   const currentCashier = usePosStore((s) => s.currentCashier);
@@ -313,7 +318,7 @@ export default function PosLayout() {
     }
   }, [modalOpen]);
 
-  const printReceipt = useCallback(() => {
+  const printReceipt = useCallback(async () => {
     // Silent printing with a robust browser fallback. In a plain browser
     // smartPrint ALWAYS reaches the fallback (a print_jobs queue insert is
     // never treated as "printed"), and we print via a hidden iframe so the
@@ -322,6 +327,9 @@ export default function PosLayout() {
     // Inside Electron the fallback stays suppressed and a failed silent print
     // surfaces as a notice (no dialog may block a checkout lane).
     if (!activeTerminalId || !lastCompletedInvoice) return;
+    // Give the lazily-built barcode + fiscal QR a beat to commit to the DOM
+    // before snapshotting the markup; capturing too early prints blank SVGs.
+    await waitForReceiptSettle();
     const html = captureReceiptHtml();
     if (!html) return;
 
@@ -520,11 +528,7 @@ export default function PosLayout() {
         dir="rtl"
         lang="ar"
         onMouseDown={keepFocusOnScanner}
-        className={`relative isolate flex h-dvh w-full flex-col overflow-hidden bg-background text-foreground print:hidden ${
-          isReturnMode
-            ? "bg-destructive-soft ring-2 ring-inset ring-destructive/70"
-            : ""
-        }`}
+        className="relative isolate flex h-dvh w-full flex-col overflow-hidden bg-background text-foreground print:hidden"
       >
         <header className="sticky top-0 z-30 flex h-[var(--topbar-height)] shrink-0 items-center justify-between gap-2 border-b border-border/20 bg-header px-2 text-primary-foreground shadow-elevated print:hidden lg:px-3">
           <div className="flex h-11 min-w-0 items-center gap-2 rounded-xl border border-surface/10 bg-surface/[0.04] px-2.5">
@@ -871,15 +875,6 @@ export default function PosLayout() {
             </button>
           </div>
         </header>
-
-        {isReturnMode && (
-          <div className="relative z-20 flex min-h-9 items-center justify-center gap-2 border-b border-destructive-foreground/20 bg-destructive px-4 py-1.5 text-sm font-extrabold text-destructive-foreground shadow-card">
-            <span>وضع المرتجع مفعّل — أنت تردّ مالاً للزبون</span>
-            <span className="rounded-lg bg-destructive-foreground/15 px-2 py-0.5 text-xs font-bold ring-1 ring-destructive-foreground/20">
-              F6 للخروج
-            </span>
-          </div>
-        )}
 
         {noticeToast}
 

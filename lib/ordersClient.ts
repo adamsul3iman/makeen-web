@@ -105,10 +105,16 @@ function orderToRow(order: LocalOrder): Record<string, unknown> {
 /**
  * Fetch the store's orders filtered by status, newest first. Powers both the
  * open board (["OPEN"]) and the settled history tab (["CLOSED","CANCELLED"]).
+ *
+ * Pagination is offset-based (never cursor/timestamp, because ordering is by
+ * `updated_at` which is a non-unique tie source — an offset slice guarantees
+ * no row is skipped or double-counted when the underlying set changes between
+ * pages). A `limit` of 0 means "fetch everything" (used by the open board).
  */
 export async function fetchOrdersByStatus(
   statuses: LocalOrder["status"][],
   limit = 100,
+  offset = 0,
 ): Promise<{ ok: true; orders: LocalOrder[] } | { ok: false; error: string }> {
   const sb = getSupabaseBrowser();
   const storeId = getTenantStoreId();
@@ -116,13 +122,16 @@ export async function fetchOrdersByStatus(
     return { ok: false, error: "Supabase غير مهيأة" };
   }
   try {
-    const { data, error } = await sb
+    let query = sb
       .from("pos_orders")
       .select(ORDER_COLUMNS)
       .eq("store_id", storeId)
       .in("status", statuses)
-      .order("updated_at", { ascending: false })
-      .limit(limit);
+      .order("updated_at", { ascending: false });
+    if (limit > 0) query = query.range(offset, offset + limit - 1);
+    // A >0 paginated slice is a "last page" indicator: an empty page means
+    // there is no more — the caller surfaces that as no-more-history.
+    const { data, error } = await query;
     if (error) return { ok: false, error: error.message };
     return { ok: true, orders: ((data ?? []) as OrderRow[]).map(rowToOrder) };
   } catch (error) {

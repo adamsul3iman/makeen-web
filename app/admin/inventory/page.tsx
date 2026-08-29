@@ -19,12 +19,12 @@ import {
   PackageOpen,
   Tag,
   Barcode,
+  ScanLine,
 } from "lucide-react";
 import { formatMoney } from "@/lib/format";
 import { formatProductDisplayName } from "@/lib/productDisplayName";
 import { flattenHierarchy } from "@/lib/categoryTree";
 import { breakdownStock } from "@/lib/stockDisplay";
-import type { ProductUnitsMap } from "@/types/pos.types";
 import {
   fetchPaginatedInventory,
   fetchAllInventoryForExport,
@@ -338,8 +338,11 @@ export default function AdminInventoryPage() {
   const [pageData, setPageData] = useState<InventoryPageData | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [references, setReferences] = useState<InventoryRefs>({ categories: [], brands: [], suppliers: [] });
   const loadInventory = useCallback(async () => {
     if (!adminSession) return;
+    await Promise.resolve();
     setLoading(true);
     setLoadError(null);
     try {
@@ -354,6 +357,25 @@ export default function AdminInventoryPage() {
         lowStock: filterLowStock || undefined,
       });
       setPageData(data);
+      setReferences(buildRefs(data));
+      setSelectedIds((prev) => {
+        if (prev.size === 0) return prev;
+        const childSet = new Set<string>();
+        for (const p of data.items) {
+          if (p.parentId) childSet.add(p.parentId);
+        }
+        const next = new Set(
+          [...prev].filter((id) => {
+            const p = data.items.find((it) => it.id === id);
+            if (!p) return false;
+            if (p.parentId) return false;
+            if (p.isVariantRoot) return false;
+            if (childSet.has(p.id)) return false;
+            return true;
+          }),
+        );
+        return next.size === prev.size ? prev : next;
+      });
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : "تعذر تحميل البيانات");
     } finally {
@@ -361,7 +383,9 @@ export default function AdminInventoryPage() {
     }
   }, [adminSession, page, normalizedQuery, filterCategoryId, filterBrandId, filterSupplierId, filterStatus, filterLowStock]);
 
-  useEffect(() => { void loadInventory(); }, [loadInventory]);
+  useEffect(() => {
+    Promise.resolve().then(() => void loadInventory());
+  }, [loadInventory]);
 
   const data = pageData;
   const refetch = loadInventory;
@@ -373,13 +397,12 @@ export default function AdminInventoryPage() {
   const [unitsProduct, setUnitsProduct] = useState<{ id: string; name: string; baseUnit: string } | null>(null);
   const [entryDefaults, setEntryDefaults] = useState<ProductEntryDefaults | null>(null);
   const [newProductSequence, setNewProductSequence] = useState(0);
-  const [importing, setImporting] = useState(false);
-  const [previewing, setPreviewing] = useState(false);
+  const importing = false;
+  const previewing = false;
   const [pendingImport, setPendingImport] = useState<ImportPreview | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [importStatus, setImportStatus] = useState<{ tone: "success" | "error"; message: string } | null>(null);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [mergeOpen, setMergeOpen] = useState(false);
   const [quantitiesOpen, setQuantitiesOpen] = useState(false);
   const [mergeParentName, setMergeParentName] = useState("");
@@ -394,16 +417,6 @@ export default function AdminInventoryPage() {
   const products = useMemo(() => data?.items ?? [], [data?.items]);
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-
-  const [references, setReferences] = useState<InventoryRefs>({ categories: [], brands: [], suppliers: [] });
-
-  useEffect(() => {
-    if (data) setReferences(buildRefs(data));
-  }, [data]);
-
-  useEffect(() => {
-    setPage(1);
-  }, [normalizedQuery, filterCategoryId, filterBrandId, filterSupplierId, filterStatus, filterLowStock]);
 
   const handleExportExcel = useCallback(async () => {
     if (!adminSession || exporting) return;
@@ -509,13 +522,6 @@ export default function AdminInventoryPage() {
     await mutate();
     await hydrateCatalog();
   }, [mutate, hydrateCatalog]);
-
-  useEffect(() => {
-    setSelectedIds((prev) => {
-      const next = new Set([...prev].filter((id) => selectableById.has(id)));
-      return next.size === prev.size ? prev : next;
-    });
-  }, [selectableById]);
 
   const createReference = async (
     type: "category" | "brand" | "supplier",
@@ -927,6 +933,13 @@ export default function AdminInventoryPage() {
         subtitle="إدارة الأصناف ووحدات التغليف والباركود من قاعدة بيانات المتجر النشط"
         action={
           <div className="flex items-center gap-2">
+            <Link
+              href="/admin/inventory/focus"
+              className="flex h-10 items-center justify-center gap-2 rounded-lg bg-primary px-4 text-sm font-black text-primary-foreground shadow-sm transition hover:bg-primary-hover"
+            >
+              <ScanLine className="h-4 w-4" />
+              وضع التركيز
+            </Link>
             <button
               type="button"
               onClick={() => setQuantitiesOpen(true)}
@@ -1067,7 +1080,10 @@ export default function AdminInventoryPage() {
             placeholder="كل التصنيفات"
             emptyLabel="لا توجد تصنيفات"
             size="sm"
-            onChange={setFilterCategoryId}
+            onChange={(v) => {
+              setPage(1);
+              setFilterCategoryId(v);
+            }}
           />
         </div>
         <div className="flex min-w-32 flex-1 flex-col gap-1">
@@ -1079,7 +1095,10 @@ export default function AdminInventoryPage() {
             placeholder="كل العلامات"
             emptyLabel="لا توجد علامات"
             size="sm"
-            onChange={setFilterBrandId}
+            onChange={(v) => {
+              setPage(1);
+              setFilterBrandId(v);
+            }}
           />
         </div>
         <div className="flex min-w-32 flex-1 flex-col gap-1">
@@ -1091,7 +1110,10 @@ export default function AdminInventoryPage() {
             placeholder="كل الموردين"
             emptyLabel="لا يوجد موردون"
             size="sm"
-            onChange={setFilterSupplierId}
+            onChange={(v) => {
+              setPage(1);
+              setFilterSupplierId(v);
+            }}
           />
         </div>
         <div className="flex flex-col gap-1">
@@ -1105,7 +1127,10 @@ export default function AdminInventoryPage() {
               <button
                 key={value || "all"}
                 type="button"
-                onClick={() => setFilterStatus(value)}
+                onClick={() => {
+                  setPage(1);
+                  setFilterStatus(value);
+                }}
                 className={`px-3 text-xs font-black transition ${
                   filterStatus === value
                     ? "bg-primary text-primary-foreground"
@@ -1121,7 +1146,10 @@ export default function AdminInventoryPage() {
           <input
             type="checkbox"
             checked={filterLowStock}
-            onChange={(e) => setFilterLowStock(e.target.checked)}
+            onChange={(e) => {
+              setPage(1);
+              setFilterLowStock(e.target.checked);
+            }}
             className="h-4 w-4 accent-destructive"
           />
           <span className="text-xs font-black text-destructive">مخزون منخفض فقط</span>
@@ -1130,6 +1158,7 @@ export default function AdminInventoryPage() {
           <button
             type="button"
             onClick={() => {
+              setPage(1);
               setFilterCategoryId("");
               setFilterBrandId("");
               setFilterSupplierId("");

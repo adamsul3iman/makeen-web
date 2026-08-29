@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { KeyRound, UserPlus, UserRound, X } from "lucide-react";
+import { KeyRound, UserPlus, X } from "lucide-react";
+import { Select } from "@/components/ui/Select";
 
 export interface StaffFormPayload {
   id?: string;
@@ -19,6 +20,7 @@ export interface StaffRoleOption {
   description: string;
   capabilities: string[];
   limits: Record<string, number | null>;
+  isSystem?: boolean;
 }
 
 /** Employee PIN, role and sign-in username. The owner remains a separate account. */
@@ -184,43 +186,43 @@ export default function StaffModal({
           </div>
 
           {!isPinOnly && (
-            <div>
-              <label htmlFor="staff-role" className="mb-1.5 block text-sm font-bold text-muted">
-                الدور الوظيفي
-              </label>
-              <div className="relative">
-                <UserRound className="pointer-events-none absolute start-4 top-1/2 h-5 w-5 -translate-y-1/2 text-primary" />
-                <select
-                  id="staff-role"
-                  value={roleId}
-                  onChange={(event) => {
-                    setRoleId(event.target.value);
-                    setError("");
-                  }}
-                  className="w-full rounded-xl border border-border bg-white py-3 pe-4 ps-12 text-base font-black outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/30"
-                >
-                  {roles.map((role) => (
-                    <option key={role.id} value={role.id}>{role.name}</option>
-                  ))}
-                </select>
-              </div>
-              {selectedRole && (
-                <div className="mt-2 rounded-xl border border-primary/20 bg-primary/5 px-4 py-3">
-                  <p className="text-sm font-bold text-foreground">{selectedRole.description}</p>
-                  <div className="mt-2 flex flex-wrap gap-2 text-xs font-black">
-                    <span className="rounded-full bg-white px-2.5 py-1 text-muted shadow-sm">
-                      {selectedRole.capabilities.length} صلاحية
-                    </span>
-                    <span className="rounded-full bg-white px-2.5 py-1 text-muted shadow-sm">
-                      حد الخصم {selectedRole.limits.maxDiscountPercent ?? 0}%
-                    </span>
-                    <span className="rounded-full bg-white px-2.5 py-1 text-muted shadow-sm">
-                      {selectedRole.capabilities.includes("backoffice.access") ? "يدخل لوحة التحكم" : "نقطة البيع فقط"}
-                    </span>
-                  </div>
+<div>
+            <span
+              id="staff-role-label"
+              className="mb-1.5 block text-sm font-bold text-muted"
+            >
+              الدور الوظيفي
+            </span>
+            <Select
+              value={roleId}
+              onChange={(roleIdValue) => {
+                setRoleId(roleIdValue);
+                setError("");
+              }}
+              options={roles.map((role) => ({ value: role.id, label: role.name }))}
+              placeholder="اختر الدور"
+              aria-label="الدور الوظيفي"
+              className="w-full"
+            />
+            {selectedRole && (
+              <div className="mt-2 rounded-xl border border-primary/20 bg-primary/5 px-4 py-3">
+                <p className="text-sm font-bold text-foreground">{selectedRole.description}</p>
+                <div className="mt-2 flex flex-wrap gap-2 text-xs font-black">
+                  <span className="rounded-full bg-white px-2.5 py-1 text-muted shadow-sm">
+                    {selectedRole.capabilities.length} صلاحية
+                  </span>
+                  <span className="rounded-full bg-white px-2.5 py-1 text-muted shadow-sm">
+                    حد الخصم {selectedRole.limits.maxDiscountPercent ?? 0}%
+                  </span>
+                  <span className="rounded-full bg-white px-2.5 py-1 text-muted shadow-sm">
+                    {selectedRole.capabilities.includes("backoffice.access")
+                      ? "يدخل لوحة التحكم"
+                      : "نقطة البيع فقط"}
+                  </span>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
+          </div>
           )}
 
           {error && (

@@ -1,49 +1,61 @@
 "use client";
 
-import Link from "next/link";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ComponentPropsWithRef,
-  type CSSProperties,
-  type FormEvent,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentPropsWithRef, type CSSProperties, type FormEvent } from "react";
 import { DndContext, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
 import { SortableContext, arrayMove, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
+  ArrowUpRight,
+  Barcode,
   Building2,
+  Check,
+  CheckCheck,
+  ChevronLeft,
   Eye,
   EyeOff,
   FolderTree,
   GripVertical,
+  LayoutGrid,
+  List,
   Loader2,
+  Menu,
   Package,
+  PackageOpen,
   Pencil,
   Plus,
   RefreshCw,
-  Save,
+  Search,
+  Tags,
   Trash2,
   X,
+  XCircle,
 } from "lucide-react";
-import EntityCombobox, { type EntityOption } from "@/components/shared/EntityCombobox";
-import {
-  buildChildrenByParent,
-  collectDescendantIds,
-  flattenHierarchy,
-} from "@/lib/categoryTree";
+import { buildChildrenByParent, collectDescendantIds, flattenHierarchy } from "@/lib/categoryTree";
 import { normalizeArabicText } from "@/lib/arabic";
+import { cn } from "@/lib/cn";
+import { Button } from "@/components/ui/Button";
+import { Badge } from "@/components/ui/Badge";
+import { Input } from "@/components/ui/Input";
+import { ModalShell } from "@/components/ui/ModalShell";
+import ConfirmDialog from "@/components/ui/ConfirmDialog";
+import { PageHeader, StatCard } from "@/components/ui/Card";
+import EntityCombobox, { type EntityOption } from "@/components/shared/EntityCombobox";
+import { formatMoney } from "@/lib/format";
 import {
   fetchTaxonomy,
+  fetchCategoryProducts,
   saveCategory,
   deleteCategory,
   toggleCategoryVisibility,
   reorderCategories,
   saveBrand,
   deleteBrand,
+  renameCategory,
+  renameBrand,
+  toggleCategoriesVisibility,
+  deleteCategories,
+  deleteBrands,
+  type CategoryProductItem,
 } from "@/lib/categoriesClient";
 
 interface CategoryReferenceItem {
@@ -63,12 +75,602 @@ interface BrandReferenceItem {
   productCount: number;
 }
 
-type ModalState =
-  | null
-  | { kind: "category-create"; parentId: string | null }
-  | { kind: "category-edit"; categoryId: string }
-  | { kind: "brand-create" }
-  | { kind: "brand-edit"; brandId: string };
+type Panel = "categories" | "brands";
+type BrandSort = "name" | "products";
+
+interface ItemSelection {
+  ids: Set<string>;
+  set: (id: string, on: boolean) => void;
+  toggle: (id: string) => void;
+  clear: () => void;
+}
+
+const CATEGORY_FALLBACK_COLORS = ["#2563eb", "#0d9488", "#7c3aed", "#d97706"];
+
+function useSelection(): ItemSelection {
+  const [ids, setIds] = useState<Set<string>>(new Set());
+  const set = useCallback((id: string, on: boolean) => {
+    setIds((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }, []);
+  const toggle = useCallback((id: string) => {
+    setIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  const clear = useCallback(() => setIds(new Set()), []);
+  return { ids, set, toggle, clear };
+}
+
+/* ─────────────────────────── Inline renamable name ─────────────────────── */
+
+function InlineRename({
+  value,
+  saving,
+  onSave,
+  onCancel,
+}: {
+  value: string;
+  saving: boolean;
+  onSave: (next: string) => void;
+  onCancel: () => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  const commit = () => {
+    const next = draft.trim();
+    if (next && next !== value) onSave(next);
+    else onCancel();
+  };
+
+  const handleKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") commit();
+    else if (e.key === "Escape") onCancel();
+  };
+
+  return (
+    <span className="flex min-w-0 flex-1 items-center gap-1.5">
+      <Input
+        ref={inputRef}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={handleKey}
+        className="h-8 flex-1 rounded-lg px-2 text-sm font-black"
+        disabled={saving}
+      />
+      {saving && <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />}
+    </span>
+  );
+}
+
+/* ───────────────────────────── Category tree row ───────────────────────── */
+
+interface CategoryRowProps {
+  category: CategoryReferenceItem;
+  depth: number;
+  expanded: boolean;
+  expandable: boolean;
+  selected: boolean;
+  editing: boolean;
+  saving: boolean;
+  renameSaving: boolean;
+  isDragging?: boolean;
+  rowRef?: (element: HTMLElement | null) => void;
+  rowStyle?: CSSProperties;
+  handleProps?: ComponentPropsWithRef<"button">;
+  onToggleExpand: (category: CategoryReferenceItem) => void;
+  onSelect: (category: CategoryReferenceItem) => void;
+  onAddChild: (parentId: string) => void;
+  onStartEdit: (category: CategoryReferenceItem) => void;
+  onDelete: (category: CategoryReferenceItem) => void;
+  onToggleVisibility: (category: CategoryReferenceItem) => void;
+  onRename: (category: CategoryReferenceItem, name: string) => void;
+  onCancelRename: () => void;
+}
+
+function CategoryRow({
+  category,
+  depth,
+  expanded,
+  expandable,
+  selected,
+  editing,
+  saving,
+  renameSaving,
+  isDragging = false,
+  rowRef,
+  rowStyle,
+  handleProps,
+  onToggleExpand,
+  onSelect,
+  onAddChild,
+  onStartEdit,
+  onDelete,
+  onToggleVisibility,
+  onRename,
+  onCancelRename,
+}: CategoryRowProps) {
+  const hasChildren = category.childCount > 0;
+  const indent = Math.min(depth, 6);
+
+  return (
+    <div
+      ref={rowRef}
+      style={rowStyle}
+      className={cn(
+        "group flex min-w-0 items-center gap-1.5 rounded-xl border px-2 py-2 transition-colors",
+        selected
+          ? "border-primary/40 bg-primary/5 ring-1 ring-primary/20"
+          : "border-slate-200 bg-white hover:border-primary/30",
+        !category.showInPos ? "opacity-60" : "",
+        isDragging ? "relative z-10 border-primary/60 shadow-lg" : "",
+      )}
+    >
+      {indent > 0 && <span aria-hidden className="h-px w-3 shrink-0 bg-slate-200" style={{ marginInlineStart: indent * 0.75 }} />}
+
+      <button
+        type="button"
+        onClick={() => onSelect(category)}
+        title={selected ? "إلغاء التحديد" : "تحديد للعمليات الجماعية"}
+        aria-label={selected ? `إلغاء تحديد ${category.name}` : `تحديد ${category.name}`}
+        className={cn(
+          "grid h-6 w-6 shrink-0 place-items-center rounded-md border transition",
+          selected ? "border-primary bg-primary text-primary-foreground" : "border-slate-300 bg-white hover:border-primary",
+        )}
+      >
+        {selected && <Check className="h-3.5 w-3.5" />}
+      </button>
+
+      {handleProps && (
+        <button
+          type="button"
+          aria-label={`إعادة ترتيب ${category.name}`}
+          title="اسحب للترتيب"
+          className="grid h-8 w-5 shrink-0 cursor-grab touch-none place-items-center rounded-md text-slate-300 transition hover:bg-slate-100 hover:text-slate-500 active:cursor-grabbing"
+          {...handleProps}
+        >
+          <GripVertical className="h-4 w-4" />
+        </button>
+      )}
+
+      <button
+        type="button"
+        onClick={() => expandable && onToggleExpand(category)}
+        aria-label={expanded ? `طيّ ${category.name}` : `توسيع ${category.name}`}
+        className={cn(
+          "grid h-7 w-7 shrink-0 place-items-center rounded-md transition",
+          expandable ? "text-muted hover:bg-slate-100 hover:text-foreground" : "cursor-default text-transparent hover:text-slate-300",
+        )}
+      >
+        <ChevronLeft className={cn("h-4 w-4 transition-transform", expanded ? "-rotate-90" : "")} />
+      </button>
+
+      <span
+        aria-hidden
+        className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-white"
+        style={{ backgroundColor: category.bgColor ?? CATEGORY_FALLBACK_COLORS[depth % CATEGORY_FALLBACK_COLORS.length] }}
+      >
+        <FolderTree className="h-4 w-4" />
+      </span>
+
+      {editing ? (
+        <InlineRename value={category.name} saving={renameSaving} onSave={(n) => onRename(category, n)} onCancel={onCancelRename} />
+      ) : (
+        <button
+          type="button"
+          onClick={() => expandable && onToggleExpand(category)}
+          className="flex min-w-0 flex-1 items-center gap-2 text-start"
+        >
+          <span className="min-w-0">
+            <span className="block truncate text-sm font-black text-foreground">{category.name}</span>
+            {!category.showInPos && (
+              <span className="mt-0.5 block text-[10px] font-bold text-amber-600">مخفي عن نقطة البيع</span>
+            )}
+          </span>
+        </button>
+      )}
+
+      <div className="flex shrink-0 items-center gap-1.5">
+        {!editing && (
+          <>
+            <Badge tone={hasChildren ? "primary" : "default"}>
+              {hasChildren ? (
+                <>
+                  <Tags className="h-3 w-3" />
+                  {category.childCount.toLocaleString("ar-JO")} أقسام
+                </>
+              ) : (
+                <>
+                  <Package className="h-3 w-3" />
+                  {category.productCount.toLocaleString("ar-JO")} منتجات
+                </>
+              )}
+            </Badge>
+
+            <button
+              type="button"
+              onClick={() => onToggleVisibility(category)}
+              aria-label={category.showInPos ? `إخفاء ${category.name} من نقطة البيع` : `إظهار ${category.name} في نقطة البيع`}
+              title={category.showInPos ? "إخفاء من نقطة البيع" : "إظهار في نقطة البيع"}
+              className={cn(
+                "grid h-9 w-9 place-items-center rounded-lg transition",
+                category.showInPos ? "text-slate-400 hover:bg-slate-100 hover:text-slate-600" : "text-amber-500 hover:bg-amber-50 hover:text-amber-600",
+              )}
+            >
+              {category.showInPos ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onAddChild(category.id)}
+              aria-label={`إضافة قسم داخل ${category.name}`}
+              title="إضافة قسم داخله"
+              className="grid h-9 w-9 place-items-center rounded-lg text-success transition hover:bg-success/10"
+            >
+              <Plus className="h-4 w-4" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onStartEdit(category)}
+              aria-label={`تعديل ${category.name}`}
+              title="تعديل"
+              className="grid h-9 w-9 place-items-center rounded-lg text-primary transition hover:bg-primary/10"
+            >
+              <Pencil className="h-4 w-4" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onDelete(category)}
+              disabled={saving}
+              aria-label={`حذف ${category.name}`}
+              title="حذف"
+              className="grid h-9 w-9 place-items-center rounded-lg text-destructive transition hover:bg-destructive/10 disabled:opacity-40"
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SortableCategoryRow(props: Omit<CategoryRowProps, "isDragging" | "rowRef" | "rowStyle" | "handleProps">) {
+  const { attributes, isDragging, listeners, setNodeRef, setActivatorNodeRef, transform, transition } = useSortable({
+    id: props.category.id,
+    disabled: props.editing,
+  });
+  const handleProps: ComponentPropsWithRef<"button"> = {
+    ref: setActivatorNodeRef,
+    ...attributes,
+    ...(listeners ?? {}),
+  };
+  return (
+    <CategoryRow
+      {...props}
+      isDragging={isDragging}
+      rowRef={setNodeRef}
+      rowStyle={{ transform: CSS.Translate.toString(transform), transition }}
+      handleProps={handleProps}
+    />
+  );
+}
+
+/* ─────────────────────────── Recursive tree node ───────────────────────── */
+
+interface TreeNodeProps {
+  category: CategoryReferenceItem;
+  depth: number;
+  expandedIds: Set<string>;
+  editingId: string | null;
+  selectedIds: Set<string>;
+  saving: boolean;
+  renameSaving: boolean;
+  hasActiveSearch: boolean;
+  childrenByParent: Map<string, CategoryReferenceItem[]>;
+  sensors: ReturnType<typeof useSensors>;
+  leafProductsByCategory: Record<string, CategoryProductItem[]>;
+  leafLoadingId: string | null;
+  onToggleExpand: (category: CategoryReferenceItem) => void;
+  onSelect: (category: CategoryReferenceItem) => void;
+  onAddChild: (parentId: string) => void;
+  onStartEdit: (category: CategoryReferenceItem) => void;
+  onDelete: (category: CategoryReferenceItem) => void;
+  onToggleVisibility: (category: CategoryReferenceItem) => void;
+  onRename: (category: CategoryReferenceItem, name: string) => void;
+  onCancelRename: () => void;
+  onDragEnd: (event: DragEndEvent) => void;
+}
+
+function TreeNode({
+  category,
+  depth,
+  expandedIds,
+  editingId,
+  selectedIds,
+  saving,
+  renameSaving,
+  hasActiveSearch,
+  childrenByParent,
+  sensors,
+  leafProductsByCategory,
+  leafLoadingId,
+  onToggleExpand,
+  onSelect,
+  onAddChild,
+  onStartEdit,
+  onDelete,
+  onToggleVisibility,
+  onRename,
+  onCancelRename,
+  onDragEnd,
+}: TreeNodeProps) {
+  const expanded = expandedIds.has(category.id);
+  const children = (childrenByParent.get(category.id) ?? []).slice();
+  const isLeaf = children.length === 0 && category.childCount === 0;
+  const expandable = children.length > 0 || isLeaf;
+  const showChildren = hasActiveSearch || expanded;
+
+  // Direct products of THIS node (not inherited from children). Loaded on
+  // demand via leafProductsByCategory keyed by category id.
+  const nodeProducts = leafProductsByCategory[category.id] ?? null;
+  const nodeLoading = leafLoadingId === category.id;
+  const hasDirectProducts = (nodeProducts ?? []).length > 0;
+
+  // Show the inline product list for any visible node that is a leaf (always)
+  // OR that has direct products loaded/loading — so a parent's products never
+  // vanish from view once a sub-category is added under it.
+  const renderProductList = showChildren && (isLeaf || hasDirectProducts || nodeLoading);
+
+  const rowProps = {
+    category,
+    depth,
+    expanded,
+    expandable,
+    selected: selectedIds.has(category.id),
+    editing: editingId === category.id,
+    saving,
+    renameSaving,
+    onToggleExpand,
+    onSelect,
+    onAddChild,
+    onStartEdit,
+    onDelete,
+    onToggleVisibility,
+    onRename,
+    onCancelRename,
+  };
+
+  return (
+    <li className="flex flex-col gap-1.5">
+      <SortableCategoryRow {...rowProps} />
+      {showChildren && children.length > 0 && (
+        <ul className="animate-pos-accordion flex flex-col gap-1.5 border-r-2 border-slate-100 pr-1.5 ms-3" role="group">
+          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+            <SortableContext items={children.map((c) => c.id)} strategy={verticalListSortingStrategy}>
+              {children.map((child) => (
+                <TreeNode
+                  key={child.id}
+                  category={child}
+                  depth={depth + 1}
+                  expandedIds={expandedIds}
+                  editingId={editingId}
+                  selectedIds={selectedIds}
+                  saving={saving}
+                  renameSaving={renameSaving}
+                  hasActiveSearch={hasActiveSearch}
+                  childrenByParent={childrenByParent}
+                  sensors={sensors}
+                  leafProductsByCategory={leafProductsByCategory}
+                  leafLoadingId={leafLoadingId}
+                  onToggleExpand={onToggleExpand}
+                  onSelect={onSelect}
+                  onAddChild={onAddChild}
+                  onStartEdit={onStartEdit}
+                  onDelete={onDelete}
+                  onToggleVisibility={onToggleVisibility}
+                  onRename={onRename}
+                  onCancelRename={onCancelRename}
+                  onDragEnd={onDragEnd}
+                />
+              ))}
+            </SortableContext>
+          </DndContext>
+        </ul>
+      )}
+      {renderProductList && (
+        <ProductSubList
+          products={nodeProducts}
+          loading={nodeLoading}
+          categoryName={category.name}
+        />
+      )}
+    </li>
+  );
+}
+
+/* ─────────────────────────── Inline product sub-list ───────────────────── */
+
+const PRODUCTS_PER_PAGE = 10;
+
+function ProductSubList({
+  products,
+  loading,
+  categoryName,
+}: {
+  products: CategoryProductItem[] | null;
+  loading: boolean;
+  categoryName: string;
+}) {
+  const [limit, setLimit] = useState(PRODUCTS_PER_PAGE);
+
+  if (loading) {
+    return (
+      <div className="animate-pos-accordion ms-9 flex items-center gap-2 rounded-xl border border-dashed border-slate-300 bg-surface-muted/40 px-4 py-3 text-xs font-bold text-muted">
+        <Loader2 className="h-4 w-4 animate-spin text-primary" />
+        جارٍ تحميل منتجات «{categoryName}»…
+      </div>
+    );
+  }
+
+  if (!products || products.length === 0) {
+    return (
+      <div className="animate-pos-accordion ms-9 flex items-center gap-2 rounded-xl border border-dashed border-slate-200 bg-surface-muted/40 px-4 py-2.5 text-xs font-semibold text-muted">
+        <PackageOpen className="h-4 w-4 text-slate-400" />
+        لا توجد منتجات مرتبطة مباشرة بهذا التصنيف.
+      </div>
+    );
+  }
+
+  const shown = products.slice(0, limit);
+  const hasMore = products.length > limit;
+
+  return (
+    <div className="ms-9 flex flex-col gap-2">
+      <div className="flex items-center justify-between px-1">
+        <span className="text-[11px] font-black text-muted">
+          {products.length.toLocaleString("ar-JO")} منتج
+        </span>
+      </div>
+      <div className="animate-pos-accordion flex flex-col gap-1.5 overflow-y-auto rounded-xl border border-slate-200 bg-surface-muted/40 p-1.5" style={{ maxHeight: "min(320px, 40vh)" }}>
+        {shown.map((product) => (
+          <div
+            key={product.id}
+            className={cn(
+              "flex items-center gap-2 rounded-lg border px-3 py-2 transition-colors",
+              product.isActive ? "border-slate-200 bg-white" : "border-slate-200 bg-white opacity-55",
+            )}
+          >
+            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
+              <Package className="h-4 w-4" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-xs font-black text-foreground">{product.name}</p>
+              <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] font-semibold text-muted">
+                {product.barcode ? (
+                  <span className="inline-flex items-center gap-1">
+                    <Barcode className="h-3 w-3" />
+                    {product.barcode}
+                  </span>
+                ) : null}
+                <span>الرصيد: {product.stock.toLocaleString("ar-JO")}</span>
+              </div>
+            </div>
+            <span className="shrink-0 text-xs font-black tabular-nums text-primary">
+              {formatMoney(product.price)}
+            </span>
+            <a
+              href="/admin/inventory"
+              title="إدارة المنتج في المخزون"
+              aria-label={`فتح ${product.name} في المخزون`}
+              className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-slate-400 transition hover:bg-primary/10 hover:text-primary"
+            >
+              <ArrowUpRight className="h-4 w-4" />
+            </a>
+          </div>
+        ))}
+      </div>
+      {hasMore && (
+        <Button variant="outline" size="sm" className="self-start" onClick={() => setLimit((l) => l + PRODUCTS_PER_PAGE)}>
+          عرض {Math.min(PRODUCTS_PER_PAGE, products.length - limit).toLocaleString("ar-JO")} منتج إضافي
+        </Button>
+      )}
+    </div>
+  );
+}
+
+/* ─────────────────────────────── Brand card ────────────────────────────── */
+
+function BrandCard({
+  brand,
+  selected,
+  editing,
+  saving,
+  renameSaving,
+  onSelect,
+  onStartEdit,
+  onDelete,
+  onRename,
+  onCancelRename,
+}: {
+  brand: BrandReferenceItem;
+  selected: boolean;
+  editing: boolean;
+  saving: boolean;
+  renameSaving: boolean;
+  onSelect: (brand: BrandReferenceItem) => void;
+  onStartEdit: (brand: BrandReferenceItem) => void;
+  onDelete: (brand: BrandReferenceItem) => void;
+  onRename: (brand: BrandReferenceItem, name: string) => void;
+  onCancelRename: () => void;
+}) {
+  return (
+    <article
+      className={cn(
+        "group rounded-2xl border bg-surface p-4 shadow-sm transition hover:shadow-md",
+        selected ? "border-primary/50 ring-2 ring-primary/20" : "border-border hover:border-primary/30",
+      )}
+    >
+      <div className="flex items-start gap-3">
+        <button
+          type="button"
+          onClick={() => onSelect(brand)}
+          aria-label={selected ? `إلغاء تحديد ${brand.name}` : `تحديد ${brand.name}`}
+          className={cn(
+            "mt-1 grid h-6 w-6 shrink-0 place-items-center rounded-md border transition",
+            selected ? "border-primary bg-primary text-primary-foreground" : "border-slate-300 bg-white hover:border-primary",
+          )}
+        >
+          {selected && <Check className="h-3.5 w-3.5" />}
+        </button>
+        <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary">
+          <Building2 className="h-5 w-5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          {editing ? (
+            <InlineRename value={brand.name} saving={renameSaving} onSave={(n) => onRename(brand, n)} onCancel={onCancelRename} />
+          ) : (
+            <h3 className="truncate text-sm font-black text-foreground">{brand.name}</h3>
+          )}
+          <p className="mt-1 text-xs font-semibold text-muted">
+            مرتبطة بـ {brand.productCount.toLocaleString("ar-JO")} منتج
+          </p>
+        </div>
+      </div>
+
+      {!editing && (
+        <div className="mt-3 flex items-center gap-2 border-t border-border pt-3">
+          <Button variant="outline" size="sm" className="flex-1" onClick={() => onStartEdit(brand)}>
+            <Pencil className="h-3.5 w-3.5" />
+            تعديل
+          </Button>
+          <Button variant="ghost" size="sm" className="text-destructive hover:bg-destructive/10" onClick={() => onDelete(brand)} disabled={saving}>
+            <Trash2 className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      )}
+    </article>
+  );
+}
+
+/* ─────────────────────────────── Create/Edit modals ────────────────────── */
+
+const CATEGORY_MODAL_ID = "category-modal";
 
 function CategoryModal({
   categories,
@@ -92,10 +694,7 @@ function CategoryModal({
   const [showInPos, setShowInPos] = useState(initial?.showInPos ?? true);
 
   const flattened = useMemo(() => flattenHierarchy(categories), [categories]);
-  const pathById = useMemo(
-    () => new Map(flattened.map((node) => [node.item.id, node.pathNames] as const)),
-    [flattened],
-  );
+  const pathById = useMemo(() => new Map(flattened.map((node) => [node.item.id, node.pathNames] as const)), [flattened]);
   const blockedIds = useMemo(
     () =>
       initial
@@ -115,10 +714,7 @@ function CategoryModal({
         .map((node) => ({
           id: node.item.id,
           name: node.pathNames.join(" / "),
-          description:
-            node.depth > 0
-              ? `داخل ${node.pathNames.slice(0, -1).join(" / ")}`
-              : "جذر رئيسي يظهر مباشرة للكاشير",
+          description: node.depth > 0 ? `داخل ${node.pathNames.slice(0, -1).join(" / ")}` : "جذر رئيسي يظهر مباشرة للكاشير",
         })),
     [blockedIds, flattened, initial],
   );
@@ -137,104 +733,67 @@ function CategoryModal({
   };
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-3 sm:p-5" dir="rtl">
-      <div className="flex max-h-[92dvh] w-full max-w-2xl flex-col overflow-hidden rounded-lg bg-surface shadow-overlay">
-        <header className="flex items-center justify-between border-b border-border px-4 py-3 sm:px-6">
-          <div>
-            <h2 className="text-lg font-black text-foreground">
-              {initial ? "تعديل تصنيف" : "إضافة تصنيف"}
-            </h2>
-            <p className="mt-0.5 text-xs font-semibold text-muted">
-              حدّد أين سيظهر هذا المسار داخل تصفح الكاشير.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="إغلاق"
-            className="grid h-9 w-9 place-items-center rounded-lg text-muted transition hover:bg-surface-muted"
-          >
-            <X className="h-5 w-5" />
-          </button>
-        </header>
-
-        <form onSubmit={(event) => void handleSubmit(event)} className="space-y-5 px-4 py-4 sm:px-6">
-          <label className="block text-sm font-bold text-muted">
-            اسم التصنيف <span className="text-destructive">*</span>
-            <input
-              autoFocus
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="مثال: أدوات تنظيف"
-              className="mt-1.5 h-12 w-full rounded-lg border border-border bg-white px-4 text-base font-bold outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
-            />
-          </label>
-
-          <EntityCombobox
-            id="category-parent"
-            label="يظهر تحت أي تصنيف؟"
-            value={parentId}
-            options={parentOptions}
-            placeholder="جذر رئيسي مباشر"
-            emptyLabel="لا توجد تصنيفات متاحة للاختيار"
-            onChange={setParentId}
+    <ModalShell
+      title={initial ? "تعديل تصنيف" : "إضافة تصنيف"}
+      description="هذا تصنيف لمنتجات يظهر للكاشير في نقطة البيع. أسماء العلامات التجارية تُدار من لوحة «العلامات» ولا تُضاف هنا."
+      icon={<FolderTree className="h-5 w-5 text-primary" />}
+      onClose={onClose}
+      dismissible={!saving}
+      footer={
+        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <Button variant="outline" onClick={onClose} disabled={saving}>
+            إلغاء
+          </Button>
+          <Button type="submit" form={CATEGORY_MODAL_ID} disabled={!name.trim() || saving}>
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : initial ? <Check className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+            {initial ? "حفظ التعديل" : "إضافة التصنيف"}
+          </Button>
+        </div>
+      }
+    >
+      <form id={CATEGORY_MODAL_ID} onSubmit={(event) => void handleSubmit(event)} className="space-y-5">
+        <label className="block text-sm font-bold text-muted">
+          اسم التصنيف <span className="text-destructive">*</span>
+          <Input
+            autoFocus
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="مثال: أدوات تنظيف"
+            className="mt-1.5"
           />
+        </label>
 
-          <label className="flex items-center gap-3 rounded-lg border border-border bg-surface-muted/50 px-4 py-3 cursor-pointer select-none transition hover:bg-surface-muted">
-            <input
-              type="checkbox"
-              checked={showInPos}
-              onChange={(e) => setShowInPos(e.target.checked)}
-              className="h-4 w-4 accent-primary"
-            />
-            <span className="text-sm font-bold text-foreground">إظهار في نقطة البيع</span>
-            <span className="text-xs font-semibold text-muted">-{showInPos ? "مرئي" : "مخفي"} للكاشير</span>
-          </label>
+        <EntityCombobox
+          id="category-parent"
+          value={parentId}
+          options={parentOptions}
+          placeholder="جذر رئيسي مباشر"
+          emptyLabel="لا توجد تصنيفات متاحة للاختيار"
+          onChange={setParentId}
+          label="يظهر تحت أي تصنيف؟"
+        />
 
-          <div className="rounded-xl border border-primary/15 bg-primary/5 p-4">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-black text-primary">
-                المستوى {previewNames.length}
-              </span>
-              <span className="text-xs font-bold text-muted">المسار الذي سيفتحه الكاشير</span>
-            </div>
-            <p className="mt-2 text-sm font-black text-foreground">{previewNames.join(" / ")}</p>
+        <label className="flex cursor-pointer select-none items-center gap-3 rounded-xl border border-border bg-surface-muted/50 px-4 py-3 transition hover:bg-surface-muted">
+          <input type="checkbox" checked={showInPos} onChange={(e) => setShowInPos(e.target.checked)} className="h-4 w-4 accent-primary" />
+          <span className="text-sm font-bold text-foreground">إظهار في نقطة البيع</span>
+          <span className="text-xs font-semibold text-muted">-{showInPos ? "مرئي" : "مخفي"} للكاشير</span>
+        </label>
+
+        <div className="rounded-xl border border-primary/15 bg-primary/5 p-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge tone="primary">المستوى {previewNames.length}</Badge>
+            <span className="text-xs font-bold text-muted">المسار الذي سيفتحه الكاشير</span>
           </div>
+          <p className="mt-2 text-sm font-black text-foreground">{previewNames.join(" / ")}</p>
+        </div>
 
-          {error && (
-            <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm font-bold text-destructive">
-              {error}
-            </p>
-          )}
-
-          <div className="flex flex-col-reverse gap-2 border-t border-border pt-4 sm:flex-row sm:justify-end">
-            <button
-              type="button"
-              onClick={onClose}
-              className="flex h-11 items-center justify-center rounded-lg border border-border bg-white px-5 text-sm font-black text-foreground transition hover:bg-surface-muted"
-            >
-              إلغاء
-            </button>
-            <button
-              type="submit"
-              disabled={!name.trim() || saving}
-              className="flex h-11 items-center justify-center gap-2 rounded-lg bg-primary px-5 text-sm font-black text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {saving ? (
-                <Loader2 className="h-5 w-5 animate-spin" />
-              ) : initial ? (
-                <Save className="h-5 w-5" />
-              ) : (
-                <Plus className="h-5 w-5" />
-              )}
-              {initial ? "حفظ التعديل" : "إضافة التصنيف"}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+        {error && <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm font-bold text-destructive">{error}</p>}
+      </form>
+    </ModalShell>
   );
 }
+
+const BRAND_MODAL_ID = "brand-modal";
 
 function BrandModal({
   initial,
@@ -259,271 +818,149 @@ function BrandModal({
   };
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/45 p-3 sm:p-5" dir="rtl">
-      <div className="flex w-full max-w-lg flex-col overflow-hidden rounded-lg bg-surface shadow-2xl">
-        <header className="flex items-center justify-between border-b border-border px-4 py-3 sm:px-6">
-          <div>
-            <h2 className="text-lg font-black text-foreground">
-              {initial ? "تعديل علامة تجارية" : "إضافة علامة تجارية"}
-            </h2>
-            <p className="mt-0.5 text-xs font-semibold text-muted">
-              للفلترة والتقارير، وليس لمسار تنقل الكاشير.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="إغلاق"
-            className="grid h-9 w-9 place-items-center rounded-lg text-muted transition hover:bg-surface-muted"
-          >
-            <X className="h-5 w-5" />
-          </button>
-        </header>
-
-        <form onSubmit={(event) => void handleSubmit(event)} className="space-y-5 px-4 py-4 sm:px-6">
-          <label className="block text-sm font-bold text-muted">
-            الاسم <span className="text-destructive">*</span>
-            <input
-              autoFocus
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="مثال: Nestle"
-              className="mt-1.5 h-12 w-full rounded-lg border border-border bg-white px-4 text-base font-bold outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
-            />
-          </label>
-
-          {error && (
-            <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm font-bold text-destructive">
-              {error}
-            </p>
-          )}
-
-          <div className="flex flex-col-reverse gap-2 border-t border-border pt-4 sm:flex-row sm:justify-end">
-            <button
-              type="button"
-              onClick={onClose}
-              className="flex h-11 items-center justify-center rounded-lg border border-border bg-white px-5 text-sm font-black text-foreground transition hover:bg-surface-muted"
-            >
-              إلغاء
-            </button>
-            <button
-              type="submit"
-              disabled={!name.trim() || saving}
-              className="flex h-11 items-center justify-center gap-2 rounded-lg bg-primary px-5 text-sm font-black text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {saving ? (
-                <Loader2 className="h-5 w-5 animate-spin" />
-              ) : initial ? (
-                <Save className="h-5 w-5" />
-              ) : (
-                <Plus className="h-5 w-5" />
-              )}
-              {initial ? "حفظ التعديل" : "إضافة العلامة"}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-interface CategoryColumnItemProps {
-  category: CategoryReferenceItem;
-  active: boolean;
-  childCount: number;
-  saving: boolean;
-  dragDisabled?: boolean;
-  isDragging?: boolean;
-  rowRef?: (element: HTMLElement | null) => void;
-  rowStyle?: CSSProperties;
-  handleProps?: ComponentPropsWithRef<"button">;
-  onSelect: (categoryId: string) => void;
-  onCreateChild: (parentId: string) => void;
-  onEdit: (category: CategoryReferenceItem) => void;
-  onDelete: (category: CategoryReferenceItem) => void;
-  onToggleVisibility: (category: CategoryReferenceItem) => void;
-}
-
-function CategoryColumnItem({
-  category,
-  active,
-  childCount,
-  saving,
-  dragDisabled = false,
-  isDragging = false,
-  rowRef,
-  rowStyle,
-  handleProps,
-  onSelect,
-  onCreateChild,
-  onEdit,
-  onDelete,
-  onToggleVisibility,
-}: CategoryColumnItemProps) {
-  return (
-    <article
-      ref={rowRef}
-      style={rowStyle}
-      className={`group flex items-center gap-1.5 rounded-lg border p-2 transition ${
-        active
-          ? "border-primary bg-primary/5 ring-1 ring-primary/20"
-          : "border-slate-200 bg-white hover:border-slate-300"
-      } ${!category.showInPos ? "opacity-50" : ""} ${
-        isDragging ? "relative z-10 border-primary/60 shadow-lg" : ""
-      }`}
+    <ModalShell
+      title={initial ? "تعديل علامة تجارية" : "إضافة علامة تجارية"}
+      description="للفلترة والتقارير، وليس لمسار تنقل الكاشير."
+      icon={<Building2 className="h-5 w-5 text-primary" />}
+      onClose={onClose}
+      dismissible={!saving}
+      footer={
+        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <Button variant="outline" onClick={onClose} disabled={saving}>
+            إلغاء
+          </Button>
+          <Button type="submit" form={BRAND_MODAL_ID} disabled={!name.trim() || saving}>
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : initial ? <Check className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+            {initial ? "حفظ التعديل" : "إضافة العلامة"}
+          </Button>
+        </div>
+      }
     >
-      {!dragDisabled && handleProps && (
-        <button
-          type="button"
-          aria-label={`إعادة ترتيب ${category.name}`}
-          title="اسحب للترتيب"
-          className="grid h-8 w-5 shrink-0 cursor-grab touch-none place-items-center rounded-md text-slate-300 hover:bg-slate-100 hover:text-slate-500 active:cursor-grabbing"
-          {...handleProps}
-        >
-          <GripVertical className="h-4 w-4" />
-        </button>
-      )}
-      <button
-        type="button"
-        onClick={() => onSelect(category.id)}
-        className="flex min-w-0 flex-1 items-center gap-2 text-start"
-      >
-        <span
-          aria-hidden
-          className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-white"
-          style={{ backgroundColor: category.bgColor ?? "#2563eb" }}
-        >
-          <FolderTree className="h-4 w-4" />
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-black text-foreground">{category.name}</span>
-          <span className="block text-[10px] font-bold text-muted">
-            {childCount > 0 ? `${childCount.toLocaleString("ar-JO")} أقسام` : `${category.productCount.toLocaleString("ar-JO")} منتجات`}
-          </span>
-        </span>
-      </button>
-
-      <div className="flex shrink-0 items-center gap-0.5">
-        <button
-          type="button"
-          onClick={() => onToggleVisibility(category)}
-          aria-label={category.showInPos ? `إخفاء ${category.name} من نقطة البيع` : `إظهار ${category.name} في نقطة البيع`}
-          title={category.showInPos ? "إخفاء من نقطة البيع" : "إظهار في نقطة البيع"}
-          className={`grid h-8 w-8 place-items-center rounded-md transition ${category.showInPos ? "text-slate-400 hover:bg-slate-100 hover:text-slate-600" : "text-amber-500 hover:bg-amber-50 hover:text-amber-600"}`}
-        >
-          {category.showInPos ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
-        </button>
-        <button
-          type="button"
-          onClick={() => onCreateChild(category.id)}
-          aria-label={`إضافة قسم داخل ${category.name}`}
-          title="إضافة قسم داخله"
-          className="grid h-8 w-8 place-items-center rounded-md text-success hover:bg-success/10"
-        >
-          <Plus className="h-4 w-4" />
-        </button>
-        <button
-          type="button"
-          onClick={() => onEdit(category)}
-          aria-label={`تعديل ${category.name}`}
-          title="تعديل"
-          className="grid h-8 w-8 place-items-center rounded-md text-primary hover:bg-primary/10"
-        >
-          <Pencil className="h-4 w-4" />
-        </button>
-        <button
-          type="button"
-          onClick={() => onDelete(category)}
-          disabled={saving}
-          aria-label={`حذف ${category.name}`}
-          title="حذف"
-          className="grid h-8 w-8 place-items-center rounded-md text-destructive hover:bg-destructive/10 disabled:opacity-40"
-        >
-          <Trash2 className="h-4 w-4" />
-        </button>
-      </div>
-    </article>
+      <form id={BRAND_MODAL_ID} onSubmit={(event) => void handleSubmit(event)} className="space-y-5">
+        <label className="block text-sm font-bold text-muted">
+          الاسم <span className="text-destructive">*</span>
+          <Input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="مثال: Nestle" className="mt-1.5" />
+        </label>
+        {error && <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm font-bold text-destructive">{error}</p>}
+      </form>
+    </ModalShell>
   );
 }
 
-function SortableCategoryColumnItem(
-  props: Omit<CategoryColumnItemProps, "isDragging" | "rowRef" | "rowStyle" | "handleProps">,
-) {
-  const {
-    attributes,
-    isDragging,
-    listeners,
-    setNodeRef,
-    setActivatorNodeRef,
-    transform,
-    transition,
-  } = useSortable({ id: props.category.id, disabled: props.dragDisabled });
+/* ───────────────────────────────── Page ────────────────────────────────── */
 
-  const handleProps: ComponentPropsWithRef<"button"> = {
-    ref: setActivatorNodeRef,
-    ...attributes,
-    ...(listeners ?? {}),
-  };
-
-  return (
-    <CategoryColumnItem
-      {...props}
-      isDragging={isDragging}
-      rowRef={setNodeRef}
-      rowStyle={{ transform: CSS.Translate.toString(transform), transition }}
-      handleProps={handleProps}
-    />
-  );
-}
+type ModalState =
+  | null
+  | { kind: "category-create"; parentId: string | null }
+  | { kind: "brand-create" };
 
 export default function AdminCategoriesPage() {
   const [categories, setCategories] = useState<CategoryReferenceItem[]>([]);
   const [brands, setBrands] = useState<BrandReferenceItem[]>([]);
-  const [categorySearch, setCategorySearch] = useState("");
-  const [brandSearch, setBrandSearch] = useState("");
-  const [activePanel, setActivePanel] = useState<"categories" | "brands">("categories");
-  const [selectedRootId, setSelectedRootId] = useState("");
-  const [selectedCategoryId, setSelectedCategoryId] = useState("");
+  const [stats, setStats] = useState({ uncategorizedProductCount: 0, totalProductCount: 0 });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [pageError, setPageError] = useState("");
   const [modalError, setModalError] = useState("");
   const [notice, setNotice] = useState("");
   const [modalState, setModalState] = useState<ModalState>(null);
-  const columnsScrollRef = useRef<HTMLDivElement>(null);
+
+  const [query, setQuery] = useState("");
+  const [panel, setPanel] = useState<Panel>("categories");
+
+  // Tree state
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [renameSaving, setRenameSaving] = useState(false);
+
+  // Inline products shown under expanded leaf categories (keyed by category id).
+  const [leafProductsByCategory, setLeafProductsByCategory] = useState<Record<string, CategoryProductItem[]>>({});
+  const [leafLoadingId, setLeafLoadingId] = useState<string | null>(null);
+
+  // Brand state
+  const [brandSort, setBrandSort] = useState<BrandSort>("name");
+  const [brandAsc, setBrandAsc] = useState(true);
+
+  // Batch selection
+  const catSelection = useSelection();
+  const brandSelection = useSelection();
+
+  // Delete confirmation dialog
+  const [confirm, setConfirm] = useState<
+    | { kind: "category"; item: CategoryReferenceItem }
+    | { kind: "brand"; item: BrandReferenceItem }
+    | { kind: "bulk-categories"; ids: string[] }
+    | { kind: "bulk-brands"; ids: string[] }
+    | null
+  >(null);
 
   const dndSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
+  const searchRef = useRef<HTMLInputElement>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  /**
+   * Load taxonomy. `showLoading` gates the full-page spinner (used only for the
+   * initial mount and the explicit refresh button). Background/mutation-triggered
+   * refreshes run silently (no `loading`), so the tree never flickers or shrinks
+   * and existing expanded/leaf state is preserved. `resetLeaves` clears the
+   * inline leaf-product cache when a create/delete changed the underlying data.
+   */
+  const load = useCallback(async (opts?: { showLoading?: boolean; resetLeaves?: boolean }) => {
+    if (opts?.showLoading) setLoading(true);
     setPageError("");
     try {
       const data = await fetchTaxonomy();
       setCategories(data.categories);
       setBrands(data.brands);
+      setStats({ uncategorizedProductCount: data.uncategorizedProductCount, totalProductCount: data.totalProductCount });
+      catSelection.clear();
+      brandSelection.clear();
+      setEditingId(null);
+      if (opts?.resetLeaves) {
+        setLeafProductsByCategory({});
+        setLeafLoadingId(null);
+      }
     } catch (reason) {
-      setPageError(
-        reason instanceof Error ? reason.message : "تعذر تحميل التصنيفات والعلامات التجارية",
-      );
+      setPageError(reason instanceof Error ? reason.message : "تعذر تحميل التصنيفات والعلامات التجارية");
     } finally {
-      setLoading(false);
+      if (opts?.showLoading) setLoading(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => void load(), 0);
+    const timer = window.setTimeout(() => void load({ showLoading: true, resetLeaves: true }), 0);
     return () => window.clearTimeout(timer);
   }, [load]);
 
-  const flattenedCategories = useMemo(() => flattenHierarchy(categories), [categories]);
-  const pathNamesById = useMemo(
-    () => new Map(flattenedCategories.map((node) => [node.item.id, node.pathNames] as const)),
-    [flattenedCategories],
-  );
-  const pathIdsById = useMemo(
-    () => new Map(flattenedCategories.map((node) => [node.item.id, node.pathIds] as const)),
-    [flattenedCategories],
-  );
+  // Load inline products for a leaf category on demand (cached per category).
+  const inFlightProducts = useRef<Set<string>>(new Set());
+  const loadLeafProducts = useCallback(async (categoryId: string) => {
+    if (inFlightProducts.current.has(categoryId)) return;
+    inFlightProducts.current.add(categoryId);
+    setLeafLoadingId(categoryId);
+    try {
+      const items = await fetchCategoryProducts(categoryId);
+      setLeafProductsByCategory((prev) => (prev[categoryId]?.length === items.length ? prev : { ...prev, [categoryId]: items }));
+    } catch (reason) {
+      setPageError(reason instanceof Error ? reason.message : "تعذر تحميل منتجات التصنيف");
+    } finally {
+      inFlightProducts.current.delete(categoryId);
+      setLeafLoadingId(null);
+    }
+  }, []);
+
+  // Keyboard: "/" focuses search from anywhere.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (e.key === "/" && target.tagName !== "INPUT" && target.tagName !== "TEXTAREA") {
+        e.preventDefault();
+        searchRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   const childrenByParent = useMemo(() => {
     const map = buildChildrenByParent(categories);
@@ -536,143 +973,103 @@ export default function AdminCategoriesPage() {
   const rootCategories = useMemo(
     () =>
       categories
-        .filter((item) => !item.parentId)
+        .filter((item) => !item.parentId || !categories.some((c) => c.id === item.parentId))
         .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name, "ar")),
     [categories],
   );
 
-  const normalizedCategorySearch = normalizeArabicText(categorySearch.trim());
-  const normalizedBrandSearch = normalizeArabicText(brandSearch.trim());
+  const flattened = useMemo(() => flattenHierarchy(categories), [categories]);
 
-  const searchTextById = useMemo(() => {
-    const index = new Map<string, string>();
+  const normalizedQuery = normalizeArabicText(query.trim());
 
-    const build = (id: string): string => {
-      const existing = index.get(id);
-      if (existing) return existing;
+  // Build a search index: category id -> normalized path text (used to decide
+  // whether a node matches, and to show matching paths).
+  const searchableMap = useMemo(() => {
+    const map = new Map<string, { text: string; pathNames: string[] }>();
+    const known = new Set(categories.map((c) => c.id));
+    // Fallback entries for orphans whose parent is missing.
+    for (const c of categories) {
+      if (!c.parentId || !known.has(c.parentId)) {
+        map.set(c.id, { text: normalizeArabicText(c.name), pathNames: [c.name] });
+      }
+    }
+    for (const node of flattened) {
+      const text = normalizeArabicText([...node.pathNames].join(" "));
+      map.set(node.item.id, { text, pathNames: node.pathNames });
+    }
+    return map;
+  }, [categories, flattened]);
 
-      const pathLabel = pathNamesById.get(id)?.join(" ") ?? "";
-      const childrenText = (childrenByParent.get(id) ?? []).map((child) => build(child.id)).join(" ");
-      const text = normalizeArabicText(`${pathLabel} ${childrenText}`);
-      index.set(id, text);
-      return text;
-    };
-
-    for (const category of categories) build(category.id);
-    return index;
-  }, [categories, childrenByParent, pathNamesById]);
-
-  const shouldShowNode = useCallback(
-    (id: string) =>
-      !normalizedCategorySearch ||
-      (searchTextById.get(id) ?? "").includes(normalizedCategorySearch),
-    [normalizedCategorySearch, searchTextById],
+  const searchMatches = useCallback(
+    (id: string) => {
+      if (!normalizedQuery) return true;
+      const entry = searchableMap.get(id);
+      return entry ? entry.text.includes(normalizedQuery) : false;
+    },
+    [normalizedQuery, searchableMap],
   );
+
+  const hasActiveSearch = Boolean(normalizedQuery);
+
+  // Eagerly load inline products for every node (leaf or parent) that is
+  // expanded or search-visible, so direct products show without a click.
+  useEffect(() => {
+    if (loading || inFlightProducts.current.size > 0) return;
+    for (const c of categories) {
+      const visible = hasActiveSearch ? searchMatches(c.id) : expandedIds.has(c.id);
+      if (visible && !leafProductsByCategory[c.id] && !inFlightProducts.current.has(c.id)) {
+        void loadLeafProducts(c.id);
+      }
+    }
+  }, [loading, categories, hasActiveSearch, searchMatches, expandedIds, leafProductsByCategory, loadLeafProducts]);
 
   const visibleRootCategories = useMemo(
-    () => rootCategories.filter((root) => shouldShowNode(root.id)),
-    [rootCategories, shouldShowNode],
+    () => rootCategories.filter((root) => searchMatches(root.id)),
+    [rootCategories, searchMatches],
   );
 
-  const visibleCategoryIds = useMemo(
-    () => new Set(categories.filter((category) => shouldShowNode(category.id)).map((category) => category.id)),
-    [categories, shouldShowNode],
-  );
+  const toggleExpand = useCallback((category: CategoryReferenceItem) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(category.id)) next.delete(category.id);
+      else next.add(category.id);
+      return next;
+    });
+  }, []);
 
-  const effectiveSelectedRootId =
-    visibleRootCategories.some((root) => root.id === selectedRootId)
-      ? selectedRootId
-      : (visibleRootCategories[0]?.id ?? "");
-
-  const selectedRootCategory = useMemo(
-    () =>
-      visibleRootCategories.find((root) => root.id === effectiveSelectedRootId) ??
-      visibleRootCategories[0] ??
-      null,
-    [effectiveSelectedRootId, visibleRootCategories],
-  );
-
-  const focusedCategory = useMemo(() => {
-    if (!selectedRootCategory) return null;
-
-    const candidate = categories.find((category) => category.id === selectedCategoryId) ?? null;
-    const candidatePath = candidate ? pathIdsById.get(candidate.id) ?? [] : [];
-    const candidateInsideRoot =
-      candidate &&
-      visibleCategoryIds.has(candidate.id) &&
-      candidatePath[0] === selectedRootCategory.id;
-
-    return candidateInsideRoot ? candidate : selectedRootCategory;
-  }, [categories, pathIdsById, selectedCategoryId, selectedRootCategory, visibleCategoryIds]);
-
-  const focusedPathItems = useMemo(() => {
-    if (!focusedCategory) return [];
-    const pathIds = pathIdsById.get(focusedCategory.id) ?? [];
-    return pathIds
-      .map((id) => categories.find((category) => category.id === id) ?? null)
-      .filter((category): category is CategoryReferenceItem => Boolean(category));
-  }, [categories, focusedCategory, pathIdsById]);
-
-  const categoryColumns = useMemo(() => {
-    const activeIds = focusedPathItems.map((category) => category.id);
-    const columns: Array<{
-      key: string;
-      title: string;
-      parent: CategoryReferenceItem | null;
-      items: CategoryReferenceItem[];
-      activeId: string;
-    }> = [
-      {
-        key: "roots",
-        title: "الأقسام الرئيسية",
-        parent: null,
-        items: visibleRootCategories,
-        activeId: activeIds[0] ?? "",
-      },
-    ];
-
-    for (let index = 0; index < focusedPathItems.length; index += 1) {
-      const parent = focusedPathItems[index];
-      columns.push({
-        key: `children-${parent.id}`,
-        title: parent.name,
-        parent,
-        items: (childrenByParent.get(parent.id) ?? []).filter((category) => shouldShowNode(category.id)),
-        activeId: activeIds[index + 1] ?? "",
-      });
-    }
-
-    return columns;
-  }, [childrenByParent, focusedPathItems, shouldShowNode, visibleRootCategories]);
-
-  const handleCategoryDragEnd = useCallback(
+  const handleDragEnd = useCallback(
     async (event: DragEndEvent) => {
       const { active, over } = event;
       if (!over || active.id === over.id) return;
       const activeId = String(active.id);
       const overId = String(over.id);
 
-      const column = categoryColumns.find(
-        (col) => col.items.some((item) => item.id === activeId) && col.items.some((item) => item.id === overId),
-      );
-      if (!column) return;
+      const siblings = (cat: CategoryReferenceItem) => {
+        const parentId = cat.parentId;
+        if (!parentId) return rootCategories;
+        return childrenByParent.get(parentId) ?? [];
+      };
 
-      const ids = column.items.map((item) => item.id);
-      const fromIndex = ids.indexOf(activeId);
-      const toIndex = ids.indexOf(overId);
+      const activeCat = categories.find((c) => c.id === activeId);
+      const overCat = categories.find((c) => c.id === overId);
+      if (!activeCat || !overCat) return;
+
+      // Only reorder within the same parent group.
+      if ((activeCat.parentId ?? null) !== (overCat.parentId ?? null)) return;
+
+      const list = siblings(activeCat);
+      const fromIndex = list.findIndex((c) => c.id === activeId);
+      const toIndex = list.findIndex((c) => c.id === overId);
       if (fromIndex < 0 || toIndex < 0) return;
 
-      const reordered = arrayMove(column.items, fromIndex, toIndex);
-      const updates = reordered
-        .map((item, index) => ({ id: item.id, sortOrder: index }))
-        .filter((update, index) => update.sortOrder !== reordered[index].sortOrder);
-      if (updates.length === 0) return;
+      const reordered = arrayMove(list, fromIndex, toIndex);
+      const updates = reordered.map((item, index) => ({ id: item.id, sortOrder: index }));
 
       const snapshot = categories;
       setCategories((prev) =>
         prev.map((category) => {
-          const index = reordered.findIndex((item) => item.id === category.id);
-          return index >= 0 ? { ...category, sortOrder: index } : category;
+          const idx = updates.findIndex((u) => u.id === category.id);
+          return idx >= 0 ? { ...category, sortOrder: updates[idx].sortOrder } : category;
         }),
       );
       try {
@@ -685,39 +1082,27 @@ export default function AdminCategoriesPage() {
         setPageError(reason instanceof Error ? reason.message : "تعذر حفظ ترتيب التصنيفات");
       }
     },
-    [categories, categoryColumns],
+    [categories, childrenByParent, rootCategories],
   );
 
-  useEffect(() => {
-    const container = columnsScrollRef.current;
-    if (!container || !focusedCategory) return;
-    const lastColumn = container.lastElementChild;
-    if (lastColumn instanceof HTMLElement) {
-      lastColumn.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
-    }
-  }, [focusedCategory]);
-
+  // Brand filtering + sorting
   const filteredBrands = useMemo(() => {
-    if (!normalizedBrandSearch) return brands;
-    return brands.filter((item) => normalizeArabicText(item.name).includes(normalizedBrandSearch));
-  }, [brands, normalizedBrandSearch]);
+    let list = brands.slice();
+    if (normalizedQuery) {
+      list = list.filter((b) => normalizeArabicText(b.name).includes(normalizedQuery));
+    }
+    list.sort((a, b) => {
+      if (brandSort === "name") {
+        const byName = a.name.localeCompare(b.name, "ar");
+        return brandAsc ? byName : -byName;
+      }
+      const byCount = a.productCount - b.productCount;
+      return brandAsc ? byCount : -byCount;
+    });
+    return list;
+  }, [brands, normalizedQuery, brandSort, brandAsc]);
 
-  const modalCategory = useMemo(
-    () =>
-      modalState?.kind === "category-edit"
-        ? categories.find((item) => item.id === modalState.categoryId) ?? null
-        : null,
-    [categories, modalState],
-  );
-
-  const modalBrand = useMemo(
-    () =>
-      modalState?.kind === "brand-edit"
-        ? brands.find((item) => item.id === modalState.brandId) ?? null
-        : null,
-    [brands, modalState],
-  );
-
+  // Modal helpers
   const closeModal = () => {
     if (saving) return;
     setModalState(null);
@@ -729,45 +1114,25 @@ export default function AdminCategoriesPage() {
     setNotice("");
     setModalState({ kind: "category-create", parentId });
   };
-
-  const openCategoryEdit = (category: CategoryReferenceItem) => {
-    setModalError("");
-    setNotice("");
-    setModalState({ kind: "category-edit", categoryId: category.id });
-  };
-
-  const selectCategory = (category: CategoryReferenceItem) => {
-    const rootId = pathIdsById.get(category.id)?.[0] ?? category.id;
-    setSelectedRootId(rootId);
-    setSelectedCategoryId(category.id);
-  };
-
   const openBrandCreate = () => {
     setModalError("");
     setNotice("");
     setModalState({ kind: "brand-create" });
   };
 
-  const openBrandEdit = (brand: BrandReferenceItem) => {
-    setModalError("");
-    setNotice("");
-    setModalState({ kind: "brand-edit", brandId: brand.id });
-  };
-
   const saveCategoryHandler = async (payload: { name: string; parentId: string | null; showInPos: boolean }) => {
-    const editing =
-      modalState?.kind === "category-edit"
-        ? categories.find((item) => item.id === modalState.categoryId) ?? null
-        : null;
     setSaving(true);
     setModalError("");
     setPageError("");
     setNotice("");
     try {
-      await saveCategory(payload, editing?.id);
+      const created = await saveCategory(payload);
       setModalState(null);
-      setNotice(editing ? "تم تحديث التصنيف بنجاح" : "تم إنشاء التصنيف بنجاح");
-      await load();
+      setNotice("تم إنشاء التصنيف بنجاح");
+      // Optimistically insert so the tree updates instantly, then silently
+      // reconcile (new id, sort order) without a full-page loading gate.
+      setCategories((prev) => [...prev, created]);
+      void load({ showLoading: false, resetLeaves: false });
     } catch (reason) {
       setModalError(reason instanceof Error ? reason.message : "تعذر حفظ التصنيف");
     } finally {
@@ -776,19 +1141,16 @@ export default function AdminCategoriesPage() {
   };
 
   const saveBrandHandler = async (payload: { name: string }) => {
-    const editing =
-      modalState?.kind === "brand-edit"
-        ? brands.find((item) => item.id === modalState.brandId) ?? null
-        : null;
     setSaving(true);
     setModalError("");
     setPageError("");
     setNotice("");
     try {
-      await saveBrand(payload, editing?.id);
+      const created = await saveBrand(payload);
       setModalState(null);
-      setNotice(editing ? "تم تحديث العلامة التجارية" : "تمت إضافة العلامة التجارية");
-      await load();
+      setNotice("تمت إضافة العلامة التجارية");
+      setBrands((prev) => [...prev, created]);
+      void load({ showLoading: false, resetLeaves: false });
     } catch (reason) {
       setModalError(reason instanceof Error ? reason.message : "تعذر حفظ العلامة التجارية");
     } finally {
@@ -796,29 +1158,93 @@ export default function AdminCategoriesPage() {
     }
   };
 
+  const startInlineRename = (category: CategoryReferenceItem) => {
+    setPageError("");
+    setNotice("");
+    setEditingId(category.id);
+  };
+  const cancelRename = () => setEditingId(null);
+
+  const commitCategoryRename = async (category: CategoryReferenceItem, name: string) => {
+    setRenameSaving(true);
+    setPageError("");
+    setNotice("");
+    try {
+      await renameCategory(category.id, name);
+      setCategories((prev) => prev.map((c) => (c.id === category.id ? { ...c, name: name.trim() } : c)));
+      setEditingId(null);
+      setNotice("تم تحديث اسم التصنيف");
+    } catch (reason) {
+      setPageError(reason instanceof Error ? reason.message : "تعذر تحديث الاسم");
+      setEditingId(null);
+    } finally {
+      setRenameSaving(false);
+    }
+  };
+
+  const startBrandRename = (brand: BrandReferenceItem) => {
+    setPageError("");
+    setNotice("");
+    setEditingId(brand.id);
+  };
+
+  const commitBrandRename = async (brand: BrandReferenceItem, name: string) => {
+    setRenameSaving(true);
+    setPageError("");
+    setNotice("");
+    try {
+      await renameBrand(brand.id, name);
+      setBrands((prev) => prev.map((b) => (b.id === brand.id ? { ...b, name: name.trim() } : b)));
+      setEditingId(null);
+      setNotice("تم تحديث اسم العلامة التجارية");
+    } catch (reason) {
+      setPageError(reason instanceof Error ? reason.message : "تعذر تحديث الاسم");
+      setEditingId(null);
+    } finally {
+      setRenameSaving(false);
+    }
+  };
+
   const removeCategory = async (item: CategoryReferenceItem) => {
-    const impact = [
-      item.childCount > 0 ? `${item.childCount.toLocaleString("ar-JO")} تصنيف فرعي` : "",
-      item.productCount > 0 ? `${item.productCount.toLocaleString("ar-JO")} منتج مرتبط` : "",
-    ]
-      .filter(Boolean)
-      .join("، ");
-
-    if (!window.confirm(`حذف التصنيف «${item.name}»؟${impact ? ` (${impact})` : ""}`)) return;
-
     setSaving(true);
     setModalError("");
     setPageError("");
     setNotice("");
     try {
       await deleteCategory(item.id);
-      if (modalState?.kind === "category-edit" && modalState.categoryId === item.id) {
-        setModalState(null);
-      }
+      setConfirm(null);
       setNotice("تم حذف التصنيف");
-      await load();
+      // Optimistically drop the node without collapsing anything, then reconcile.
+      setCategories((prev) => prev.filter((c) => c.id !== item.id));
+      setLeafProductsByCategory((prev) => {
+        if (!(item.id in prev)) return prev;
+        const next = { ...prev };
+        delete next[item.id];
+        return next;
+      });
+      void load({ showLoading: false, resetLeaves: false });
     } catch (reason) {
       setPageError(reason instanceof Error ? reason.message : "تعذر حذف التصنيف");
+      setConfirm(null);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const removeBrand = async (item: BrandReferenceItem) => {
+    setSaving(true);
+    setModalError("");
+    setPageError("");
+    setNotice("");
+    try {
+      await deleteBrand(item.id);
+      setConfirm(null);
+      setNotice("تم حذف العلامة التجارية");
+      setBrands((prev) => prev.filter((b) => b.id !== item.id));
+      void load({ showLoading: false, resetLeaves: false });
+    } catch (reason) {
+      setPageError(reason instanceof Error ? reason.message : "تعذر حذف العلامة التجارية");
+      setConfirm(null);
     } finally {
       setSaving(false);
     }
@@ -831,9 +1257,7 @@ export default function AdminCategoriesPage() {
     setNotice("");
     try {
       await toggleCategoryVisibility(item);
-      setCategories((prev) =>
-        prev.map((c) => (c.id === item.id ? { ...c, showInPos: newShowInPos } : c)),
-      );
+      setCategories((prev) => prev.map((c) => (c.id === item.id ? { ...c, showInPos: newShowInPos } : c)));
       setNotice(newShowInPos ? `تم إظهار «${item.name}» في نقطة البيع` : `تم إخفاء «${item.name}» من نقطة البيع`);
     } catch (reason) {
       setPageError(reason instanceof Error ? reason.message : "تعذر تحديث ظهور التصنيف");
@@ -842,356 +1266,529 @@ export default function AdminCategoriesPage() {
     }
   };
 
-  const removeBrand = async (item: BrandReferenceItem) => {
-    const impact = item.productCount > 0 ? ` (${item.productCount.toLocaleString("ar-JO")} منتج مرتبط)` : "";
-    if (!window.confirm(`حذف العلامة التجارية «${item.name}»؟${impact}`)) return;
-
+  const bulkDeleteCategories = async () => {
+    const ids = [...catSelection.ids];
+    if (ids.length === 0) return;
     setSaving(true);
-    setModalError("");
     setPageError("");
     setNotice("");
     try {
-      await deleteBrand(item.id);
-      if (modalState?.kind === "brand-edit" && modalState.brandId === item.id) {
-        setModalState(null);
-      }
-      setNotice("تم حذف العلامة التجارية");
-      await load();
+      await deleteCategories(ids);
+      setConfirm(null);
+      catSelection.clear();
+      setNotice(`تم حذف ${ids.length.toLocaleString("ar-JO")} تصنيف`);
+      const idSet = new Set(ids);
+      setCategories((prev) => prev.filter((c) => !idSet.has(c.id)));
+      setLeafProductsByCategory((prev) => {
+        const next = { ...prev };
+        for (const id of ids) delete next[id];
+        return next;
+      });
+      void load({ showLoading: false, resetLeaves: false });
     } catch (reason) {
-      setPageError(reason instanceof Error ? reason.message : "تعذر حذف العلامة التجارية");
+      setPageError(reason instanceof Error ? reason.message : "تعذر حذف التصنيفات");
+      setConfirm(null);
     } finally {
       setSaving(false);
     }
   };
 
+  const bulkDeleteBrands = async () => {
+    const ids = [...brandSelection.ids];
+    if (ids.length === 0) return;
+    setSaving(true);
+    setPageError("");
+    setNotice("");
+    try {
+      await deleteBrands(ids);
+      setConfirm(null);
+      brandSelection.clear();
+      setNotice(`تم حذف ${ids.length.toLocaleString("ar-JO")} علامة`);
+      const idSet = new Set(ids);
+      setBrands((prev) => prev.filter((b) => !idSet.has(b.id)));
+      void load({ showLoading: false, resetLeaves: false });
+    } catch (reason) {
+      setPageError(reason instanceof Error ? reason.message : "تعذر حذف العلامات");
+      setConfirm(null);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const bulkHideCategories = async (showInPos: boolean) => {
+    const ids = [...catSelection.ids];
+    if (ids.length === 0) return;
+    setSaving(true);
+    setPageError("");
+    setNotice("");
+    try {
+      await toggleCategoriesVisibility(ids, showInPos);
+      setCategories((prev) => prev.map((c) => (catSelection.ids.has(c.id) ? { ...c, showInPos } : c)));
+      catSelection.clear();
+      setNotice(showInPos ? `تم إظهار ${ids.length.toLocaleString("ar-JO")} تصنيف` : `تم إخفاء ${ids.length.toLocaleString("ar-JO")} تصنيف`);
+    } catch (reason) {
+      setPageError(reason instanceof Error ? reason.message : "تعذر تحديث ظهور التصنيفات");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const collapseAll = () => setExpandedIds(new Set());
+  const expandAll = () => setExpandedIds(new Set(categories.map((c) => c.id)));
+
+  const categoryDeleteImpact = (item: CategoryReferenceItem) =>
+    [item.childCount > 0 ? `${item.childCount.toLocaleString("ar-JO")} تصنيف فرعي` : "", item.productCount > 0 ? `${item.productCount.toLocaleString("ar-JO")} منتج مرتبط` : ""]
+      .filter(Boolean)
+      .join("، ");
+
+  const activeSelectionCount = panel === "categories" ? catSelection.ids.size : brandSelection.ids.size;
+
   return (
-    <div className="flex min-w-0 flex-col gap-3 md:h-[calc(100dvh-9rem)] md:min-h-0">
-      <header className="flex shrink-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="min-w-0">
-          <h1 className="truncate text-xl font-black text-foreground">التصنيفات والعلامات</h1>
-          <p className="mt-0.5 text-xs font-semibold text-muted">
-            كل عمود هو مستوى. اختر قسمًا لتظهر محتوياته في العمود التالي، واسحب مقبض القسم لإعادة ترتيبه.
-          </p>
-        </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => void load()}
-            disabled={loading}
-            aria-label="تحديث"
-            title="تحديث"
-            className="grid h-10 w-10 place-items-center rounded-lg border border-border bg-surface text-muted hover:bg-surface-muted disabled:opacity-40"
-          >
-            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-          </button>
-          <Link
-            href="/admin/inventory"
-            className="flex h-10 items-center gap-2 rounded-lg border border-border bg-surface px-3 text-xs font-black text-foreground hover:bg-surface-muted"
-          >
-            <Package className="h-4 w-4 text-primary" />
-            المنتجات
-          </Link>
-          <button
-            type="button"
-            onClick={activePanel === "categories" ? () => openCategoryCreate() : openBrandCreate}
-            className="flex h-10 items-center gap-2 rounded-lg bg-primary px-3 text-xs font-black text-primary-foreground hover:bg-primary-hover"
-          >
-            <Plus className="h-4 w-4" />
-            {activePanel === "categories" ? "قسم رئيسي" : "علامة"}
-          </button>
-        </div>
-      </header>
+    <div className="mx-auto flex min-w-0 max-w-6xl flex-col gap-5 p-4 sm:p-6">
+      <PageHeader
+        title="التصنيفات والعلامات"
+        subtitle="هيكل شجري سريع وإدارة مريحة لتصنيفاتك وعلاماتك — مع بحث فوري وإجراءات جماعية."
+        action={
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <Button variant="outline" size="sm" onClick={() => void load({ showLoading: true, resetLeaves: true })} disabled={loading} aria-label="تحديث" title="تحديث">
+              <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
+            </Button>
+            <a
+              href="/admin/inventory"
+              className="inline-flex h-9 items-center gap-2 rounded-xl border border-border bg-surface px-3 text-xs font-black text-foreground shadow-card transition hover:bg-surface-muted"
+            >
+              <PackageOpen className="h-4 w-4 text-primary" />
+              المنتجات
+            </a>
+            <Button size="sm" onClick={() => (panel === "categories" ? openCategoryCreate() : openBrandCreate())}>
+              <Plus className="h-4 w-4" />
+              {panel === "categories" ? "قسم رئيسي" : "علامة"}
+            </Button>
+          </div>
+        }
+      />
+
+      {/*
+        Quick Stats Bar
+      */}
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <StatCard label="إجمالي التصنيفات" value={categories.length.toLocaleString("ar-JO")} icon={FolderTree} tone="primary" subtitle="يشمل الرئيسية والفرعية" />
+        <StatCard label="إجمالي العلامات" value={brands.length.toLocaleString("ar-JO")} icon={Building2} tone="default" subtitle="علامات تجارية" />
+        <StatCard
+          label="منتجات غير مصنفة"
+          value={stats.uncategorizedProductCount.toLocaleString("ar-JO")}
+          icon={Package}
+          tone={stats.uncategorizedProductCount > 0 ? "warning" : "success"}
+          subtitle="تحتاج تعيين تصنيف"
+        />
+        <StatCard label="إجمالي المنتجات" value={stats.totalProductCount.toLocaleString("ar-JO")} icon={LayoutGrid} subtitle="في المتجر" />
+      </div>
 
       {pageError && (
-        <p className="shrink-0 rounded-md bg-destructive/10 px-3 py-2 text-xs font-bold text-destructive">{pageError}</p>
+        <div role="alert" className="flex items-center gap-2 rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm font-bold text-destructive">
+          <XCircle className="h-5 w-5 shrink-0" />
+          <span className="flex-1">{pageError}</span>
+          <button type="button" onClick={() => setPageError("")} aria-label="إغلاق الرسالة" className="rounded-md p-1 hover:bg-destructive/15">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
       )}
       {notice && (
-        <p className="shrink-0 rounded-md bg-success/10 px-3 py-2 text-xs font-bold text-success">{notice}</p>
+        <div role="status" className="flex items-center gap-2 rounded-xl border border-success/30 bg-success/10 px-4 py-3 text-sm font-bold text-success">
+          <CheckCheck className="h-5 w-5 shrink-0" />
+          <span className="flex-1">{notice}</span>
+          <button type="button" onClick={() => setNotice("")} aria-label="إغلاق الرسالة" className="rounded-md p-1 hover:bg-success/15">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
       )}
 
-      <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-sm">
-        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border p-2.5">
-          <div className="inline-flex rounded-lg bg-surface-muted p-1 ring-1 ring-border">
+      {/*
+        Command / Search bar
+      */}
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+        <div className="relative flex-1">
+          <Search className="pointer-events-none absolute inset-y-0 start-3.5 my-auto h-4 w-4 text-muted" />
+          <Input
+            ref={searchRef}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="بحث فوري في التصنيفات والعلامات… (اضغط / للتركيز)"
+            className="h-12 ps-10 text-base"
+            aria-label="بحث فوري"
+          />
+          {normalizedQuery && (
             <button
               type="button"
-              onClick={() => setActivePanel("categories")}
-              className={`flex h-9 items-center gap-2 rounded-md px-3 text-xs font-black ${
-                activePanel === "categories" ? "bg-surface text-foreground shadow-card" : "text-muted"
-              }`}
+              onClick={() => setQuery("")}
+              aria-label="مسح البحث"
+              className="absolute inset-y-0 end-3 my-auto grid h-7 w-7 place-items-center rounded-md text-muted hover:bg-surface-muted hover:text-foreground"
             >
-              <FolderTree className="h-4 w-4" />
-              التصنيفات
-              <span className="tabular-nums text-[10px]">{categories.length.toLocaleString("ar-JO")}</span>
+              <X className="h-4 w-4" />
             </button>
-            <button
-              type="button"
-              onClick={() => setActivePanel("brands")}
-              className={`flex h-9 items-center gap-2 rounded-md px-3 text-xs font-black ${
-                activePanel === "brands" ? "bg-surface text-foreground shadow-card" : "text-muted"
-              }`}
-            >
-              <Building2 className="h-4 w-4" />
-              العلامات
-              <span className="tabular-nums text-[10px]">{brands.length.toLocaleString("ar-JO")}</span>
-            </button>
-          </div>
-
-          <label className="w-72 max-w-[42%]">
-            <span className="sr-only">بحث</span>
-            <input
-              value={activePanel === "categories" ? categorySearch : brandSearch}
-              onChange={(event) =>
-                activePanel === "categories"
-                  ? setCategorySearch(event.target.value)
-                  : setBrandSearch(event.target.value)
-              }
-              placeholder={activePanel === "categories" ? "بحث في التصنيفات" : "بحث في العلامات"}
-              className="h-9 w-full rounded-lg border border-border bg-surface px-3 text-xs font-bold outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
-            />
-          </label>
+          )}
         </div>
 
-        {activePanel === "categories" ? (
-          loading ? (
-            <div className="grid min-h-0 flex-1 place-items-center text-sm font-bold text-muted">
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Button
+            variant={panel === "categories" ? "default" : "ghost"}
+            size="sm"
+            onClick={() => setPanel("categories")}
+            className={panel === "categories" ? "" : "bg-surface"}
+          >
+            <FolderTree className="h-4 w-4" />
+            التصنيفات
+            <Badge tone="muted">{categories.length.toLocaleString("ar-JO")}</Badge>
+          </Button>
+          <Button
+            variant={panel === "brands" ? "default" : "ghost"}
+            size="sm"
+            onClick={() => setPanel("brands")}
+            className={panel === "brands" ? "" : "bg-surface"}
+          >
+            <Building2 className="h-4 w-4" />
+            العلامات
+            <Badge tone="muted">{brands.length.toLocaleString("ar-JO")}</Badge>
+          </Button>
+        </div>
+      </div>
+
+      {panel === "categories" ? (
+        <section className="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-sm">
+          {/* Tree toolbar */}
+          <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5">
+            <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <span className="flex min-w-0 items-center gap-2 text-xs font-bold text-muted">
+                <List className="h-4 w-4 shrink-0" />
+                {hasActiveSearch
+                  ? `نتائج البحث في التصنيفات (${visibleRootCategories.length.toLocaleString("ar-JO")})`
+                  : "الأقسام الرئيسية والفرعية — تصنيفات المنتجات لتنقل الكاشير في نقطة البيع"}
+              </span>
+              <span className="ps-6 text-[11px] font-semibold text-muted">
+                أسماء العلامات التجارية (مثل «ديماس») تُدار من لوحة «العلامات» وتُستخدم للفلترة والتقارير فقط — وليست تصنيفات لنقطة البيع.
+              </span>
+            </span>
+            {!hasActiveSearch && (
+              <div className="flex items-center gap-1">
+                <Button variant="ghost" size="sm" onClick={expandAll}>
+                  <Menu className="h-3.5 w-3.5" />
+                  توسيع الكل
+                </Button>
+                <Button variant="ghost" size="sm" onClick={collapseAll}>
+                  طيّ الكل
+                </Button>
+              </div>
+            )}
+          </div>
+
+          {loading ? (
+            <div className="grid min-h-64 place-items-center text-sm font-bold text-muted">
               <Loader2 className="h-7 w-7 animate-spin text-primary" />
             </div>
           ) : visibleRootCategories.length === 0 ? (
-            <div className="grid min-h-0 flex-1 place-items-center px-6 text-center">
+            <div className="grid min-h-64 place-items-center px-6 text-center">
               <div>
-                <FolderTree className="mx-auto h-9 w-9 text-muted" />
-                <p className="mt-2 text-sm font-black text-foreground">
-                  {normalizedCategorySearch ? "لا توجد نتائج" : "لا توجد تصنيفات"}
+                <FolderTree className="mx-auto h-10 w-10 text-muted" />
+                <p className="mt-2 text-sm font-black text-foreground">{normalizedQuery ? "لا توجد نتائج" : "لا توجد تصنيفات بعد"}</p>
+                <p className="mt-1 text-xs font-semibold text-muted">
+                  {normalizedQuery ? "جرّب كلمة أخرى." : "ابدأ بإضافة أول قسم رئيسي."}
                 </p>
+                {!normalizedQuery && (
+                  <Button className="mt-4" size="sm" onClick={() => openCategoryCreate()}>
+                    <Plus className="h-4 w-4" />
+                    إضافة قسم رئيسي
+                  </Button>
+                )}
               </div>
             </div>
           ) : (
+            <div className="min-h-0 flex-1 overflow-y-auto p-3">
+              <ul className="flex flex-col gap-1.5">
+                <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={(e) => void handleDragEnd(e)}>
+                  <SortableContext items={visibleRootCategories.map((c) => c.id)} strategy={verticalListSortingStrategy}>
+                    {visibleRootCategories.map((root) => (
+                      <TreeNode
+                        key={root.id}
+                        category={root}
+                        depth={0}
+                        expandedIds={expandedIds}
+                        editingId={editingId}
+                        selectedIds={catSelection.ids}
+                        saving={saving}
+                        renameSaving={renameSaving}
+                        hasActiveSearch={hasActiveSearch}
+                        childrenByParent={childrenByParent}
+                        sensors={dndSensors}
+                        leafProductsByCategory={leafProductsByCategory}
+                        leafLoadingId={leafLoadingId}
+                        onToggleExpand={toggleExpand}
+                        onSelect={(c) => catSelection.toggle(c.id)}
+                        onAddChild={openCategoryCreate}
+                        onStartEdit={startInlineRename}
+                        onDelete={(c) => setConfirm({ kind: "category", item: c })}
+                        onToggleVisibility={(c) => void toggleCategoryVisibilityHandler(c)}
+                        onRename={(c, n) => void commitCategoryRename(c, n)}
+                        onCancelRename={cancelRename}
+                        onDragEnd={(e) => void handleDragEnd(e)}
+                      />
+                    ))}
+                  </SortableContext>
+                </DndContext>
+              </ul>
+            </div>
+          )}
+        </section>
+      ) : (
+        <BrandsPanel
+          brands={filteredBrands}
+          totalVisible={filteredBrands.length}
+          hasSearch={hasActiveSearch}
+          loading={loading}
+          saving={saving}
+          renameSaving={renameSaving}
+          editingId={editingId}
+          selection={brandSelection}
+          sort={brandSort}
+          asc={brandAsc}
+          onSortChange={(s) => setBrandSort(s)}
+          onToggleSort={() => setBrandAsc((a) => !a)}
+          onSelect={(b) => brandSelection.toggle(b.id)}
+          onStartEdit={startBrandRename}
+          onDelete={(b) => setConfirm({ kind: "brand", item: b })}
+          onRename={(b, n) => void commitBrandRename(b, n)}
+          onCancelRename={cancelRename}
+          onAdd={() => openBrandCreate()}
+        />
+      )}
+
+      {/*
+        Batch actions bar (floating)
+      */}
+      {activeSelectionCount > 0 && (
+        <div className="sticky bottom-4 z-30 mx-auto flex w-fit max-w-full flex-wrap items-center gap-2 rounded-2xl border border-border bg-surface px-4 py-3 shadow-overlay">
+          <Badge tone="primary" className="px-3 py-1">
+            {activeSelectionCount.toLocaleString("ar-JO")} محدد
+          </Badge>
+          {panel === "categories" ? (
             <>
-              <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border px-3">
-                <div className="flex min-w-0 items-center gap-1 overflow-x-auto scrollbar-hidden">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedRootId(visibleRootCategories[0]?.id ?? "");
-                      setSelectedCategoryId(visibleRootCategories[0]?.id ?? "");
-                    }}
-                    className="shrink-0 text-xs font-black text-muted hover:text-primary"
-                  >
-                    الرئيسية
-                  </button>
-                  {focusedPathItems.map((category) => (
-                    <span key={category.id} className="flex shrink-0 items-center gap-1">
-                      <span className="text-slate-300">/</span>
-                      <button
-                        type="button"
-                        onClick={() => selectCategory(category)}
-                        className={`max-w-32 truncate text-xs font-black ${
-                          category.id === focusedCategory?.id ? "text-foreground" : "text-muted hover:text-primary"
-                        }`}
-                      >
-                        {category.name}
-                      </button>
-                    </span>
-                  ))}
-                </div>
-
-                {focusedCategory && (
-                  <div className="flex shrink-0 items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => openCategoryCreate(focusedCategory.id)}
-                      className="flex h-8 items-center gap-1 rounded-md px-2 text-[11px] font-black text-success hover:bg-success/10"
-                    >
-                      <Plus className="h-3.5 w-3.5" />
-                      إضافة داخله
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => openCategoryEdit(focusedCategory)}
-                      aria-label="تعديل القسم المحدد"
-                      title="تعديل القسم المحدد"
-                      className="grid h-8 w-8 place-items-center rounded-md text-primary hover:bg-primary/10"
-                    >
-                      <Pencil className="h-4 w-4" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void removeCategory(focusedCategory)}
-                      disabled={saving}
-                      aria-label="حذف القسم المحدد"
-                      title="حذف القسم المحدد"
-                      className="grid h-8 w-8 place-items-center rounded-md text-destructive hover:bg-destructive/10 disabled:opacity-40"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              <DndContext
-                sensors={dndSensors}
-                collisionDetection={closestCenter}
-                onDragEnd={(event) => void handleCategoryDragEnd(event)}
+              <Button variant="outline" size="sm" onClick={() => bulkHideCategories(true)}>
+                <Eye className="h-4 w-4" />
+                إظهار
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => bulkHideCategories(false)}>
+                <EyeOff className="h-4 w-4" />
+                إخفاء
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => setConfirm({ kind: "bulk-categories", ids: [...catSelection.ids] })}
+                disabled={saving}
               >
-              <div
-                ref={columnsScrollRef}
-                className="flex min-h-0 flex-1 gap-2 overflow-x-auto bg-surface-muted/60 p-2 scrollbar-hidden"
-              >
-                {categoryColumns.map((column, index) => (
-                  <section
-                    key={column.key}
-                    className="flex h-full min-w-[250px] max-w-[290px] flex-1 flex-col overflow-hidden rounded-lg border border-border bg-surface shadow-card"
-                  >
-                    <header className="flex h-11 shrink-0 items-center justify-between gap-2 border-b border-slate-200 px-3">
-                      <div className="min-w-0">
-                        <h2 className="truncate text-xs font-black text-foreground">{column.title}</h2>
-                        <p className="text-[10px] font-bold text-muted">
-                          {column.items.length.toLocaleString("ar-JO")} قسم
-                          {!normalizedCategorySearch && " • اسحب المقبض للترتيب"}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => openCategoryCreate(column.parent?.id ?? null)}
-                        aria-label={column.parent ? `إضافة قسم داخل ${column.parent.name}` : "إضافة قسم رئيسي"}
-                        title={column.parent ? "إضافة قسم في هذا المستوى" : "إضافة قسم رئيسي"}
-                        className="grid h-8 w-8 place-items-center rounded-md text-success hover:bg-success/10"
-                      >
-                        <Plus className="h-4 w-4" />
-                      </button>
-                    </header>
-
-                    <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto p-2">
-                      {column.items.length > 0 ? (
-                        <SortableContext
-                          items={column.items.map((item) => item.id)}
-                          strategy={verticalListSortingStrategy}
-                        >
-                          {column.items.map((category) => (
-                            <SortableCategoryColumnItem
-                              key={category.id}
-                              category={category}
-                              active={column.activeId === category.id}
-                              childCount={(childrenByParent.get(category.id) ?? []).length}
-                              saving={saving}
-                              dragDisabled={Boolean(normalizedCategorySearch)}
-                              onSelect={() => selectCategory(category)}
-                              onCreateChild={openCategoryCreate}
-                              onEdit={openCategoryEdit}
-                              onDelete={(item) => void removeCategory(item)}
-                              onToggleVisibility={(item) => void toggleCategoryVisibilityHandler(item)}
-                            />
-                          ))}
-                        </SortableContext>
-                      ) : (
-                        <div className="grid h-full place-items-center px-4 text-center">
-                          <button
-                            type="button"
-                            onClick={() => openCategoryCreate(column.parent?.id ?? null)}
-                            className="text-xs font-black text-primary hover:underline"
-                          >
-                            + إضافة أول قسم
-                          </button>
-                        </div>
-                      )}
-                    </div>
-
-                    {index === categoryColumns.length - 1 && column.parent && (
-                      <footer className="shrink-0 border-t border-slate-200 px-3 py-2 text-[10px] font-bold text-muted">
-                        {column.parent.productCount.toLocaleString("ar-JO")} منتج مرتبط مباشرة
-                      </footer>
-                    )}
-                  </section>
-                ))}
-              </div>
-              </DndContext>
+                <Trash2 className="h-4 w-4" />
+                حذف
+              </Button>
             </>
-          )
-        ) : loading ? (
-          <div className="grid h-full min-h-0 place-items-center text-sm font-bold text-muted">
-            <div className="text-center">
-              <Loader2 className="mx-auto mb-2 h-7 w-7 animate-spin text-primary" />
-              جارٍ تحميل العلامات...
-            </div>
-          </div>
-        ) : filteredBrands.length === 0 ? (
-          <div className="grid h-full min-h-0 place-items-center px-6 text-center">
-            <div>
-              <Building2 className="mx-auto mb-3 h-9 w-9 text-muted" />
-              <p className="text-sm font-black text-foreground">
-                {normalizedBrandSearch ? "لا توجد نتائج مطابقة" : "لا توجد علامات تجارية بعد"}
-              </p>
-              <p className="mt-1 text-xs font-semibold text-muted">
-                {normalizedBrandSearch ? "جرّب اسمًا آخر." : "يمكنك إضافتها عند الحاجة فقط."}
-              </p>
-            </div>
-          </div>
-        ) : (
-          <div className="min-h-0 flex-1 overflow-y-auto p-4">
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              {filteredBrands.map((brand) => (
-                <article
-                  key={brand.id}
-                  className="rounded-xl border border-border bg-white p-4 transition hover:border-primary/30"
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <h3 className="truncate text-sm font-black text-foreground">{brand.name}</h3>
-                      <p className="mt-1 text-xs font-semibold text-muted">
-                        مرتبطة بـ {brand.productCount.toLocaleString("ar-JO")} منتج
-                      </p>
-                    </div>
-                    <span className="rounded-full bg-surface-muted px-2.5 py-1 text-[11px] font-black text-muted">
-                      علامة
-                    </span>
-                  </div>
-                  <div className="mt-3 flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => openBrandEdit(brand)}
-                      className="flex h-10 flex-1 items-center justify-center gap-1.5 rounded-lg border border-primary/30 bg-primary/5 text-xs font-black text-primary transition hover:bg-primary/10"
-                    >
-                      <Pencil className="h-4 w-4" />
-                      تعديل
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void removeBrand(brand)}
-                      disabled={saving}
-                      className="flex h-10 flex-1 items-center justify-center gap-1.5 rounded-lg border border-destructive/30 bg-destructive/5 text-xs font-black text-destructive transition hover:bg-destructive/10 disabled:opacity-40"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                      حذف
-                    </button>
-                  </div>
-                </article>
-              ))}
-            </div>
-          </div>
-        )}
-      </section>
+          ) : (
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => setConfirm({ kind: "bulk-brands", ids: [...brandSelection.ids] })}
+              disabled={saving}
+            >
+              <Trash2 className="h-4 w-4" />
+              حذف
+            </Button>
+          )}
+          <Button variant="ghost" size="sm" onClick={() => (panel === "categories" ? catSelection.clear() : brandSelection.clear())}>
+            <X className="h-4 w-4" />
+            إلغاء التحديد
+          </Button>
+        </div>
+      )}
 
-      {(modalState?.kind === "category-create" || modalState?.kind === "category-edit") && (
+      {/* Modals */}
+      {modalState?.kind === "category-create" && (
         <CategoryModal
           categories={categories}
-          initial={modalCategory}
-          defaultParentId={modalState.kind === "category-create" ? modalState.parentId : null}
+          initial={null}
+          defaultParentId={modalState.parentId}
           saving={saving}
           error={modalError}
           onClose={closeModal}
           onSubmit={saveCategoryHandler}
         />
       )}
+      {modalState?.kind === "brand-create" && (
+        <BrandModal initial={null} saving={saving} error={modalError} onClose={closeModal} onSubmit={saveBrandHandler} />
+      )}
 
-      {(modalState?.kind === "brand-create" || modalState?.kind === "brand-edit") && (
-        <BrandModal
-          initial={modalBrand}
-          saving={saving}
-          error={modalError}
-          onClose={closeModal}
-          onSubmit={saveBrandHandler}
+      {/* Delete confirmations */}
+      {confirm?.kind === "category" && (
+        <ConfirmDialog
+          open
+          title={`حذف التصنيف «${confirm.item.name}»؟`}
+          message={
+            categoryDeleteImpact(confirm.item)
+              ? `هذا سيحذف التصنيف نهائياً. ملاحظة: (${categoryDeleteImpact(confirm.item)})`
+              : "هذا سيحذف التصنيف نهائياً ولا يمكن التراجع عنه."
+          }
+          confirmLabel="حذف"
+          onClose={() => setConfirm(null)}
+          onConfirm={() => void removeCategory(confirm.item)}
+        />
+      )}
+      {confirm?.kind === "brand" && (
+        <ConfirmDialog
+          open
+          title={`حذف العلامة التجارية «${confirm.item.name}»؟`}
+          message={
+            confirm.item.productCount > 0
+              ? `مرتبطة بـ ${confirm.item.productCount.toLocaleString("ar-JO")} منتج. لا يمكن الحذف ما لم تُعد توجيه المنتجات أولاً.`
+              : "هذا سيحذف العلامة التجارية نهائياً ولا يمكن التراجع عنه."
+          }
+          confirmLabel="حذف"
+          onClose={() => setConfirm(null)}
+          onConfirm={() => void removeBrand(confirm.item)}
+        />
+      )}
+      {confirm?.kind === "bulk-categories" && (
+        <ConfirmDialog
+          open
+          title={`حذف ${confirm.ids.length.toLocaleString("ar-JO")} تصنيف؟`}
+          message="ستُحذف التصنيفات المحددة نهائياً إن لم تكن مرتبطة بمنتجات أو تحتوي تصنيفات فرعية."
+          confirmLabel="حذف الكل"
+          onClose={() => setConfirm(null)}
+          onConfirm={() => void bulkDeleteCategories()}
+        />
+      )}
+      {confirm?.kind === "bulk-brands" && (
+        <ConfirmDialog
+          open
+          title={`حذف ${confirm.ids.length.toLocaleString("ar-JO")} علامة؟`}
+          message="ستُحذف العلامات المحددة نهائياً إن لم تكن مرتبطة بمنتجات."
+          confirmLabel="حذف الكل"
+          onClose={() => setConfirm(null)}
+          onConfirm={() => void bulkDeleteBrands()}
         />
       )}
     </div>
+  );
+}
+
+/* ─────────────────────────────── Brands panel ──────────────────────────── */
+
+function BrandsPanel({
+  brands,
+  totalVisible,
+  hasSearch,
+  loading,
+  saving,
+  renameSaving,
+  editingId,
+  selection,
+  sort,
+  asc,
+  onSortChange,
+  onToggleSort,
+  onSelect,
+  onStartEdit,
+  onDelete,
+  onRename,
+  onCancelRename,
+  onAdd,
+}: {
+  brands: BrandReferenceItem[];
+  totalVisible: number;
+  hasSearch: boolean;
+  loading: boolean;
+  saving: boolean;
+  renameSaving: boolean;
+  editingId: string | null;
+  selection: ItemSelection;
+  sort: BrandSort;
+  asc: boolean;
+  onSortChange: (sort: BrandSort) => void;
+  onToggleSort: () => void;
+  onSelect: (brand: BrandReferenceItem) => void;
+  onStartEdit: (brand: BrandReferenceItem) => void;
+  onDelete: (brand: BrandReferenceItem) => void;
+  onRename: (brand: BrandReferenceItem, name: string) => void;
+  onCancelRename: () => void;
+  onAdd: () => void;
+}) {
+  return (
+    <section className="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-sm">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5">
+        <span className="flex min-w-0 flex-1 items-center gap-2 text-xs font-bold text-muted">
+          <Building2 className="h-4 w-4" />
+          العلامات التجارية ({totalVisible.toLocaleString("ar-JO")})
+        </span>
+        <div className="flex items-center gap-1">
+          <Button
+            variant={sort === "name" ? "default" : "ghost"}
+            size="sm"
+            onClick={() => (sort === "name" ? onToggleSort() : onSortChange("name"))}
+            title="ترتيب حسب الاسم"
+          >
+            الاسم
+            {sort === "name" && <span className="text-xs">{asc ? "↑" : "↓"}</span>}
+          </Button>
+          <Button
+            variant={sort === "products" ? "default" : "ghost"}
+            size="sm"
+            onClick={() => (sort === "products" ? onToggleSort() : onSortChange("products"))}
+            title="ترتيب حسب عدد المنتجات"
+          >
+            المنتجات
+            {sort === "products" && <span className="text-xs">{asc ? "↑" : "↓"}</span>}
+          </Button>
+        </div>
+        <Button variant="outline" size="sm" onClick={onAdd}>
+          <Plus className="h-4 w-4" />
+          علامة
+        </Button>
+      </div>
+
+      {loading ? (
+        <div className="grid min-h-64 place-items-center text-sm font-bold text-muted">
+          <Loader2 className="h-7 w-7 animate-spin text-primary" />
+        </div>
+      ) : brands.length === 0 ? (
+        <div className="grid min-h-64 place-items-center px-6 text-center">
+          <div>
+            <Building2 className="mx-auto h-10 w-10 text-muted" />
+            <p className="mt-2 text-sm font-black text-foreground">{hasSearch ? "لا توجد نتائج مطابقة" : "لا توجد علامات تجارية بعد"}</p>
+            <p className="mt-1 text-xs font-semibold text-muted">{hasSearch ? "جرّب اسمًا آخر." : "يمكنك إضافة علامة جديدة."}</p>
+            {!hasSearch && (
+              <Button className="mt-4" size="sm" onClick={onAdd}>
+                <Plus className="h-4 w-4" />
+                إضافة علامة
+              </Button>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-y-auto p-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {brands.map((brand) => (
+              <BrandCard
+                key={brand.id}
+                brand={brand}
+                selected={selection.ids.has(brand.id)}
+                editing={editingId === brand.id}
+                saving={saving}
+                renameSaving={renameSaving}
+                onSelect={onSelect}
+                onStartEdit={onStartEdit}
+                onDelete={onDelete}
+                onRename={onRename}
+                onCancelRename={onCancelRename}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
   );
 }

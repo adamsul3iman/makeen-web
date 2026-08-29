@@ -95,7 +95,7 @@ export function AdminDataTable<T>({
     >
       {toolbar ? <div className="border-b border-border">{toolbar}</div> : null}
 
-      <div className={cn("max-w-full overflow-auto overscroll-contain", viewportClassName)}>
+      <div className={cn("max-w-full overflow-x-auto overflow-y-auto touch-pan-x touch-pan-y", viewportClassName)}>
         <table className={cn("w-full border-separate border-spacing-0", tableClassName)}>
           {caption ? <caption className="sr-only">{caption}</caption> : null}
           <thead>

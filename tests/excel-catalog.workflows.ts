@@ -7,7 +7,7 @@
  * group-normalization invariants that the import depends on.
  */
 
-import { parseCatalogExcel } from "../lib/excelCatalog";
+import { parseCatalogExcel, parseCatalogDetailed, exportCatalogTemplate, EXCEL_COLUMNS, CATALOG_FORMAT } from "../lib/excelCatalog";
 
 let passed = 0;
 let failed = 0;
@@ -178,6 +178,95 @@ async function run() {
   ]);
   const groups3 = await parseCatalogExcel(buf3);
   check("unit without barcode parsed", groups3[0].units[0].barcode === null);
+
+  // ── Hidden IDs captured (pillar 1) ───────────────────────────────────
+  const buf4 = await buildWorkbook([
+    {
+      SKU: "400",
+      VariantLabel: "أحمر",
+      ParentName: "منتج بمعرفات",
+      UnitName: "قطعة",
+      Cost: 2,
+      Price: 3,
+      ProductID: "prod-abc",
+      VariantID: "var-123",
+      UnitID: "unit-456",
+    },
+  ]);
+  const groups4 = await parseCatalogExcel(buf4);
+  const g4 = groups4[0];
+  check("productId captured", g4.productId === "prod-abc");
+  check("variantId captured", g4.variants[0]?.variantId === "var-123");
+  check("unitId captured", g4.units[0]?.unitId === "unit-456");
+
+  // ── Data shield: blank cells are NOT marked present (pillar 2) ───────
+  check("Cost present flag set", g4.present.has("Cost"));
+  check("Price present flag set", g4.present.has("Price"));
+  check("blank TaxPercent not present", !g4.present.has("TaxPercent"));
+  check("blank IsActive not present", !g4.present.has("IsActive"));
+
+  // ── Dry-run errors: duplicate SKU across two parents (pillar 4) ──────
+  const buf5 = await buildWorkbook([
+    { SKU: "999", ParentName: "منتج أ", UnitName: "قطعة" },
+    { SKU: "999", ParentName: "منتج ب", UnitName: "قطعة" },
+  ]);
+  const parsed5 = await parseCatalogDetailed(buf5);
+  check(
+    "duplicate SKU across parents flagged",
+    parsed5.errors.some((e) => e.includes("999")),
+  );
+  check("only one group from clean rows", parsed5.groups.length === 1);
+
+  // ── Dry-run errors: missing required fields (pillar 4) ───────────────
+  const buf6 = await buildWorkbook([{ ParentName: "بلا باركود" }]);
+  const parsed6 = await parseCatalogDetailed(buf6);
+  check("missing SKU flagged", parsed6.errors.length === 1);
+  check("no group for invalid row", parsed6.groups.length === 0);
+
+  // ── Blank template: headers present, zero product rows ───────────────
+  const XLSX = await import("xlsx");
+  const templateBuf = (await exportCatalogTemplate("test-store")).arrayBuffer();
+  const templateArr = await templateBuf;
+  const tbook = XLSX.read(templateArr, { type: "array" });
+  const tsheet = tbook.Sheets[tbook.SheetNames.find((n) => n === "المنتجات")!];
+  const trows = XLSX.utils.sheet_to_json<Record<string, unknown>>(tsheet, { defval: null });
+  check("template has no product rows", trows.length === 0);
+  const headers = XLSX.utils.sheet_to_json<Record<string, unknown>>(tsheet, { header: 1, defval: null })[0] as unknown[];
+  check(
+    "template headers match export columns",
+    (headers ?? []).length === EXCEL_COLUMNS.length &&
+      EXCEL_COLUMNS.every((c, i) => headers?.[i] === c),
+  );
+  check("template has _meta sheet", tbook.SheetNames.includes("_meta"));
+
+  check(
+    "hidden ID columns present",
+    ["ProductID", "VariantID", "UnitID"].every((c) => EXCEL_COLUMNS.includes(c as (typeof EXCEL_COLUMNS)[number])),
+  );
+
+  // ── Version contract: _meta format validation (QA bug fix) ───────────
+  async function buildWorkbookWithMeta(format: string): Promise<ArrayBuffer> {
+    const X = await import("xlsx");
+    const sheet = X.utils.json_to_sheet([{ SKU: "777", ParentName: "منتج إصدار", UnitName: "قطعة" }]);
+    const meta = X.utils.json_to_sheet([{ key: "format", value: format }]);
+    const book = X.utils.book_new();
+    X.utils.book_append_sheet(book, sheet, "المنتجات");
+    X.utils.book_append_sheet(book, meta, "_meta");
+    return X.write(book, { bookType: "xlsx", type: "array" }) as ArrayBuffer;
+  }
+
+  const v3buf = await buildWorkbookWithMeta(CATALOG_FORMAT);
+  const parsedV3 = await parseCatalogExcel(v3buf);
+  check("v3 meta accepted", parsedV3.length === 1);
+
+  const v2buf = await buildWorkbookWithMeta("pos-catalog-v2");
+  let rejectedV2 = false;
+  try {
+    await parseCatalogExcel(v2buf);
+  } catch {
+    rejectedV2 = true;
+  }
+  check("v2 meta rejected", rejectedV2 === true);
 
   console.log(`\nExcel catalog round-trip: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);

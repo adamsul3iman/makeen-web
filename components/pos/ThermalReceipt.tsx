@@ -184,7 +184,7 @@ export default function ThermalReceipt({
 
   const grandTotalLabel = isSettlement ? "المبلغ المقبوض" : "الإجمالي";
 
-  const reference = invoiceReference(invoice.syncId);
+  const reference = invoice.invoiceNumber?.trim() || invoiceReference(invoice.syncId);
   const customer = invoice.customerName?.trim();
   const customerPhone = invoice.customerPhone?.trim() || "";
   const showCustomer = Boolean(customer);
@@ -502,13 +502,14 @@ export default function ThermalReceipt({
       {showFooterCodes && (
         <section style={orderedSection("codes")} className={sectionDivider("codes")}>
           {template.showInvoiceBarcode && <div className={`flex justify-center ${compact ? "py-2" : "py-3"}`}>
-            <svg ref={barcodeRef} className="h-9" />
+            <svg ref={barcodeRef} data-invoice-barcode className="h-9" />
           </div>}
           {template.showInvoiceBarcode && <p className={`${META} ${MONEY} text-center`}>{invoice.syncId.slice(0, 8)}</p>}
 
           {template.showFiscalQr && showFiscalQr && (
             <div className="mx-auto mt-3 w-24 pb-1">
               <div
+                data-fiscal-qr
                 className="print:block"
                 dangerouslySetInnerHTML={{ __html: fiscalQrSvg }}
               />

@@ -6,16 +6,13 @@ import {
   ChevronLeft,
   Clock,
   FolderOpen,
-  LayoutGrid,
   PackageSearch,
   Search,
-  Building2,
   X,
-  Tag,
   Zap,
 } from "lucide-react";
 import { usePosStore } from "@/store/usePosStore";
-import { buildChildrenByParent } from "@/lib/categoryTree";
+import { categoryPath } from "@/lib/categoryTree";
 import { formatMoney } from "@/lib/format";
 import type { LocalCategory, QuickKeyItem } from "@/types/pos.types";
 
@@ -71,39 +68,6 @@ const CategoryCard = memo(function CategoryCard({
   );
 });
 
-const BrandCard = memo(function BrandCard({
-  brandId,
-  brandName,
-  count,
-  onSelect,
-}: {
-  brandId: string;
-  brandName: string;
-  count: number;
-  onSelect: (id: string) => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={() => onSelect(brandId)}
-      className="flex min-h-[56px] items-center gap-2.5 rounded-xl border border-slate-100 bg-white p-3 text-start shadow-sm transition hover:border-sky-200 hover:shadow-md active:scale-[0.97]"
-    >
-      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-slate-700 text-white shadow-sm">
-        <Building2 className="h-4.5 w-4.5" />
-      </span>
-      <div className="min-w-0 flex-1">
-        <span className="block truncate text-[15px] font-bold text-slate-800">
-          {brandName}
-        </span>
-        <span className="block text-[12px] font-semibold text-slate-400">
-          {count.toLocaleString("ar-JO")} {count === 1 ? "منتج" : "منتجات"}
-        </span>
-      </div>
-      <ChevronLeft className="h-4 w-4 shrink-0 text-slate-300" />
-    </button>
-  );
-});
-
 const ProductCard = memo(function ProductCard({
   item,
   onAdd,
@@ -124,7 +88,7 @@ const ProductCard = memo(function ProductCard({
         <span className="block truncate text-[15px] font-bold text-slate-800">
           {item.label}
         </span>
-        <span className="block text-[12px] font-semibold text-slate-400 tabular-nums">
+        <span className="mt-0.5 block text-[12px] font-semibold text-slate-400 tabular-nums">
           {formatMoney(item.price ?? 0)}
         </span>
       </div>
@@ -137,7 +101,6 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
   const quickKeys = usePosStore((s) => s.quickKeys);
 
   const [focusedCategory, setFocusedCategory] = useState<string | null>(null);
-  const [focusedBrandId, setFocusedBrandId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [recentSearches, setRecentSearches] = useState<string[]>([]);
 
@@ -160,7 +123,6 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
     }
     // Reset state on close
     setFocusedCategory(null);
-    setFocusedBrandId(null);
     setSearchQuery("");
   }, [isOpen]);
 
@@ -174,11 +136,17 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
     return () => window.removeEventListener("keydown", handler);
   }, [isOpen, onClose]);
 
-  const categoryArray = useMemo(() => Object.values(categories), [categories]);
-
-  const childrenByParent = useMemo(
-    () => buildChildrenByParent(categoryArray),
-    [categoryArray],
+  // ─────────────────────────────────────────────────────────────────────────
+  // Category tree (nested, brands are NEVER part of it).
+  //
+  // Only genuine product categories visible to the cashier participate in
+  // navigation. Hidden categories (showInPos === false — e.g. brand/supplier
+  // names that were accidentally entered as category rows) are excluded so no
+  // brand name can act as a category, sub-category, or navigation node.
+  // ─────────────────────────────────────────────────────────────────────────
+  const categoryArray = useMemo(
+    () => Object.values(categories).filter((c) => c.showInPos !== false),
+    [categories],
   );
 
   const rootCategories = useMemo(
@@ -186,88 +154,83 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
     [categoryArray, categories],
   );
 
+  // Direct children of any category id → for nested drill-down.
+  const childrenByCategory = useMemo(() => {
+    const map = new Map<string, LocalCategory[]>();
+    for (const cat of categoryArray) {
+      if (!cat.parentId) continue;
+      const list = map.get(cat.parentId) ?? [];
+      list.push(cat);
+      map.set(cat.parentId, list);
+    }
+    // Stable ordering: sortOrder then name.
+    for (const list of map.values()) {
+      list.sort((a, b) => {
+        const bySort = (a.sortOrder ?? 0) - (b.sortOrder ?? 0);
+        if (bySort !== 0) return bySort;
+        return a.name.localeCompare(b.name, "ar");
+      });
+    }
+    return map;
+  }, [categoryArray]);
+
+  const subCategories = useMemo(
+    () => (focusedCategory ? childrenByCategory.get(focusedCategory) ?? [] : []),
+    [focusedCategory, childrenByCategory],
+  );
+
+  const isLeafCategory = subCategories.length === 0;
+
+  const focusedCategoryName = focusedCategory ? categories[focusedCategory]?.name ?? null : null;
+
+  // Direct products of the focused category (leaf -> products).
+  const categoryProducts = useMemo(() => {
+    if (!focusedCategory) return [];
+    return quickKeys.filter((kq) => kq.categoryId === focusedCategory);
+  }, [focusedCategory, quickKeys]);
+
   // Top quick-key products for the "frequent items" zero-typing view
   const frequentItems = useMemo(
     () => quickKeys.filter((k) => k.productId).slice(0, 8),
     [quickKeys],
   );
 
-  // Brands in focused category (grouped by brandId from quickKeys)
-  const brandsInCategory = useMemo(() => {
-    if (!focusedCategory) return [];
-    const brandMap = new Map<string, { brandId: string; brandName: string; count: number }>();
-    for (const kq of quickKeys) {
-      if (kq.categoryId !== focusedCategory) continue;
-      const bid = kq.brandId ?? "__none__";
-      const bname = kq.brandName ?? "بدون علامة تجارية";
-      const existing = brandMap.get(bid);
-      if (existing) {
-        existing.count++;
-      } else {
-        brandMap.set(bid, { brandId: bid, brandName: bname, count: 1 });
-      }
-    }
-    return Array.from(brandMap.values());
-  }, [focusedCategory, quickKeys]);
-
-  // Products in focused category + brand (or just category)
-  const productsInView = useMemo(() => {
-    if (!focusedCategory) return [];
-    return quickKeys.filter((kq) => {
-      if (kq.categoryId !== focusedCategory) return false;
-      if (focusedBrandId) {
-        const bid = kq.brandId ?? "__none__";
-        return bid === focusedBrandId;
-      }
-      return true;
-    });
-  }, [focusedCategory, focusedBrandId, quickKeys]);
-
   // Deferred search query — eliminates typing lag
   const deferredQuery = useDeferredValue(searchQuery);
   const trimmedQuery = deferredQuery.trim().toLowerCase();
 
-  // Build lookups for category + brand names
+  // Category name lookup (visible categories only)
   const categoryNameMap = useMemo(() => {
     const map = new Map<string, string>();
     for (const cat of categoryArray) map.set(cat.id, cat.name);
     return map;
   }, [categoryArray]);
 
-  const brandNameMap = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const kq of quickKeys) {
-      if (kq.brandId && kq.brandName) map.set(kq.brandId, kq.brandName);
-    }
-    return map;
-  }, [quickKeys]);
-
-  // Unified search results: products + category matches + brand matches
+  // Search results: matching products + matching categories. Brands never
+  // appear as searchable navigation nodes.
   const searchResults = useMemo(() => {
     if (!trimmedQuery) return [];
     const matchedProductIds = new Set<string>();
     const matchedCategoryIds = new Set<string>();
-    const matchedBrandKeys = new Map<string, string>(); // brandId → first categoryId
 
     for (const kq of quickKeys) {
       if (kq.label.toLowerCase().includes(trimmedQuery)) { matchedProductIds.add(kq.id); continue; }
       if (kq.barcode && kq.barcode.toLowerCase().includes(trimmedQuery)) { matchedProductIds.add(kq.id); continue; }
-      if (kq.brandName && kq.brandName.toLowerCase().includes(trimmedQuery) && kq.brandId) {
-        if (!matchedBrandKeys.has(kq.brandId)) matchedBrandKeys.set(kq.brandId, kq.categoryId);
-      }
       const catName = categoryNameMap.get(kq.categoryId);
       if (catName && catName.toLowerCase().includes(trimmedQuery)) {
         matchedCategoryIds.add(kq.categoryId);
       }
     }
 
-    const results: Array<{ type: "product" | "category" | "brand"; id: string; label: string; categoryId?: string; item?: QuickKeyItem }> = [];
+    // Also match visible category names directly from the tree.
+    for (const cat of categoryArray) {
+      if (cat.name.toLowerCase().includes(trimmedQuery)) matchedCategoryIds.add(cat.id);
+    }
+
+    const results: Array<{ type: "product" | "category"; id: string; label: string; item?: QuickKeyItem }> = [];
 
     for (const catId of matchedCategoryIds) {
       results.push({ type: "category", id: catId, label: categoryNameMap.get(catId) ?? catId });
-    }
-    for (const [brandId, catId] of matchedBrandKeys) {
-      results.push({ type: "brand", id: brandId, label: brandNameMap.get(brandId) ?? brandId, categoryId: catId });
     }
     for (const kq of quickKeys) {
       if (matchedProductIds.has(kq.id)) {
@@ -275,16 +238,17 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
       }
     }
     return results;
-  }, [trimmedQuery, quickKeys, categoryNameMap, brandNameMap]);
+  }, [trimmedQuery, quickKeys, categoryArray, categoryNameMap]);
 
   const isSearching = trimmedQuery.length > 0;
 
   const handleAddProduct = useCallback(
     (item: QuickKeyItem) => {
+      // Keep the drawer open so the cashier can add multiple products
+      // consecutively. It closes only via the X button, backdrop, or Esc.
       usePosStore.getState().addQuickKeyItem(item);
-      onClose();
     },
-    [onClose],
+    [],
   );
 
   const recordSearch = useCallback((query: string) => {
@@ -301,9 +265,8 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
     (item: QuickKeyItem) => {
       recordSearch(searchQuery);
       usePosStore.getState().addQuickKeyItem(item);
-      onClose();
     },
-    [onClose, recordSearch, searchQuery],
+    [recordSearch, searchQuery],
   );
 
   const handleClearRecent = useCallback(() => {
@@ -311,34 +274,39 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
     saveRecentSearches([]);
   }, []);
 
+  // Step up one level in the nested tree (or back to home for a root category).
   const handleBack = useCallback(() => {
-    if (focusedBrandId) {
-      setFocusedBrandId(null);
-    } else if (focusedCategory) {
-      setFocusedCategory(null);
-    }
-  }, [focusedBrandId, focusedCategory]);
+    setFocusedCategory((prev) => {
+      if (!prev) return prev;
+      return categories[prev]?.parentId ?? null;
+    });
+  }, [categories]);
 
-  const breadcrumb = useMemo(() => {
-    const crumbs: Array<{ label: string; onClick?: () => void }> = [];
+  // Clickable breadcrumb trail: الرئيسية › root › … › leaf
+  const breadcrumbTrail = useMemo(() => {
+    const crumbs: Array<{ label: string; onClick?: () => void }> = [
+      { label: "الرئيسية", onClick: () => setFocusedCategory(null) },
+    ];
     if (focusedCategory) {
-      const cat = categories[focusedCategory];
-      crumbs.push({
-        label: cat?.name ?? "التصنيفات",
-        onClick: () => setFocusedCategory(null),
+      const pathNames = categoryPath(focusedCategory, categories);
+      pathNames.forEach((label, i) => {
+        const isLast = i === pathNames.length - 1;
+        if (isLast) {
+          crumbs.push({ label });
+        } else {
+          // Walk the chain so clicking an ancestor returns to that level.
+          let target = focusedCategory;
+          let steps = pathNames.length - 1 - i;
+          while (steps > 0 && target) {
+            target = categories[target]?.parentId ?? target;
+            steps -= 1;
+          }
+          crumbs.push({ label, onClick: () => setFocusedCategory(target) });
+        }
       });
     }
-    if (focusedBrandId) {
-      const brand = brandsInCategory.find((b) => b.brandId === focusedBrandId);
-      crumbs.push({ label: brand?.brandName ?? "العلامة التجارية" });
-    }
     return crumbs;
-  }, [focusedCategory, focusedBrandId, categories, brandsInCategory]);
-
-  // Grid: 2 cols for categories/brands, 1 col for products (wider cards)
-  const gridCols = focusedCategory && !focusedBrandId && !isSearching
-    ? "grid-cols-2"
-    : "grid-cols-1";
+  }, [focusedCategory, categories]);
 
   return (
     <>
@@ -346,19 +314,19 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
       <div
         ref={backdropRef}
         onClick={onClose}
-        className={`fixed inset-0 z-50 bg-slate-900/20 backdrop-blur-sm transition-opacity duration-200 ${
+        className={`fixed inset-0 z-[80] bg-slate-900/20 backdrop-blur-sm transition-opacity duration-200 ${
           isOpen ? "opacity-100" : "pointer-events-none opacity-0"
         }`}
       />
 
       {/* Drawer */}
       <div
-        className={`fixed inset-y-0 right-0 z-50 flex w-full max-w-lg flex-col bg-white shadow-2xl border-l border-slate-200/80 transition-transform duration-200 ease-out ${
+        className={`fixed inset-y-0 right-0 z-[80] flex w-full max-w-lg flex-col bg-white shadow-2xl border-l border-slate-200/80 transition-transform duration-200 ease-out ${
           isOpen ? "translate-x-0" : "translate-x-full"
         }`}
       >
         {/* Header */}
-        <div className="flex items-center gap-3 border-b border-slate-200 px-5 py-4">
+        <div className="sticky top-0 z-10 flex shrink-0 items-center gap-3 border-b border-slate-200 bg-white px-5 py-4">
           {focusedCategory && (
             <button
               type="button"
@@ -371,9 +339,7 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
           <h2 className="min-w-0 flex-1 text-[17px] font-black text-slate-800">
             {isSearching
               ? `نتائج البحث: "${searchQuery}"`
-              : focusedCategory
-                ? breadcrumb.map((c) => c.label).join(" → ")
-                : "تصفح الأصناف"}
+              : focusedCategoryName ?? "تصفح الأصناف"}
           </h2>
           <button
             type="button"
@@ -430,10 +396,38 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
           )}
         </div>
 
-        {/* Content grid */}
+        {/* Breadcrumb navigation bar — clickable nested category path */}
+        {focusedCategory && (
+          <nav
+            aria-label="مسار التصنيف"
+            className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-slate-100 bg-slate-50/70 px-4 py-2 scrollbar-hidden"
+          >
+            {breadcrumbTrail.map((crumb, i) => {
+              const isLast = i === breadcrumbTrail.length - 1;
+              return (
+                <span key={`${crumb.label}-${i}`} className="flex shrink-0 items-center gap-1">
+                  {i > 0 && <ChevronLeft className="h-3.5 w-3.5 shrink-0 text-slate-300" aria-hidden="true" />}
+                  {isLast || !crumb.onClick ? (
+                    <span className="truncate text-[13px] font-black text-slate-800">{crumb.label}</span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={crumb.onClick}
+                      className="truncate rounded-md px-1 text-[13px] font-bold text-slate-500 transition hover:bg-white hover:text-primary"
+                    >
+                      {crumb.label}
+                    </button>
+                  )}
+                </span>
+              );
+            })}
+          </nav>
+        )}
+
+        {/* Content */}
         <div className="min-h-0 flex-1 overflow-y-auto p-5">
           {isSearching ? (
-            // Unified search results
+            // Search results: products + categories only (no brands).
             searchResults.length > 0 ? (
               <div className="grid grid-cols-1 gap-2">
                 {searchResults.map((result) => {
@@ -450,22 +444,6 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
                         </span>
                         <span className="min-w-0 flex-1 text-[15px] font-bold text-slate-800">{result.label}</span>
                         <span className="shrink-0 rounded-md bg-amber-100 px-2 py-0.5 text-[11px] font-bold text-amber-600">تصنيف</span>
-                      </button>
-                    );
-                  }
-                  if (result.type === "brand") {
-                    return (
-                      <button
-                        key={`brand-${result.id}`}
-                        type="button"
-                        onClick={() => { recordSearch(searchQuery); if (result.categoryId) setFocusedCategory(result.categoryId); setFocusedBrandId(result.id); setSearchQuery(""); }}
-                        className="flex min-h-[56px] items-center gap-2.5 rounded-xl border border-sky-100 bg-sky-50 p-3 text-start shadow-sm transition hover:border-sky-200 hover:shadow-md active:scale-[0.97]"
-                      >
-                        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-sky-100 text-sky-600">
-                          <Building2 className="h-4.5 w-4.5" />
-                        </span>
-                        <span className="min-w-0 flex-1 text-[15px] font-bold text-slate-800">{result.label}</span>
-                        <span className="shrink-0 rounded-md bg-sky-100 px-2 py-0.5 text-[11px] font-bold text-sky-600">علامة تجارية</span>
                       </button>
                     );
                   }
@@ -530,34 +508,55 @@ export default memo(function CategoryDrawer({ isOpen, onClose }: CategoryDrawerP
                 )}
               </div>
             </div>
-          ) : !focusedBrandId ? (
-            // Brands in category
-            brandsInCategory.length > 0 ? (
-              <div className="grid grid-cols-2 gap-2">
-                {brandsInCategory.map((brand) => (
-                  <BrandCard
-                    key={brand.brandId}
-                    brandId={brand.brandId}
-                    brandName={brand.brandName}
-                    count={brand.count}
-                    onSelect={setFocusedBrandId}
-                  />
-                ))}
-              </div>
-            ) : (
-              // No brands — show products directly
-              <div className="grid grid-cols-1 gap-2">
-                {productsInView.map((item) => (
-                  <ProductCard key={item.id} item={item} onAdd={handleAddProduct} />
-                ))}
-              </div>
-            )
           ) : (
-            // Products in brand
-            <div className="grid grid-cols-1 gap-2">
-              {productsInView.map((item) => (
-                <ProductCard key={item.id} item={item} onAdd={handleAddProduct} />
-              ))}
+            // Nested view: if the category has sub-categories, show them (and
+            // any of its direct products below). A leaf category shows its
+            // products directly. Brands are never a navigation step.
+            <div className="space-y-5">
+              {subCategories.length > 0 && (
+                <div>
+                  <div className="mb-2.5 flex items-center gap-2">
+                    <FolderOpen className="h-4 w-4 text-slate-400" />
+                    <h3 className="text-[15px] font-black text-slate-700">الأقسام الفرعية</h3>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {subCategories.map((cat) => (
+                      <CategoryCard
+                        key={cat.id}
+                        category={cat}
+                        onOpen={setFocusedCategory}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {categoryProducts.length > 0 && (
+                <div>
+                  <div className="mb-2.5 flex items-center gap-2">
+                    <PackageSearch className="h-4 w-4 text-slate-400" />
+                    <h3 className="text-[15px] font-black text-slate-700">
+                      {isLeafCategory ? "المنتجات" : "منتجات التصنيف"}
+                    </h3>
+                  </div>
+                  <div className="grid grid-cols-1 gap-2">
+                    {categoryProducts.map((item) => (
+                      <ProductCard key={item.id} item={item} onAdd={handleAddProduct} />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {subCategories.length === 0 && categoryProducts.length === 0 && (
+                <div className="grid h-40 place-items-center text-center">
+                  <div>
+                    <PackageSearch className="mx-auto h-10 w-10 text-slate-300" />
+                    <p className="mt-3 text-[15px] font-bold text-slate-500">
+                      لا توجد منتجات في هذا التصنيف
+                    </p>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

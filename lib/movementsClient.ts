@@ -66,7 +66,7 @@ export async function fetchMovements(opts: {
   const { count } = await countQ;
 
   const productIds = [...new Set((movements ?? []).map((m: { product_id: string }) => m.product_id))];
-  let productMap = new Map<string, { name: string; base_unit: string; total_stock: number }>();
+  const productMap = new Map<string, { name: string; base_unit: string; total_stock: number }>();
   if (productIds.length > 0) {
     const { data: products } = await sb
       .from("products")
@@ -122,7 +122,20 @@ export async function createMovement(opts: {
       .eq("product_id", productId)
       .eq("store_id", storeId)
       .maybeSingle();
-    if (!bv) throw new Error("الباركود لا يتبع المنتج المحدد");
+    if (!bv) {
+      // Packaging-tier barcodes live in `product_units` (carton/piece), not
+      // `product_variants`. Accept them too so carton-scanned adjustments
+      // record the correct unit/multiplier server-side.
+      const { data: pu } = await sb
+        .from("product_units")
+        .select("barcode")
+        .eq("barcode", barcode)
+        .eq("product_id", productId)
+        .eq("store_id", storeId)
+        .eq("is_active", true)
+        .maybeSingle();
+      if (!pu) throw new Error("الباركود لا يتبع المنتج المحدد");
+    }
   }
 
   const movementKey = `adjustment:${idempotencyKey}`;

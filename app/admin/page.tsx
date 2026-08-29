@@ -2,49 +2,40 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  CartesianGrid,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
-import {
-  AlertTriangle,
   Banknote,
   Boxes,
-  Clock,
-  CreditCard,
-  Crown,
-  Loader2,
-  PackageMinus,
+  CalendarDays,
   RefreshCw,
-  Smartphone,
   TrendingUp,
+  Users,
+  Wallet,
 } from "lucide-react";
 import { formatMoney } from "@/lib/format";
-import { formatProductDisplayName } from "@/lib/productDisplayName";
 import { fetchReportsOverview, submitInventoryCount } from "@/lib/reportsClient";
 import { usePosStore } from "@/store/usePosStore";
 import { getTenantStoreId } from "@/lib/tenantClient";
-import { Card, StatCard, PageHeader } from "@/components/ui/Card";
-import { Badge } from "@/components/ui/Badge";
-import { TableSkeleton, StatCardSkeleton, CardSkeleton } from "@/components/ui/Skeleton";
-import type { ReportsNegativeStock, ReportsOverview, ReportsStockAlert } from "@/types/reports.types";
-
-function StockDaysBadge({ daysOfStockLeft }: Pick<ReportsStockAlert, "daysOfStockLeft">) {
-  if (daysOfStockLeft === null) return <Badge tone="muted">غير محسوب</Badge>;
-  if (daysOfStockLeft === 0) return <Badge tone="destructive">نفد اليوم</Badge>;
-  if (daysOfStockLeft <= 2) return <Badge tone="destructive">{daysOfStockLeft} يوم</Badge>;
-  return <Badge tone="warning">{daysOfStockLeft} يوم</Badge>;
-}
+import { readDashboardOverview, writeDashboardOverview } from "@/lib/dashboardCache";
+import { PageHeader } from "@/components/ui/Card";
+import { StatCardSkeleton } from "@/components/ui/Skeleton";
+import type { ReportsNegativeStock, ReportsOverview } from "@/types/reports.types";
+import KpiCard from "@/components/admin/dashboard/KpiCard";
+import PaymentBreakdown from "@/components/admin/dashboard/PaymentBreakdown";
+import TrendChart from "@/components/admin/dashboard/TrendChart";
+import AlertsCard from "@/components/admin/dashboard/AlertsCard";
+import TopProducts from "@/components/admin/dashboard/TopProducts";
 
 export default function AdminDashboardPage() {
   const adminSession = usePosStore((s) => s.adminSession);
-  const [reportsResponse, setReportsResponse] = useState<{ overview: ReportsOverview } | null>(null);
+
+  // Instant first paint: seed state synchronously from the last cached overview
+  // so the dashboard renders real data immediately (offline-first / no blank
+  // skeleton when revisiting), then refresh in the background.
+  const [reportsResponse, setReportsResponse] = useState<{ overview: ReportsOverview } | null>(() => {
+    const overview = readDashboardOverview(getTenantStoreId());
+    return overview ? { overview } : null;
+  });
   const [error, setError] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(!reportsResponse);
   const mountedRef = useRef(true);
 
   const refetch = useCallback(() => {
@@ -53,17 +44,45 @@ export default function AdminDashboardPage() {
     setError(null);
     setIsLoading(true);
     fetchReportsOverview(storeId)
-      .then((overview) => { if (mountedRef.current) { setReportsResponse({ overview }); setIsLoading(false); } })
-      .catch((err) => { if (mountedRef.current) { setError(err instanceof Error ? err.message : "تعذر تحميل البيانات"); setIsLoading(false); } });
-  }, []);
+      .then((overview) => {
+        if (!mountedRef.current) return;
+        setReportsResponse({ overview });
+        writeDashboardOverview(storeId, overview);
+        setIsLoading(false);
+      })
+      .catch((err) => {
+        if (!mountedRef.current) return;
+        // Keep showing the cached overview if a refresh fails; surface a notice.
+        if (!reportsResponse) setError(err instanceof Error ? err.message : "تعذر تحميل البيانات");
+        setIsLoading(false);
+      });
+  }, [reportsResponse]);
 
-  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
-  useEffect(() => { if (adminSession) refetch(); }, [adminSession, refetch]);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (adminSession) {
+      // Deferred into an async continuation so the effect body never
+      // synchronously calls setState (react-hooks/set-state-in-effect).
+      Promise.resolve().then(() => {
+        if (mountedRef.current) refetch();
+      });
+    }
+  }, [adminSession, refetch]);
 
   const overview = reportsResponse?.overview ?? null;
+
   const [countInputs, setCountInputs] = useState<Record<string, string>>({});
   const [countingId, setCountingId] = useState<string | null>(null);
   const [countStatus, setCountStatus] = useState<{ tone: "success" | "error"; message: string } | null>(null);
+
+  const onCountChange = useCallback((productId: string, value: string) => {
+    setCountInputs((current) => ({ ...current, [productId]: value }));
+  }, []);
 
   const submitPhysicalCount = async (product: ReportsNegativeStock) => {
     const quantity = Number(countInputs[product.productId]);
@@ -77,12 +96,15 @@ export default function AdminDashboardPage() {
       const storeId = getTenantStoreId();
       if (!storeId) throw new Error("المتجر غير محدد");
       const actorName = adminSession?.name ?? "مدير";
-      await submitInventoryCount({ storeId, productId: product.productId, quantity, reason: "جرد تصحيحي لأصناف بمخزون سالب (نواقص المخزون)", actorName });
-      setCountInputs((current) => ({ ...current, [product.productId]: "" }));
-      setCountStatus({
-        tone: "success",
-        message: `تم تحديث مخزون «${product.name}» إلى ${quantity} — حُلّت القيمة السالبة`,
+      await submitInventoryCount({
+        storeId,
+        productId: product.productId,
+        quantity,
+        reason: "جرد تصحيحي لأصناف بمخزون سالب (نواقص المخزون)",
+        actorName,
       });
+      setCountInputs((current) => ({ ...current, [product.productId]: "" }));
+      setCountStatus({ tone: "success", message: `تم تحديث مخزون «${product.name}» إلى ${quantity} — حُلّت القيمة السالبة` });
       refetch();
     } catch (err) {
       setCountStatus({
@@ -100,18 +122,15 @@ export default function AdminDashboardPage() {
     month: "long",
   });
 
-  const stats = overview
-    ? [
-        { id: "sales", label: "صافي المبيعات", value: formatMoney(overview?.summary?.netSales ?? 0), icon: TrendingUp, tone: "primary" as const },
-        { id: "invoices", label: "عدد الفواتير", value: (overview?.summary?.invoiceCount ?? 0).toLocaleString("ar-JO"), icon: Boxes, tone: "default" as const },
-        { id: "profit", label: "الربح الإجمالي", value: overview?.summary?.profit == null ? "غير محسوم" : formatMoney(overview?.summary?.profit ?? 0), icon: TrendingUp, tone: overview?.summary?.profit != null && overview?.summary?.profit > 0 ? "success" as const : "destructive" as const },
-        { id: "ticket", label: "متوسط الفاتورة", value: formatMoney(overview?.summary?.averageTicket ?? 0), icon: Clock, tone: "default" as const },
-        { id: "tax", label: "ضريبة المبيعات", value: formatMoney(overview?.summary?.tax ?? 0), icon: AlertTriangle, tone: "warning" as const },
-      ]
-    : [];
+  const netSales = overview ? (overview.summary?.netSales ?? 0) : 0;
+  const invoiceCount = overview ? (overview.summary?.invoiceCount ?? 0) : 0;
+  const profit = overview ? (overview.summary?.profit ?? null) : null;
+  const avgTicket = overview ? (overview.summary?.averageTicket ?? 0) : 0;
+
+  const showSkeleton = isLoading && !overview;
 
   return (
-    <div className="space-y-6">
+    <div className="min-w-0 space-y-6">
       <PageHeader
         title="نظرة مباشرة"
         subtitle={`بيانات المتجر الفعلية — ${today}`}
@@ -128,300 +147,118 @@ export default function AdminDashboardPage() {
         }
       />
 
-      {isLoading && !overview && (
-        <>
-          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-            {Array.from({ length: 8 }).map((_, i) => <StatCardSkeleton key={i} />)}
-          </div>
-          <div className="grid gap-4 lg:grid-cols-2">
-            <CardSkeleton><TableSkeleton rows={4} cols={3} /></CardSkeleton>
-            <CardSkeleton />
-          </div>
-          <div className="grid gap-4 lg:grid-cols-3">
-            <div className="lg:col-span-2"><CardSkeleton><TableSkeleton rows={5} cols={3} /></CardSkeleton></div>
-            <CardSkeleton><div className="h-56 w-full" /></CardSkeleton>
-          </div>
-        </>
+      {countStatus && (
+        <p
+          role="status"
+          className={`rounded-xl border px-4 py-3 text-sm font-bold ${
+            countStatus.tone === "success"
+              ? "border-success/20 bg-success/10 text-success"
+              : "border-destructive/20 bg-destructive/10 text-destructive"
+          }`}
+        >
+          {countStatus.message}
+        </p>
       )}
 
-      {error && (
-        <div className="rounded-2xl border border-destructive/20 bg-destructive/10 p-6 text-sm font-bold text-destructive">
+      {error && !overview && (
+        <div className="rounded-2xl border border-destructive/20 bg-destructive/10 p-5 text-sm font-bold text-destructive">
           {error}
         </div>
       )}
 
-      {overview && (
-        <>
-          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-            {stats.map((stat, i) => (
-              <div key={stat.id} className="animate-pos-pop-in" style={{ animationDelay: `${i * 40}ms` }}>
-                <StatCard label={stat.label} value={stat.value} icon={stat.icon} tone={stat.tone} />
-              </div>
-            ))}
-            <div className="animate-pos-pop-in" style={{ animationDelay: `${stats.length * 40}ms` }}>
-              <StatCard
-                label="نقدي"
-                value={formatMoney(overview.summary?.cash ?? 0)}
-                subtitle={`${overview.paymentBreakdown?.find((p) => p.method === "CASH")?.count ?? 0} فاتورة`}
-                icon={Banknote}
-                tone="success"
-              />
-            </div>
-            <div className="animate-pos-pop-in" style={{ animationDelay: `${(stats.length + 1) * 40}ms` }}>
-              <StatCard
-                label="بطاقة"
-                value={formatMoney(overview.summary?.visa ?? 0)}
-                subtitle={`${overview.paymentBreakdown?.find((p) => p.method === "VISA")?.count ?? 0} فاتورة`}
-                icon={CreditCard}
+      {showSkeleton ? (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4 [&>*]:min-w-0">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <StatCardSkeleton key={i} />
+          ))}
+        </div>
+      ) : (
+        overview && (
+          <>
+            {/* KPI row — instant financial overview */}
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4 [&>*]:min-w-0">
+              <KpiCard
+                label="صافي المبيعات"
+                value={formatMoney(netSales)}
+                icon={Wallet}
                 tone="primary"
+                hint={`${invoiceCount.toLocaleString("ar-JO")} فاتورة`}
               />
-            </div>
-            <div className="animate-pos-pop-in" style={{ animationDelay: `${(stats.length + 2) * 40}ms` }}>
-              <StatCard
-                label="كليك"
-                value={formatMoney(overview.summary?.cliq ?? 0)}
-                subtitle={`${overview.paymentBreakdown?.find((p) => p.method === "CLIQ")?.count ?? 0} فاتورة`}
-                icon={Smartphone}
-                tone="default"
+              <KpiCard label="عدد الفواتير" value={invoiceCount.toLocaleString("ar-JO")} icon={Boxes} />
+              <KpiCard
+                label="الربح الإجمالي"
+                value={profit == null ? "غير محسوم" : formatMoney(profit)}
+                icon={TrendingUp}
+                tone={profit == null ? "default" : profit > 0 ? "success" : "destructive"}
               />
+              <KpiCard label="متوسط الفاتورة" value={formatMoney(avgTicket)} icon={Banknote} />
             </div>
-          </div>
 
-          <div className="grid gap-4 lg:grid-cols-2">
-            <Card title="الأسرع مبيعاً" icon={<Crown className="h-4 w-4" />}>
-              <div className="scrollbar-hidden max-h-72 overflow-y-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-border text-right text-xs font-bold text-muted">
-                      <th className="py-2 pl-3">الصنف</th>
-                      <th className="py-2 pl-3">الكمية</th>
-                      <th className="py-2 pl-3">المبيعات</th>
-                      <th className="py-2">المخزون</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {overview.topProducts.length === 0 ? (
-                      <tr>
-                        <td colSpan={4} className="py-8 text-center text-sm font-bold text-muted">
-                          لا توجد مبيعات ضمن الفترة
-                        </td>
-                      </tr>
-                    ) : (
-                      overview.topProducts.slice(0, 8).map((p) => (
-                        <tr key={`${p.productId}-${p.barcode}`} className="border-b border-border/60 text-right">
-                          <td className="py-2.5 pl-3 font-bold text-foreground">{p.name}</td>
-                          <td className="py-2.5 pl-3 font-semibold tabular-nums">{p.quantity}</td>
-                          <td className="py-2.5 pl-3 font-bold tabular-nums">{formatMoney(p.sales)}</td>
-                          <td className="py-2.5 tabular-nums text-muted">{p.stock ?? "—"}</td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </Card>
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 [&>*]:min-w-0">
+              {/* Payment method distribution */}
+              <section className="flex min-w-0 flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-sm">
+                <header className="flex items-center justify-between gap-3 border-b border-border px-5 py-3.5">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="shrink-0 text-muted"><Users className="h-4 w-4" /></span>
+                    <h2 className="truncate text-sm font-black text-foreground">توزيع طرق الدفع</h2>
+                  </div>
+                  <span className="shrink-0 text-xs font-bold text-muted">{overview.range.days} يوم</span>
+                </header>
+                <div className="flex-1 p-5">
+                  <PaymentBreakdown methods={overview.paymentBreakdown ?? []} />
+                </div>
+              </section>
 
-            <Card title="جودة البيانات" icon={<AlertTriangle className="h-4 w-4" />}>
-              <div className="space-y-3">
-                {overview.dataQuality.length === 0 ? (
-                  <p className="rounded-xl bg-success/10 px-4 py-4 text-sm font-bold text-success">
-                    لا توجد مشاكل بيانات واضحة
-                  </p>
-                ) : (
-                  overview.dataQuality.slice(0, 5).map((issue) => (
-                    <div key={issue.id} className="rounded-xl border border-border bg-surface-muted px-4 py-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <p className="text-sm font-black text-foreground">{issue.label}</p>
-                        <Badge>{issue.count}</Badge>
-                      </div>
-                      <p className="mt-1 line-clamp-2 text-xs font-semibold text-muted">{issue.description}</p>
-                    </div>
-                  ))
-                )}
-              </div>
-            </Card>
-          </div>
+              {/* Trend */}
+              <section className="flex min-w-0 flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-sm">
+                <header className="flex items-center justify-between gap-3 border-b border-border px-5 py-3.5">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="shrink-0 text-muted"><CalendarDays className="h-4 w-4" /></span>
+                    <h2 className="truncate text-sm font-black text-foreground">اتجاه المبيعات</h2>
+                  </div>
+                </header>
+                <div className="flex-1 p-5">
+                  <TrendChart points={overview.trend ?? []} generatedAt={overview.generatedAt} />
+                </div>
+              </section>
+            </div>
 
-          <div className="grid gap-4 lg:grid-cols-3">
-            <Card title="تنبيهات المخزون" icon={<Boxes className="h-4 w-4" />} className="lg:col-span-2">
-              <div className="scrollbar-hidden max-h-64 overflow-y-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-border text-right text-xs font-bold text-muted">
-                      <th className="py-2 pl-3">الصنف</th>
-                      <th className="py-2 pl-3">المخزون</th>
-                      <th className="py-2 pl-3">المباع</th>
-                      <th className="py-2">الأيام المتبقية</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {overview.stockAlerts.length === 0 ? (
-                      <tr>
-                        <td colSpan={4} className="py-8 text-center text-sm font-bold text-muted">
-                          لا توجد تنبيهات مخزون حالياً
-                        </td>
-                      </tr>
-                    ) : (
-                      overview.stockAlerts.slice(0, 8).map((a) => (
-                        <tr key={a.productId} className="border-b border-border/60 text-right">
-                          <td className="py-2.5 pl-3 font-bold text-foreground">{a.name}</td>
-                          <td className="py-2.5 pl-3 font-black tabular-nums text-destructive">{a.stock}</td>
-                          <td className="py-2.5 pl-3 tabular-nums text-muted">{a.soldQuantity}</td>
-                          <td className="py-2.5">
-                            <StockDaysBadge daysOfStockLeft={a.daysOfStockLeft} />
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </Card>
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-3 [&>*]:min-w-0">
+              {/* Operational alerts */}
+              <section className="flex min-w-0 flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-sm xl:col-span-2">
+                <header className="flex items-center justify-between gap-3 border-b border-border px-5 py-3.5">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="shrink-0 text-muted"><Wallet className="h-4 w-4" /></span>
+                    <h2 className="truncate text-sm font-black text-foreground">التنبيهات التشغيلية</h2>
+                  </div>
+                </header>
+                <div className="scrollbar-hidden flex-1 overflow-y-auto p-5">
+                  <AlertsCard
+                    stockAlerts={overview.stockAlerts ?? []}
+                    negativeStock={overview.negativeStock ?? []}
+                    countInputs={countInputs}
+                    countingId={countingId}
+                    onCountChange={onCountChange}
+                    onSubmitCount={submitPhysicalCount}
+                  />
+                </div>
+              </section>
 
-            <Card title="مبيعات الفترة" icon={<TrendingUp className="h-4 w-4" />}>
-              <div className="h-64">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={overview.trend} margin={{ top: 8, right: 4, left: 0, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e4e4e7" vertical={false} />
-                    <XAxis
-                      dataKey="date"
-                      reversed
-                      tick={{ fontSize: 11, fill: "#52525b" }}
-                      axisLine={{ stroke: "#e4e4e7" }}
-                      tickLine={false}
-                    />
-                    <YAxis
-                      orientation="right"
-                      tick={{ fontSize: 11, fill: "#a1a1aa" }}
-                      axisLine={false}
-                      tickLine={false}
-                      width={42}
-                    />
-                    <Tooltip
-                      formatter={(value) => [formatMoney(Number(value)), "المبيعات"]}
-                      contentStyle={{
-                        borderRadius: 12,
-                        border: "1px solid #e4e4e7",
-                        fontSize: 13,
-                        fontFamily: "inherit",
-                      }}
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="sales"
-                      stroke="#1d4ed8"
-                      strokeWidth={2.5}
-                      dot={{ r: 3, fill: "#1d4ed8", strokeWidth: 0 }}
-                      activeDot={{ r: 5 }}
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-              <p className="mt-3 flex items-center justify-between border-t border-border pt-3 text-xs font-semibold text-muted">
-                <span className="flex items-center gap-1.5">
-                  <Clock className="h-3.5 w-3.5" />
-                  آخر تحديث
-                </span>
-                <span className="tabular-nums font-black text-foreground">
-                  {new Date(overview.generatedAt).toLocaleTimeString("ar-JO", { hour: "2-digit", minute: "2-digit" })}
-                </span>
-              </p>
-            </Card>
-          </div>
-
-          <Card title="نواقص المخزون" icon={<PackageMinus className="h-4 w-4" />}>
-            <p className="mb-3 text-xs font-semibold text-muted">
-              أصناف بيعت أكثر من رصيدها الحالي (مخزون سالب). أدخل الجرد الفعلي ثم اضغط
-              «اعتماد» — القيمة الجديدة تحل محل القيمة السالبة.
-            </p>
-
-            {countStatus && (
-              <p
-                className={`mb-3 rounded-lg px-3 py-2 text-sm font-bold ${
-                  countStatus.tone === "success"
-                    ? "bg-success/10 text-success"
-                    : "bg-destructive/10 text-destructive"
-                }`}
-                role="status"
-              >
-                {countStatus.message}
-              </p>
-            )}
-
-            {overview.negativeStock.length === 0 ? (
-              <p className="rounded-xl bg-success/10 px-4 py-4 text-sm font-bold text-success">
-                لا توجد أصناف بمخزون سالب — كل الأرصدة ضمن الحدود
-              </p>
-            ) : (
-              <div className="scrollbar-hidden max-h-72 overflow-y-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-border text-right text-xs font-bold text-muted">
-                      <th className="py-2 pl-3">الصنف</th>
-                      <th className="py-2 pl-3">المخزون الحالي</th>
-                      <th className="py-2">الجرد الفعلي</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {overview.negativeStock.map((product) => (
-                      <tr key={product.productId} className="border-b border-border/60 text-right">
-                        <td className="py-2.5 pl-3 font-bold text-foreground">
-                          {formatProductDisplayName(product.name, product.variantLabel)}
-                          {product.barcode && (
-                            <span dir="ltr" className="mt-0.5 block font-mono text-xs font-bold text-muted">
-                              {product.barcode}
-                            </span>
-                          )}
-                        </td>
-                        <td className="py-2.5 pl-3 font-black tabular-nums text-destructive">
-                          {product.stock}
-                        </td>
-                        <td className="py-2.5">
-                          <form
-                            onSubmit={(e) => {
-                              e.preventDefault();
-                              void submitPhysicalCount(product);
-                            }}
-                            className="flex items-center gap-2"
-                          >
-                            <input
-                              type="number"
-                              min={0}
-                              inputMode="numeric"
-                              dir="ltr"
-                              value={countInputs[product.productId] ?? ""}
-                              onChange={(e) =>
-                                setCountInputs((current) => ({
-                                  ...current,
-                                  [product.productId]: e.target.value,
-                                }))
-                              }
-                              placeholder="0"
-                              aria-label={`جرد فعلي لـ ${product.name}`}
-                              className="h-10 w-24 rounded-lg border border-border bg-surface-muted px-2 text-right text-sm font-bold tabular-nums text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/30"
-                            />
-                            <button
-                              type="submit"
-                              disabled={countingId === product.productId}
-                              className="flex h-10 items-center justify-center gap-1.5 rounded-lg bg-primary px-3 text-sm font-black text-primary-foreground transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
-                            >
-                              {countingId === product.productId ? (
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                              ) : (
-                                <PackageMinus className="h-4 w-4" />
-                              )}
-                              اعتماد
-                            </button>
-                          </form>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </Card>
-        </>
+              {/* Top products */}
+              <section className="flex min-w-0 flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-sm">
+                <header className="flex items-center justify-between gap-3 border-b border-border px-5 py-3.5">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="shrink-0 text-muted"><TrendingUp className="h-4 w-4" /></span>
+                    <h2 className="truncate text-sm font-black text-foreground">الأسرع مبيعاً</h2>
+                  </div>
+                </header>
+                <div className="flex-1 p-5">
+                  <TopProducts products={overview.topProducts ?? []} />
+                </div>
+              </section>
+            </div>
+          </>
+        )
       )}
     </div>
   );

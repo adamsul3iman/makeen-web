@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BadgePercent, Barcode, Building2, ChevronDown, ClipboardList, CreditCard, Pause, Pencil, ReceiptText, X, XCircle, Zap } from "lucide-react";
+import { BadgePercent, Barcode, Building2, ChevronDown, ClipboardList, CreditCard, Pause, Pencil, ReceiptText, Trash2, X, XCircle, Zap } from "lucide-react";
 import { anyPosModalOpen, usePosStore } from "@/store/usePosStore";
 import { useOrdersStore } from "@/store/useOrdersStore";
 import { formatMoney } from "@/lib/format";
@@ -10,12 +10,28 @@ import { formatProductDisplayName } from "@/lib/productDisplayName";
 import type { DiscountScope, LocalUnit, SaleItem } from "@/types/pos.types";
 import { useDeviceHardware } from "@/hooks/useDeviceHardware";
 import { scannerAcceptsSubmitKey } from "@/lib/deviceHardware";
+import { SCAN_COALESCE_MS } from "@/lib/scanCoalesce";
 import DiscountModal from "./DiscountModal";
 import QuickItemModal from "./QuickItemModal";
 import AdminLineEditModal from "./AdminLineEditModal";
 import EntityCombobox from "@/components/shared/EntityCombobox";
 import QuickCreateEntityModal from "@/components/shared/QuickCreateEntityModal";
 import { useCustomerOptions } from "@/components/pos/useCustomerOptions";
+
+/**
+ * Stable, unique identity for a cart line. The cart merges by barcode OR
+ * (product + unit + price), and `addLine` can rewrite a line's `barcode` /
+ * `unitName` / `unitPrice` when a barcode-less quick-key tap is later scanned
+ * (the code and unit are adopted onto the existing row). React row keys must
+ * therefore NOT derive from those mutable fields — a changing key unmounts and
+ * remounts the <tr> (visible flash). `productId`/`variantId`/`unitId` are fixed
+ * at insert and never rewritten by a merge, so they form the stable, unique
+ * key: two coexistable lines always differ in at least one of the three (any
+ * two that matched on all three would already have been merged).
+ */
+function saleItemKey(item: SaleItem): string {
+  return [item.productId, item.variantId ?? "", item.unitId ?? ""].join(":");
+}
 
 /**
  * Unit badge (Phase 2A): inline dropdown that replaces the old full-width
@@ -97,11 +113,9 @@ const UnitBadge = memo(function UnitBadge({
 const CartRow = memo(function CartRow({
   item,
   index,
-  onSetDiscountTarget,
 }: {
   item: SaleItem;
   index: number;
-  onSetDiscountTarget: (target: { scope: DiscountScope; index?: number }) => void;
 }) {
   const adminSession = usePosStore((s) => s.adminSession);
   const isReturnMode = usePosStore((s) => s.isReturnMode);
@@ -114,16 +128,46 @@ const CartRow = memo(function CartRow({
 
   const activeUnits = (units ?? []).filter((u) => u.isActive);
 
+  const mult = item.unitMultiplier || 1;
+  const qtyRef = useRef<HTMLInputElement>(null);
+  const [qtyDraft, setQtyDraft] = useState<string>(() =>
+    String(Math.max(1, Math.round(item.qty / mult))),
+  );
+  const [prevQty, setPrevQty] = useState(item.qty);
+  const [prevMult, setPrevMult] = useState(mult);
+  if (item.qty !== prevQty || mult !== prevMult) {
+    setPrevQty(item.qty);
+    setPrevMult(mult);
+    setQtyDraft(String(Math.max(1, Math.round(item.qty / mult))));
+  }
+
+  const commitPieces = (raw: string) => {
+    const parsed = Number(String(raw).replace(",", ".").trim());
+    const pieces = Number.isFinite(parsed)
+      ? Math.round(parsed)
+      : Math.max(1, Math.round(item.qty / mult));
+    const sign = isReturnMode && item.qty < 0 ? -1 : 1;
+    const nextQty = Math.max(0, pieces) * mult * sign;
+    setQtyDraft(String(Math.max(1, pieces)));
+    updateQty(index, nextQty);
+  };
+
+  const currentPieces = () => Math.max(1, Math.round(item.qty / mult));
+  const stepPieces = (delta: number) => commitPieces(String(currentPieces() + delta));
+
   return (
     <tr className="border-b border-slate-100/80 transition-colors duration-100 hover:bg-slate-50/80">
       <td className="py-1.5 ps-3 pe-2">
         <div className="flex flex-col gap-0.5">
-          <div className="flex items-baseline gap-1.5">
-            <span className="text-[15px] font-bold leading-tight text-slate-800">
+          <div className="flex min-w-0 items-baseline gap-1.5">
+            <span
+              title={item.name}
+              className="min-w-0 flex-1 truncate text-[15px] font-bold leading-tight text-slate-800"
+            >
               {formatProductDisplayName(item.name, item.variantLabel)}
             </span>
             {item.barcode && item.barcode !== item.variantLabel && (
-              <span className="font-mono text-xs text-slate-400">{item.barcode}</span>
+              <span className="shrink-0 font-mono text-xs text-slate-400">{item.barcode}</span>
             )}
           </div>
           {item.discount ? (
@@ -146,28 +190,40 @@ const CartRow = memo(function CartRow({
         )}
       </td>
       <td className="py-1.5 px-1 text-center">
-        <div className="inline-flex items-center gap-0.5">
+        <div className="inline-flex items-center gap-1">
           <button
             type="button"
             aria-label="إنقاص الكمية"
-            onClick={() => updateQty(index, item.qty - (item.unitMultiplier || 1))}
-            disabled={!isReturnMode && item.qty <= (item.unitMultiplier || 1)}
-            className="grid h-11 w-11 place-items-center rounded-lg border border-slate-200 text-sm font-bold text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 active:scale-95 disabled:opacity-30"
+            onClick={() => stepPieces(-1)}
+            disabled={!isReturnMode && item.qty <= mult}
+            className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-slate-200 text-base font-bold text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 active:scale-95 disabled:opacity-30"
           >
             −
           </button>
           <input
-            type="text"
+            ref={qtyRef}
+            type="number"
             inputMode="numeric"
-            readOnly
-            value={Math.max(1, Math.round(item.qty / (item.unitMultiplier || 1)))}
-            className="w-7 text-center text-[15px] font-black tabular-nums text-slate-800 outline-none"
+            min="1"
+            value={qtyDraft}
+            onChange={(e) => setQtyDraft(e.target.value)}
+            onFocus={(e) => e.currentTarget.select()}
+            onBlur={(e) => commitPieces(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                commitPieces((e.target as HTMLInputElement).value);
+                qtyRef.current?.blur();
+              }
+            }}
+            aria-label="الكمية"
+            title="اضغط لإدخال الكمية مباشرة"
+            className="h-8 w-10 shrink-0 rounded-md border border-slate-200 bg-white text-center text-sm font-black tabular-nums text-slate-800 outline-none transition focus:border-green-400 focus:ring-2 focus:ring-green-200"
           />
           <button
             type="button"
             aria-label="زيادة الكمية"
-            onClick={() => updateQty(index, item.qty + (item.unitMultiplier || 1))}
-            className="grid h-11 w-11 place-items-center rounded-lg border border-green-200 text-sm font-bold text-green-600 transition hover:bg-green-50 hover:text-green-700 active:scale-95"
+            onClick={() => stepPieces(1)}
+            className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-green-200 text-base font-bold text-green-600 transition hover:bg-green-50 hover:text-green-700 active:scale-95"
           >
             +
           </button>
@@ -195,10 +251,11 @@ const CartRow = memo(function CartRow({
         <button
           type="button"
           aria-label="حذف الصنف"
+          title="حذف الصنف"
           onClick={() => removeItem(index)}
-          className="grid h-11 w-11 place-items-center rounded-lg text-slate-300 transition hover:bg-rose-50 hover:text-rose-500 active:scale-95"
+          className="grid h-11 w-11 place-items-center rounded-lg border border-transparent text-slate-400 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600 active:scale-90"
         >
-          <XCircle className="h-5 w-5" />
+          <Trash2 className="h-[18px] w-[18px]" />
         </button>
       </td>
     </tr>
@@ -217,7 +274,7 @@ const CustomerPickerBar = memo(function CustomerPickerBar() {
   const [addingCustomer, setAddingCustomer] = useState(false);
 
   return (
-    <div className="border-b border-slate-100 px-3 py-1.5">
+    <div className="border-b border-slate-100 px-3 py-1">
       <EntityCombobox
         id="pos-invoice-customer"
         label="الزبون"
@@ -279,6 +336,12 @@ export default function InvoicePanel() {
 
   const omnibarRef = useRef<HTMLInputElement>(null);
   const [omnibarInput, setOmnibarInput] = useState("");
+  // Echo guard for the manual omnibar submit: some scanners emit a double
+  // Enter terminator, and a burst landing across a focus toggle can reach the
+  // form twice. The store already coalesces duplicate codes atomically; this
+  // ref stops the identical input from even reaching the store a second time
+  // within the coalesce window (avoids a redundant not-found/error flash).
+  const lastOmnibarSubmitRef = useRef<{ code: string; at: number }>({ code: "", at: 0 });
   const [discountTarget, setDiscountTarget] = useState<{
     scope: DiscountScope;
     index?: number;
@@ -294,11 +357,6 @@ export default function InvoicePanel() {
   // so index-based actions (updateQty/removeItem) stay valid. With no B2B
   // account this returns the original array — zero allocation on the happy path.
   const displayItems = useMemo(() => withB2BMarkup(items, b2bMarkupPct), [items, b2bMarkupPct]);
-
-  // Auto-reset confirm state after 2s or when cart empties
-  useEffect(() => {
-    if (empty && confirmClear) setConfirmClear(false);
-  }, [empty, confirmClear]);
 
   useEffect(() => {
     return () => {
@@ -323,12 +381,22 @@ export default function InvoicePanel() {
   }, []);
 
   const submitOmnibar = () => {
-    if (!omnibarInput.trim()) return;
+    const code = omnibarInput.trim();
+    if (!code) return;
     if (anyPosModalOpen(usePosStore.getState())) {
       omnibarRef.current?.focus();
       return;
     }
-    scanBarcode(omnibarInput);
+    const now = performance.now();
+    const last = lastOmnibarSubmitRef.current;
+    if (last.code === code && now - last.at < SCAN_COALESCE_MS) {
+      // Duplicate echo of the same manual submit — swallow it and just clear.
+      setOmnibarInput("");
+      omnibarRef.current?.focus();
+      return;
+    }
+    lastOmnibarSubmitRef.current = { code, at: now };
+    scanBarcode(code);
     setOmnibarInput("");
     omnibarRef.current?.focus();
   };
@@ -361,7 +429,7 @@ export default function InvoicePanel() {
       }`}
     >
       {/* ── Invoice Tabs ── */}
-      <div className="flex items-center gap-1 border-b border-slate-200 bg-slate-100/60 px-3 pt-2">
+      <div className="flex items-center gap-1 overflow-x-auto border-b border-slate-200 bg-slate-100/60 px-2.5 pt-1.5 scrollbar-hidden">
         {cartSlots.map((slot, idx) => {
           const isActive = idx === activeCartIndex;
           const count = isActive ? items.length : slot.items.length;
@@ -415,8 +483,8 @@ export default function InvoicePanel() {
       </div>
 
       {/* ── Omnibar (Barcode + Search) ── */}
-      <form onSubmit={handleOmnibarSubmit} className="border-b border-slate-200 px-3 py-1.5">
-        <div className="flex h-11 items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-2.5 shadow-inner transition-all focus-within:border-slate-300 focus-within:bg-white">
+      <form onSubmit={handleOmnibarSubmit} className="border-b border-slate-200 px-3 py-1">
+        <div className="flex h-11 items-center gap-2 rounded-xl border border-slate-200/70 bg-slate-50/80 px-2.5 transition-all focus-within:border-slate-300/80 focus-within:bg-white focus-within:shadow-card">
           <Barcode className="h-4 w-4 shrink-0 text-slate-400" />
           <input
             ref={omnibarRef}
@@ -459,12 +527,12 @@ export default function InvoicePanel() {
         ) : (
           <table className="w-full table-fixed text-start">
             <colgroup>
-              <col className="w-[34%]" />
+              <col className="w-[38%]" />
+              <col className="w-[12%]" />
+              <col className="w-[16%]" />
+              <col className="w-[14%]" />
               <col className="w-[13%]" />
-              <col className="w-[18%]" />
-              <col className="w-[17%]" />
-              <col className="w-[13%]" />
-              <col className="w-[5%]" />
+              <col className="w-[7%]" />
             </colgroup>
             <thead className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur">
               <tr className="border-b border-slate-200 text-[13px] font-black uppercase tracking-wider text-slate-400">
@@ -479,10 +547,9 @@ export default function InvoicePanel() {
             <tbody>
               {displayItems.map((item, i) => (
                 <CartRow
-                  key={item.barcode || `p:${item.productId}`}
+                  key={saleItemKey(item)}
                   item={item}
                   index={i}
-                  onSetDiscountTarget={setDiscountTarget}
                 />
               ))}
             </tbody>
@@ -490,7 +557,7 @@ export default function InvoicePanel() {
         )}
       </div>
 
-      <footer className="shrink-0 space-y-1.5 border-t border-slate-200 bg-slate-50/80 px-3 py-2">
+      <footer className="shrink-0 space-y-2 border-t border-slate-200 bg-slate-50/80 px-3 py-2.5">
         {activeB2BAccountName && b2bMarkupPct > 0 && (
           <div className="flex items-center gap-1.5 rounded-lg bg-primary/10 px-2.5 py-1.5 text-xs font-black text-primary">
             <Building2 className="h-3.5 w-4 shrink-0" />
@@ -498,74 +565,79 @@ export default function InvoicePanel() {
             <span className="tabular-nums">+{b2bMarkupPct}%</span>
           </div>
         )}
-        <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => setQuickItemOpen(true)}
-            className="flex h-11 flex-1 items-center justify-center gap-1.5 rounded-lg border border-primary/25 bg-primary/5 px-3 text-[13px] font-bold text-primary transition hover:bg-primary/10 active:scale-[0.98]"
-          >
-            <Zap className="h-4 w-4 shrink-0" />
-            صنف سريع
-          </button>
-          <button
-            type="button"
-            onClick={() => setDiscountTarget({ scope: "TOTAL" })}
-            className="flex h-11 flex-1 items-center justify-center gap-1.5 rounded-lg border border-primary/25 bg-primary/5 px-3 text-[13px] font-bold text-primary transition hover:bg-primary/10 active:scale-[0.98]"
-          >
-            <BadgePercent className="h-4 w-4 shrink-0" />
-            خصم الفاتورة
-          </button>
-          <button
-            type="button"
-            onClick={clearDiscount}
-            className={`flex h-11 items-center justify-center rounded-lg border border-rose-200 px-3 text-xs font-bold text-rose-600 transition hover:bg-rose-50 active:scale-[0.97] ${
-              totals.discount > 0 ? "" : "invisible"
-            }`}
-          >
-            إلغاء
-          </button>
-        </div>
 
-        <div className="flex items-center justify-between text-sm font-semibold text-slate-600">
-          <span>الصافي</span>
-          <span className="tabular-nums">{formatMoney(totals.subtotal)}</span>
-        </div>
-        <div className="flex items-center justify-between text-sm font-semibold text-slate-600">
-          <span>الضريبة</span>
-          <span className="tabular-nums">{formatMoney(totals.tax)}</span>
-        </div>
-        <div className={`flex items-center justify-between text-sm font-bold text-rose-600 ${totals.discount > 0 ? "" : "invisible"}`}>
-          <span>الخصم</span>
-          <span className="tabular-nums">-{formatMoney(totals.discount)}</span>
-        </div>
-
+        {/* Primary checkout — prominent & wide */}
         <button
           type="button"
           disabled={empty}
           onClick={openCheckout}
-          className={`flex h-12 w-full items-center justify-center gap-2 whitespace-nowrap rounded-xl px-4 text-lg font-black shadow-card transition-colors duration-150 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 ${
+          className={`flex h-[52px] w-full items-center justify-center gap-2.5 whitespace-nowrap rounded-xl px-4 text-lg font-black shadow-card transition-colors duration-150 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 ${
             isReturnMode
               ? "bg-destructive text-destructive-foreground hover:bg-destructive-hover"
               : "bg-primary text-primary-foreground hover:bg-primary-hover"
           }`}
         >
-          <CreditCard className="h-5 w-5 shrink-0" />
+          <CreditCard className="h-[22px] w-[22px] shrink-0" />
           {isReturnMode ? "إرجاع" : "دفع الفاتورة"}
           {!empty && (
-            <span className="tabular-nums text-[15px]">• {formatMoney(totals.total)}</span>
+            <span className="tabular-nums text-base">• {formatMoney(totals.total)}</span>
           )}
         </button>
 
-        <div className="grid grid-cols-3 gap-1.5">
+        {/* Totals — compact inline summary */}
+        <div className="rounded-lg border border-slate-200/70 bg-white px-3 py-2">
+          <div className="flex items-center justify-between text-[13px] font-semibold text-slate-600">
+            <span>الصافي</span>
+            <span className="tabular-nums">{formatMoney(totals.subtotal)}</span>
+          </div>
+          <div className="flex items-center justify-between text-[13px] font-semibold text-slate-600">
+            <span>الضريبة</span>
+            <span className="tabular-nums">{formatMoney(totals.tax)}</span>
+          </div>
+          <div className={`flex items-center justify-between text-[13px] font-bold text-rose-600 ${totals.discount > 0 ? "" : "invisible"}`}>
+            <span>الخصم</span>
+            <span className="flex items-center gap-1">
+              <span className="tabular-nums">-{formatMoney(totals.discount)}</span>
+              <button
+                type="button"
+                onClick={clearDiscount}
+                aria-label="إلغاء الخصم"
+                title="إلغاء الخصم"
+                className="grid h-6 w-6 place-items-center rounded-md text-rose-600 transition hover:bg-rose-100 active:scale-90"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </span>
+          </div>
+        </div>
+
+        {/* Secondary quick actions — compact single-row toolbar */}
+        <div className="grid grid-cols-5 gap-1.5">
+          <button
+            type="button"
+            onClick={() => setQuickItemOpen(true)}
+            className="flex h-10 items-center justify-center gap-1 rounded-lg border border-slate-200 bg-white text-xs font-bold text-slate-600 transition hover:border-slate-300 hover:bg-slate-100 active:scale-[0.96]"
+          >
+            <Zap className="h-3.5 w-3.5 shrink-0" />
+            صنف سريع
+          </button>
+          <button
+            type="button"
+            onClick={() => setDiscountTarget({ scope: "TOTAL" })}
+            className="flex h-10 items-center justify-center gap-1 rounded-lg border border-slate-200 bg-white text-xs font-bold text-slate-600 transition hover:border-slate-300 hover:bg-slate-100 active:scale-[0.96]"
+          >
+            <BadgePercent className="h-3.5 w-3.5 shrink-0" />
+            خصم الفاتورة
+          </button>
           <button
             type="button"
             onClick={handleHoldClick}
-            className="relative flex h-11 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-200 bg-white text-[13px] font-bold text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 active:scale-[0.97]"
+            className="relative flex h-10 items-center justify-center gap-1 rounded-lg border border-slate-200 bg-white text-xs font-bold text-slate-600 transition hover:border-slate-300 hover:bg-slate-100 active:scale-[0.96]"
           >
-            <Pause className="h-4 w-4 shrink-0" />
+            <Pause className="h-3.5 w-3.5 shrink-0" />
             تعليق
             {openOrdersCount > 0 && (
-              <span className="absolute -top-1 -end-1 grid h-5 min-w-5 place-items-center rounded-full bg-rose-600 px-1 text-xs font-black text-white">
+              <span className="absolute -end-1.5 -top-1.5 grid h-4.5 min-w-4.5 place-items-center rounded-full bg-rose-600 px-1 text-[10px] font-black text-white">
                 {openOrdersCount}
               </span>
             )}
@@ -575,9 +647,9 @@ export default function InvoicePanel() {
             disabled={empty}
             onClick={handleHoldClick}
             title="تسجيل الطلب كمفتوح لاستكماله لاحقاً من صفحة الطلبات"
-            className="flex h-11 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-primary/30 bg-primary/5 text-[13px] font-bold text-primary transition hover:border-primary/50 hover:bg-primary/10 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40"
+            className="flex h-10 items-center justify-center gap-1 rounded-lg border border-slate-200 bg-white text-xs font-bold text-slate-600 transition hover:border-slate-300 hover:bg-slate-100 active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <ClipboardList className="h-4 w-4 shrink-0" />
+            <ClipboardList className="h-3.5 w-3.5 shrink-0" />
             طلب مفتوح
           </button>
           <button
@@ -585,13 +657,13 @@ export default function InvoicePanel() {
             disabled={empty}
             onClick={handleClearInvoice}
             onMouseLeave={() => { if (confirmClear) { if (confirmClearTimer.current) clearTimeout(confirmClearTimer.current); setConfirmClear(false); } }}
-            className={`flex h-11 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border text-[13px] font-bold transition active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40 ${
+            className={`flex h-10 items-center justify-center gap-1 rounded-lg border text-xs font-bold transition active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-40 ${
               confirmClear
                 ? "border-rose-300 bg-rose-500 text-white hover:bg-rose-600"
-                : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50"
+                : "border-slate-200 bg-white text-rose-600 hover:border-rose-300 hover:bg-rose-50"
             }`}
           >
-            <XCircle className="h-4 w-4 shrink-0" />
+            <XCircle className="h-3.5 w-3.5 shrink-0" />
             {confirmClear ? "تأكيد الحذف" : "إلغاء"}
           </button>
         </div>

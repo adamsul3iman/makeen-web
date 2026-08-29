@@ -460,6 +460,7 @@ async function recordSalesInvoiceLedger(
       gross_profit: round2(grossProfit + deliveryFee),
       is_return: total < 0,
       is_cancellation: Boolean(payload.isCancellation),
+      invoice_number: text(payload.invoiceNumber),
       original_invoice_sync_id: uuidOrNull(payload.originalInvoiceId),
       completed_at: text(payload.completed_at) || new Date().toISOString(),
       payload,

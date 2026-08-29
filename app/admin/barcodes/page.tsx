@@ -205,6 +205,11 @@ export default function AdminBarcodesPage() {
           @page {
             size: ${labelTemplate.widthMm}mm ${labelTemplate.heightMm}mm;
             margin: 0;
+            /* Lock the sticker sheet to portrait and disable any browser
+               print scaling — a scaled page silently shifts the barcode off
+               the physical label pitch (blank-label overrun / clipped glyphs). */
+            orientation: portrait;
+            scale: 100%;
           }
         }
       `}</style>

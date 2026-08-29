@@ -5,31 +5,15 @@ import { Barcode, Search, X, Package, ScanLine } from "lucide-react";
 import { ModalShell } from "@/components/ui/ModalShell";
 import { formatMoney } from "@/lib/format";
 import { breakdownStock, maxUnitsAvailable } from "@/lib/stockDisplay";
+import {
+  resolveScan,
+  type ResolvedProduct,
+  type ScanResolveInput,
+} from "@/lib/scanResolve";
 import { usePosStore } from "@/store/usePosStore";
 import { useModalEscape } from "@/hooks/useModalEscape";
-import type { LocalUnit } from "@/types/pos.types";
 
 /* ────────────────── Types ────────────────── */
-
-interface ResolvedVariant {
-  barcode: string;
-  variantLabel: string;
-  totalStock: number;
-  price: number;
-  costPrice: number;
-}
-
-interface ResolvedProduct {
-  productId: string;
-  productName: string;
-  baseUnit: string;
-  isWeighed: boolean;
-  totalStock: number;
-  costPrice: number;
-  sellingPrice: number;
-  variants: ResolvedVariant[];
-  units: LocalUnit[];
-}
 
 interface ScanHistoryItem {
   query: string;
@@ -54,41 +38,17 @@ export default function ProductQuantitiesModal({
 
   const inputRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
-  const [resolvedSeed, setResolved] = useState<ResolvedProduct | null>(null);
+  const [resolvedQuery, setResolvedQuery] = useState<string | null>(null);
+  const input = useMemo<ScanResolveInput>(
+    () => ({ barcodeIndex, barcodes, products, productUnits }),
+    [barcodeIndex, barcodes, products, productUnits],
+  );
+  const resolved = useMemo<ResolvedProduct | null>(() => {
+    if (!resolvedQuery) return null;
+    return resolveScan(resolvedQuery, input);
+  }, [resolvedQuery, input]);
   const [notFound, setNotFound] = useState(false);
   const [history, setHistory] = useState<ScanHistoryItem[]>([]);
-
-  const resolved = useMemo<ResolvedProduct | null>(() => {
-    if (!resolvedSeed) return null;
-    const product = products[resolvedSeed.productId];
-    if (!product) return null;
-
-    const variants: ResolvedVariant[] = Object.values(barcodes)
-      .filter(
-        (entry) =>
-          entry.productId === resolvedSeed.productId &&
-          typeof entry.totalStock === "number",
-      )
-      .map((entry) => ({
-        barcode: entry.barcode,
-        variantLabel: entry.variantLabel || "أساسي",
-        totalStock: entry.totalStock ?? 0,
-        price: entry.price,
-        costPrice: entry.costPrice,
-      }));
-
-    return {
-      ...resolvedSeed,
-      productName: product.name,
-      baseUnit: product.baseUnit,
-      isWeighed: product.isWeighed,
-      totalStock: product.totalStock ?? 0,
-      costPrice: product.costPrice,
-      sellingPrice: product.price,
-      units: productUnits[resolvedSeed.productId] ?? [],
-      variants: variants.length > 0 ? variants : resolvedSeed.variants,
-    };
-  }, [resolvedSeed, products, barcodes, productUnits]);
 
   // Auto-focus the input whenever the modal opens or a scan resolves.
   const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -105,106 +65,21 @@ export default function ProductQuantitiesModal({
       if (!trimmed) return;
       setNotFound(false);
 
-      // ── 1. O(1) barcode lookup ──
-      const hit = barcodeIndex[trimmed];
-      if (hit) {
-        const product = products[hit.product_id];
-        if (!product) {
-          setResolved(null);
-          setNotFound(true);
-          return;
-        }
-        const pid = hit.product_id;
-
-        // Collect ALL variant barcodes for this parent product.
-        const variantList: ResolvedVariant[] = [];
-        for (const bc of Object.values(barcodes)) {
-          if (bc.productId === pid && typeof bc.totalStock === "number") {
-            variantList.push({
-              barcode: bc.barcode,
-              variantLabel: bc.variantLabel || "أساسي",
-              totalStock: bc.totalStock ?? 0,
-              price: bc.price,
-              costPrice: bc.costPrice,
-            });
-          }
-        }
-        // Ensure the scanned variant is in the list even if barcodes map is stale.
-        if (!variantList.some((v) => v.barcode === trimmed)) {
-          variantList.unshift({
-            barcode: trimmed,
-            variantLabel: hit.variantLabel || "أساسي",
-            totalStock: hit.totalStock ?? 0,
-            price: hit.price,
-            costPrice: 0,
-          });
-        }
-
-        const resolvedProduct: ResolvedProduct = {
-          productId: pid,
-          productName: product.name,
-          baseUnit: product.baseUnit,
-          isWeighed: product.isWeighed,
-          totalStock: product.totalStock ?? 0,
-          costPrice: product.costPrice,
-          sellingPrice: product.price,
-          units: productUnits[pid] ?? [],
-          variants: variantList,
-        };
-        setResolved(resolvedProduct);
-        setHistory((prev) =>
-          [
-            { query: trimmed, timestamp: Date.now(), productName: product.name, totalStock: product.totalStock ?? 0 },
-            ...prev,
-          ].slice(0, 20),
-        );
+      const result = resolveScan(trimmed, input);
+      if (!result) {
+        setResolvedQuery(null);
+        setNotFound(true);
         return;
       }
-
-      // ── 2. Name search fallback ──
-      const q = trimmed.toLowerCase();
-      const match = Object.values(products).find(
-        (p) => p.name.toLowerCase().includes(q),
+      setResolvedQuery(trimmed);
+      setHistory((prev) =>
+        [
+          { query: trimmed, timestamp: Date.now(), productName: result.productName, totalStock: result.totalStock },
+          ...prev,
+        ].slice(0, 20),
       );
-      if (match) {
-        const pid = match.id;
-        const variantList: ResolvedVariant[] = [];
-        for (const bc of Object.values(barcodes)) {
-          if (bc.productId === pid && typeof bc.totalStock === "number") {
-            variantList.push({
-              barcode: bc.barcode,
-              variantLabel: bc.variantLabel || "أساسي",
-              totalStock: bc.totalStock ?? 0,
-              price: bc.price,
-              costPrice: bc.costPrice,
-            });
-          }
-        }
-        const resolvedProduct: ResolvedProduct = {
-          productId: pid,
-          productName: match.name,
-          baseUnit: match.baseUnit,
-          isWeighed: match.isWeighed,
-          totalStock: match.totalStock ?? 0,
-          costPrice: match.costPrice,
-          sellingPrice: match.price,
-          units: productUnits[pid] ?? [],
-          variants: variantList.length > 0 ? variantList : [{ barcode: "—", variantLabel: "أساسي", totalStock: match.totalStock ?? 0, price: match.price, costPrice: match.costPrice }],
-        };
-        setResolved(resolvedProduct);
-        setHistory((prev) =>
-          [
-            { query: trimmed, timestamp: Date.now(), productName: match.name, totalStock: match.totalStock ?? 0 },
-            ...prev,
-          ].slice(0, 20),
-        );
-        return;
-      }
-
-      setResolved(null);
-      setNotFound(true);
     },
-    [barcodeIndex, products, barcodes, productUnits],
+    [input],
   );
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -404,7 +279,7 @@ export default function ProductQuantitiesModal({
             </button>
           </div>
           <div className="space-y-1">
-            {history.map((item, i) => (
+            {history.map((item) => (
               <button
                 key={`${item.query}-${item.timestamp}`}
                 type="button"

@@ -19,12 +19,16 @@ export default function NavGroupComponent({ group, isActive, collapsed }: NavGro
 
   useEffect(() => {
     if (group.standalone) return;
-    try {
-      const stored = localStorage.getItem(`nav-group-${group.id}`);
-      if (stored !== null) {
-        setExpanded(stored === "true");
-      }
-    } catch {}
+    // Deferred into an async continuation so the effect body never synchronously
+    // calls setState (react-hooks/set-state-in-effect).
+    Promise.resolve().then(() => {
+      try {
+        const stored = localStorage.getItem(`nav-group-${group.id}`);
+        if (stored !== null) {
+          setExpanded(stored === "true");
+        }
+      } catch {}
+    });
   }, [group.id, group.standalone]);
 
   const toggle = useCallback(() => {
@@ -76,7 +80,7 @@ export default function NavGroupComponent({ group, isActive, collapsed }: NavGro
       <button
         type="button"
         onClick={toggle}
-        className="flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider transition-colors duration-150 text-slate-500 hover:text-slate-400"
+        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs font-bold uppercase tracking-wider transition-colors duration-150 text-slate-500 hover:text-slate-700"
       >
         <span className="flex-1 truncate text-right">{group.label}</span>
         <ChevronDown

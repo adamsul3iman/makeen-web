@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
 import {
   KeyRound,
   Loader2,
@@ -10,6 +9,7 @@ import {
   Power,
   ShieldCheck,
   Trash2,
+  UserCog,
   UserPlus,
   UserRound,
   Users,
@@ -20,10 +20,13 @@ import StaffModal, {
   type StaffRoleOption,
 } from "@/components/admin/StaffModal";
 import SecondaryAuthModal from "@/components/auth/SecondaryAuthModal";
+import RoleEditorModal from "@/components/admin/staff/RoleEditorModal";
+import { PageHeader } from "@/components/ui/Card";
+import KpiCard from "@/components/admin/dashboard/KpiCard";
 import { SearchInput } from "@/components/admin/SearchInput";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { normalizeArabicText } from "@/lib/arabic";
-import { fetchCashiers, fetchRoles } from "@/lib/staffClient";
+import { fetchCashiers, fetchRoles, type RoleDraft, type StaffRole } from "@/lib/staffClient";
 
 interface CashierRow {
   id: string;
@@ -31,15 +34,25 @@ interface CashierRow {
   username?: string;
   role: string;
   roleId?: string | null;
-  roleName?: string;
   isActive?: boolean;
 }
 
+function toRoleOption(role: StaffRole): StaffRoleOption {
+  return {
+    id: role.id,
+    code: role.code,
+    name: role.name,
+    description: role.description ?? "",
+    capabilities: role.capabilities ?? [],
+    limits: (role.limits ?? {}) as StaffRoleOption["limits"],
+  };
+}
+
 /**
- * Back-office cashier management. Reads the real roster from
- * /api/admin/cashiers (session-scoped, never PIN material) and every
- * create / edit / delete is gated by the owner's dashboard password through
- * the same secondary-auth flow the POS uses.
+ * Back-office cashier + role management. Reads the safe roster through the
+ * `list_cashiers_public` RPC and roles through the operator-granted SELECT on
+ * staff_roles. Every mutation (cashier or role) is gated by the owner's
+ * dashboard password through the proof-per-call RPCs (migrations 078 / 097).
  */
 export default function AdminStaffPage() {
   const requestSecondaryAuth = usePosStore((s) => s.requestSecondaryAuth);
@@ -49,11 +62,14 @@ export default function AdminStaffPage() {
   const [cashiers, setCashiers] = useState<CashierRow[] | null>(null);
   const [roles, setRoles] = useState<StaffRoleOption[] | null>(null);
   const [loadError, setLoadError] = useState("");
-  const [sessionExpired, setSessionExpired] = useState(false);
   const [modal, setModal] = useState<{
     open: boolean;
     editing?: CashierRow;
     mode?: "full" | "pin";
+  }>({ open: false });
+  const [roleModal, setRoleModal] = useState<{
+    open: boolean;
+    role?: StaffRoleOption;
   }>({ open: false });
   const [q, setQ] = useState("");
   const debouncedQ = useDebouncedValue(q.trim(), 300);
@@ -68,9 +84,24 @@ export default function AdminStaffPage() {
     );
   }, [cashiers, debouncedQ]);
 
+  const roleNameOf = useCallback(
+    (c: CashierRow) => roles?.find((role) => role.id === c.roleId)?.name ?? c.role,
+    [roles],
+  );
+
+  const membersByRole = useMemo(() => {
+    const map: Record<string, number> = {};
+    if (cashiers) {
+      for (const c of cashiers) {
+        const key = c.roleId ?? c.role;
+        if (key) map[key] = (map[key] ?? 0) + 1;
+      }
+    }
+    return map;
+  }, [cashiers]);
+
   const loadRoster = useCallback(async (): Promise<{
     rows: CashierRow[] | null;
-    status?: number;
     serverError?: string;
   }> => {
     try {
@@ -94,25 +125,54 @@ export default function AdminStaffPage() {
   }, []);
 
   const applyRoster = useCallback(
-    (result: { rows: CashierRow[] | null; status?: number; serverError?: string }) => {
-      const { rows, status, serverError } = result;
+    (result: { rows: CashierRow[] | null; serverError?: string }) => {
+      const { rows, serverError } = result;
       if (rows === null) {
         setCashiers(null);
-        setSessionExpired(status === 401);
         setLoadError(
-          status === 401
-            ? "انتهت جلستك — أعد تسجيل الدخول كمدير المتجر لمشاهدة الكاشير."
-            : status && serverError
-              ? `تعذر تحميل الكاشير — ${serverError}`
-              : "تعذر تحميل الكاشير — تأكد من اتصال الشبكة ثم أعد المحاولة."
+          serverError
+            ? `تعذر تحميل الكاشير — ${serverError}`
+            : "تعذر تحميل الكاشير — تأكد من اتصال الشبكة ثم أعد المحاولة.",
         );
       } else {
         setCashiers(rows);
-        setSessionExpired(false);
         setLoadError("");
       }
     },
-    []
+    [],
+  );
+
+  const loadRolesData = useCallback(async (): Promise<{
+    rows: StaffRoleOption[] | null;
+    serverError?: string;
+  }> => {
+    try {
+      const data = await fetchRoles();
+      return { rows: data.map(toRoleOption) };
+    } catch (err) {
+      return {
+        rows: null,
+        serverError: err instanceof Error && err.message ? err.message : undefined,
+      };
+    }
+  }, []);
+
+  const applyRoles = useCallback(
+    (result: { rows: StaffRoleOption[] | null; serverError?: string }) => {
+      const { rows, serverError } = result;
+      if (rows === null) {
+        setRoles(null);
+        setLoadError(
+          serverError
+            ? `تعذر تحميل الأدوار والصلاحيات — ${serverError}`
+            : "تعذر تحميل الأدوار والصلاحيات — أعد المحاولة.",
+        );
+      } else {
+        setRoles(rows);
+        setLoadError("");
+      }
+    },
+    [],
   );
 
   useEffect(() => {
@@ -127,29 +187,15 @@ export default function AdminStaffPage() {
 
   useEffect(() => {
     let cancelled = false;
-    void fetchRoles()
-      .then((data) => {
-        if (!cancelled)
-          setRoles(
-            data.map((r) => ({
-              id: r.id,
-              code: r.code,
-              name: r.name,
-              description: r.description ?? "",
-              capabilities: r.capabilities ?? [],
-              limits: (r.limits ?? {}) as StaffRoleOption["limits"],
-            })),
-          );
-      })
-      .catch(() => {
-        if (!cancelled) setLoadError("تعذر تحميل الأدوار والصلاحيات — أعد المحاولة.");
-      });
+    loadRolesData().then((result) => {
+      if (!cancelled) applyRoles(result);
+    });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [loadRolesData, applyRoles]);
 
-  // Refresh once after a secondary-auth action (save / delete) closes.
+  // Refresh once after a secondary-auth action (cashier or role) closes.
   const prevAuthOpen = useRef(false);
   useEffect(() => {
     const shouldRefresh = prevAuthOpen.current && !isSecondaryAuthOpen;
@@ -159,10 +205,13 @@ export default function AdminStaffPage() {
     loadRoster().then((result) => {
       if (!cancelled) applyRoster(result);
     });
+    loadRolesData().then((result) => {
+      if (!cancelled) applyRoles(result);
+    });
     return () => {
       cancelled = true;
     };
-  }, [isSecondaryAuthOpen, loadRoster, applyRoster]);
+  }, [isSecondaryAuthOpen, loadRoster, applyRoster, loadRolesData, applyRoles]);
 
   const handleSave = (payload: StaffFormPayload) => {
     setModal({ open: false });
@@ -195,25 +244,127 @@ export default function AdminStaffPage() {
     requestSecondaryAuth({ type: "delete_cashier", cashierId: row.id, name: row.name });
   };
 
+  const openNewRole = () => setRoleModal({ open: true });
+  const openEditRole = (role: StaffRoleOption) => setRoleModal({ open: true, role });
+
+  const handleSaveRole = (draft: RoleDraft) => {
+    setRoleModal({ open: false });
+    requestSecondaryAuth({ type: "save_role", role: draft });
+  };
+
+  const handleDeleteRole = (role: StaffRoleOption) => {
+    setRoleModal({ open: false });
+    requestSecondaryAuth({ type: "delete_role", roleId: role.id, name: role.name });
+  };
+
+  const totalStaff = cashiers === null ? null : cashiers.length;
+  const activeStaff =
+    cashiers === null ? null : cashiers.filter((c) => c.isActive !== false).length;
+  const suspendedStaff =
+    cashiers === null ? null : cashiers.filter((c) => c.isActive === false).length;
+
+  const renderRoleList = () => {
+    if (roles === null) {
+      return (
+        <div className="px-5 py-10 text-center">
+          <Loader2 className="mx-auto mb-2 h-6 w-6 animate-spin text-muted" />
+          <p className="text-sm font-semibold text-muted">جارٍ تحميل الأدوار…</p>
+        </div>
+      );
+    }
+    if (roles.length === 0) {
+      return (
+        <div className="px-5 py-10 text-center">
+          <UserCog className="mx-auto mb-2 h-8 w-8 text-muted" />
+          <p className="text-sm font-bold text-foreground">لا توجد أدوار بعد</p>
+        </div>
+      );
+    }
+    return (
+      <div className="divide-y divide-border/60">
+        {roles.map((role) => (
+          <button
+            key={role.id}
+            type="button"
+            onClick={() => openEditRole(role)}
+            className="group flex w-full items-center gap-3 px-5 py-3.5 text-right transition hover:bg-surface-muted"
+          >
+            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary transition group-hover:bg-primary/15">
+              <UserCog className="h-5 w-5" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="truncate text-sm font-black text-foreground">{role.name}</span>
+                {role.isSystem && (
+                  <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-black text-primary">
+                    نظام
+                  </span>
+                )}
+              </div>
+              <p className="mt-0.5 truncate text-xs font-semibold text-muted">
+                {role.description || role.code}
+              </p>
+            </div>
+            <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-surface-muted px-2.5 py-1 text-xs font-black text-muted">
+              <Users className="h-3.5 w-3.5" />
+              {membersByRole[role.id] ?? 0}
+            </span>
+            <span className="shrink-0 text-xs font-bold text-muted">
+              {role.capabilities.length} صلاحية
+            </span>
+          </button>
+        ))}
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-6">
-      <header className="flex items-end justify-between">
-        <div>
-          <h1 className="text-2xl font-black text-foreground">الموظفون والصلاحيات</h1>
-          <p className="mt-1 text-sm font-semibold text-muted">
-            حسابات PIN بأدوار واضحة وحدود تشغيلية لكل موظف
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={() => setModal({ open: true })}
-          disabled={!roles?.length}
-          className="flex items-center gap-2 rounded-xl bg-primary px-5 py-3 text-base font-black text-primary-foreground shadow-sm transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          <UserPlus className="h-5 w-5" />
-          إضافة موظف
-        </button>
-      </header>
+      <PageHeader
+        title="الموظفون والصلاحيات"
+        subtitle="حسابات PIN بأدوار واضحة وحدود تشغيلية لكل موظف"
+        action={
+          <button
+            type="button"
+            onClick={() => setModal({ open: true })}
+            disabled={!roles?.length}
+            className="flex items-center gap-2 rounded-xl bg-primary px-5 py-3 text-base font-black text-primary-foreground shadow-sm transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <UserPlus className="h-5 w-5" />
+            إضافة موظف
+          </button>
+        }
+      />
+
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <KpiCard
+          label="إجمالي الموظفين"
+          value={totalStaff === null ? "…" : String(totalStaff)}
+          icon={Users}
+          hint="حسابات نقطة البيع النشطة والموقوفة"
+        />
+        <KpiCard
+          label="نشط"
+          value={activeStaff === null ? "…" : String(activeStaff)}
+          icon={UserRound}
+          tone="success"
+          hint="يستطيع تسجيل الدخول بالرمز"
+        />
+        <KpiCard
+          label="موقوف"
+          value={suspendedStaff === null ? "…" : String(suspendedStaff)}
+          icon={Power}
+          tone={(suspendedStaff ?? 0) > 0 ? "destructive" : "default"}
+          hint="لا يستطيع تسجيل الدخول"
+        />
+        <KpiCard
+          label="أدوار الصلاحيات"
+          value={roles === null ? "…" : String(roles.length)}
+          icon={ShieldCheck}
+          tone="primary"
+          hint="نظامية ومخصصة"
+        />
+      </div>
 
       <section className="flex items-center gap-4 rounded-2xl border border-border bg-surface p-5 shadow-sm">
         <div className="grid h-14 w-14 shrink-0 place-items-center rounded-2xl bg-slate-900 text-sky-400">
@@ -233,154 +384,178 @@ export default function AdminStaffPage() {
         </div>
       </section>
 
-      <section className="overflow-hidden rounded-2xl border border-border bg-surface shadow-sm">
-        <div className="flex flex-col gap-3 border-b border-border px-5 py-3 sm:flex-row sm:items-center sm:justify-between">
-          <h2 className="text-base font-black text-foreground">فريق المتجر</h2>
-          <SearchInput
-            value={q}
-            onChange={setQ}
-            placeholder="ابحث بالاسم أو اسم المستخدم…"
-            className="sm:w-64"
-          />
-        </div>
-        <div className="scrollbar-hidden overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border bg-surface-muted text-right text-xs font-black text-muted">
-                <th className="px-5 py-3">الاسم</th>
-                <th className="px-5 py-3">اسم المستخدم</th>
-                <th className="px-5 py-3">الدور</th>
-                <th className="px-5 py-3">الحالة</th>
-                <th className="px-5 py-3 text-left">إجراءات</th>
-              </tr>
-            </thead>
-            <tbody>
-              {cashiers === null ? (
-                <tr>
-                  <td colSpan={5} className="px-5 py-10 text-center">
-                    <Loader2 className="mx-auto mb-2 h-6 w-6 animate-spin text-muted" />
-                    <p className="text-sm font-semibold text-muted">جارٍ التحميل…</p>
-                  </td>
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)] xl:items-start">
+        <section className="overflow-hidden rounded-2xl border border-border bg-surface shadow-sm">
+          <div className="flex flex-col gap-3 border-b border-border px-5 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <h2 className="flex items-center gap-2 text-sm font-black text-foreground">
+              <UserRound className="h-4 w-4 text-primary" />
+              فريق المتجر
+            </h2>
+            <SearchInput
+              value={q}
+              onChange={setQ}
+              placeholder="ابحث بالاسم أو اسم المستخدم…"
+              className="sm:w-64"
+            />
+          </div>
+          <div className="scrollbar-hidden overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border bg-surface-muted text-right text-xs font-black text-muted">
+                  <th className="px-5 py-3">الاسم</th>
+                  <th className="px-5 py-3">اسم المستخدم</th>
+                  <th className="px-5 py-3">الدور</th>
+                  <th className="px-5 py-3">الحالة</th>
+                  <th className="px-5 py-3 text-left">إجراءات</th>
                 </tr>
-              ) : cashiers.length === 0 ? (
-                <tr>
-                  <td colSpan={5} className="px-5 py-10 text-center">
-                    <Users className="mx-auto mb-2 h-8 w-8 text-muted" />
-                    <p className="text-sm font-bold text-foreground">لا يوجد موظفون بعد</p>
-                    <p className="mt-1 text-xs font-semibold text-muted">
-                      أضف أول موظف واختر دوره ثم سلّمه رمز PIN الخاص به
-                    </p>
-                  </td>
-                </tr>
-              ) : filteredCashiers !== null && filteredCashiers.length === 0 ? (
-                <tr>
-                  <td colSpan={5} className="px-5 py-10 text-center text-sm font-semibold text-muted">
-                    لا يوجد موظف مطابق للبحث
-                  </td>
-                </tr>
-              ) : (
-                (filteredCashiers ?? []).map((c) => (
-                  <tr
-                    key={c.id}
-                    className={`border-b border-border/60 text-right ${c.isActive === false ? "opacity-60" : ""}`}
-                  >
-                    <td className="px-5 py-3.5">
-                      <div className="flex items-center gap-3">
-                        <div className="grid h-9 w-9 place-items-center rounded-full bg-surface-muted text-muted">
-                          <UserRound className="h-4 w-4" />
-                        </div>
-                        <span className="font-bold text-foreground">{c.name}</span>
-                      </div>
-                    </td>
-                    <td className="px-5 py-3.5" dir="ltr">
-                      <span className="font-bold text-muted">{c.username ?? "—"}</span>
-                    </td>
-                    <td className="px-5 py-3.5">
-                      <span className="flex w-fit items-center gap-1.5 rounded-full bg-surface-muted px-2.5 py-1 text-xs font-black text-muted">
-                        <UserRound className="h-3.5 w-3.5" />
-                        {c.roleName ?? c.role}
-                      </span>
-                    </td>
-                    <td className="px-5 py-3.5">
-                      {c.isActive === false ? (
-                        <span className="flex w-fit items-center gap-1.5 rounded-full bg-destructive/10 px-2.5 py-1 text-xs font-black text-destructive">
-                          موقوف
-                        </span>
-                      ) : (
-                        <span className="flex w-fit items-center gap-1.5 rounded-full bg-success/10 px-2.5 py-1 text-xs font-black text-success">
-                          نشط
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-5 py-3.5">
-                      <div className="flex items-center justify-end gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setModal({ open: true, editing: c })}
-                          className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs font-black text-muted transition hover:bg-surface-muted"
-                        >
-                          <Pencil className="h-3.5 w-3.5" />
-                          تعديل
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleResetPin(c)}
-                          title="إعادة تعيين رمز PIN"
-                          className="flex items-center gap-1.5 rounded-lg border border-primary/30 px-3 py-1.5 text-xs font-black text-primary transition hover:bg-primary/10"
-                        >
-                          <KeyRound className="h-3.5 w-3.5" />
-                          إعادة الرمز
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleToggleStatus(c)}
-                          title={c.isActive === false ? "تفعيل الحساب" : "إيقاف الحساب"}
-                          className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-black transition ${
-                            c.isActive === false
-                              ? "border-success/40 text-success hover:bg-success/10"
-                              : "border-destructive/30 text-destructive hover:bg-destructive/10"
-                          }`}
-                        >
-                          <Power className="h-3.5 w-3.5" />
-                          {c.isActive === false ? "تفعيل" : "إيقاف"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDelete(c)}
-                          className="flex items-center gap-1.5 rounded-lg border border-destructive/30 px-3 py-1.5 text-xs font-black text-destructive transition hover:bg-destructive/10"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                          حذف
-                        </button>
-                      </div>
+              </thead>
+              <tbody>
+                {cashiers === null ? (
+                  <tr>
+                    <td colSpan={5} className="px-5 py-10 text-center">
+                      <Loader2 className="mx-auto mb-2 h-6 w-6 animate-spin text-muted" />
+                      <p className="text-sm font-semibold text-muted">جارٍ التحميل…</p>
                     </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
+                ) : cashiers.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="px-5 py-10 text-center">
+                      <Users className="mx-auto mb-2 h-8 w-8 text-muted" />
+                      <p className="text-sm font-bold text-foreground">لا يوجد موظفون بعد</p>
+                      <p className="mt-1 text-xs font-semibold text-muted">
+                        أضف أول موظف واختر دوره ثم سلّمه رمز PIN الخاص به
+                      </p>
+                    </td>
+                  </tr>
+                ) : filteredCashiers !== null && filteredCashiers.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={5}
+                      className="px-5 py-10 text-center text-sm font-semibold text-muted"
+                    >
+                      لا يوجد موظف مطابق للبحث
+                    </td>
+                  </tr>
+                ) : (
+                  (filteredCashiers ?? []).map((c) => (
+                    <tr
+                      key={c.id}
+                      className={`border-b border-border/60 text-right ${c.isActive === false ? "opacity-60" : ""}`}
+                    >
+                      <td className="px-5 py-3.5">
+                        <div className="flex items-center gap-3">
+                          <div className="grid h-9 w-9 place-items-center rounded-full bg-surface-muted text-muted">
+                            <UserRound className="h-4 w-4" />
+                          </div>
+                          <span className="font-bold text-foreground">{c.name}</span>
+                        </div>
+                      </td>
+                      <td className="px-5 py-3.5" dir="ltr">
+                        <span className="font-bold text-muted">{c.username ?? "—"}</span>
+                      </td>
+                      <td className="px-5 py-3.5">
+                        <span className="flex w-fit items-center gap-1.5 rounded-full bg-surface-muted px-2.5 py-1 text-xs font-black text-muted">
+                          <UserRound className="h-3.5 w-3.5" />
+                          {roleNameOf(c)}
+                        </span>
+                      </td>
+                      <td className="px-5 py-3.5">
+                        {c.isActive === false ? (
+                          <span className="flex w-fit items-center gap-1.5 rounded-full bg-destructive/10 px-2.5 py-1 text-xs font-black text-destructive">
+                            موقوف
+                          </span>
+                        ) : (
+                          <span className="flex w-fit items-center gap-1.5 rounded-full bg-success/10 px-2.5 py-1 text-xs font-black text-success">
+                            نشط
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-5 py-3.5">
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setModal({ open: true, editing: c })}
+                            className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs font-black text-muted transition hover:bg-surface-muted"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                            تعديل
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleResetPin(c)}
+                            title="إعادة تعيين رمز PIN"
+                            className="flex items-center gap-1.5 rounded-lg border border-primary/30 px-3 py-1.5 text-xs font-black text-primary transition hover:bg-primary/10"
+                          >
+                            <KeyRound className="h-3.5 w-3.5" />
+                            إعادة الرمز
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleToggleStatus(c)}
+                            title={c.isActive === false ? "تفعيل الحساب" : "إيقاف الحساب"}
+                            className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-black transition ${
+                              c.isActive === false
+                                ? "border-success/40 text-success hover:bg-success/10"
+                                : "border-destructive/30 text-destructive hover:bg-destructive/10"
+                            }`}
+                          >
+                            <Power className="h-3.5 w-3.5" />
+                            {c.isActive === false ? "تفعيل" : "إيقاف"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDelete(c)}
+                            className="flex items-center gap-1.5 rounded-lg border border-destructive/30 px-3 py-1.5 text-xs font-black text-destructive transition hover:bg-destructive/10"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            حذف
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
 
-        <footer className="flex items-center justify-between border-t border-border px-5 py-3 text-xs font-semibold text-muted">
-          <span className="flex items-center gap-1.5">
-            <Users className="h-3.5 w-3.5" />
-            إجمالي الموظفين: {cashiers?.length ?? "…"}
-            {filteredCashiers !== null && debouncedQ && (
-              <span> • النتائج: {filteredCashiers.length}</span>
-            )}
-          </span>
-          <span>أي تغيير يتطلب كلمة مرور مالك المتجر</span>
-        </footer>
-      </section>
+          <footer className="flex items-center justify-between border-t border-border px-5 py-3 text-xs font-semibold text-muted">
+            <span className="flex items-center gap-1.5">
+              <Users className="h-3.5 w-3.5" />
+              إجمالي الموظفين: {cashiers?.length ?? "…"}
+              {filteredCashiers !== null && debouncedQ && (
+                <span> • النتائج: {filteredCashiers.length}</span>
+              )}
+            </span>
+            <span>أي تغيير يتطلب كلمة مرور مالك المتجر</span>
+          </footer>
+        </section>
+
+        <section className="overflow-hidden rounded-2xl border border-border bg-surface shadow-sm">
+          <header className="flex items-center justify-between gap-3 border-b border-border px-5 py-3.5">
+            <h2 className="flex items-center gap-2 text-sm font-black text-foreground">
+              <ShieldCheck className="h-4 w-4 text-primary" />
+              الأدوار والصلاحيات
+            </h2>
+            <button
+              type="button"
+              onClick={openNewRole}
+              className="flex items-center gap-1.5 rounded-lg border border-primary/30 px-3 py-1.5 text-xs font-black text-primary transition hover:bg-primary/10"
+            >
+              <UserCog className="h-3.5 w-3.5" />
+              دور جديد
+            </button>
+          </header>
+          {renderRoleList()}
+          <footer className="border-t border-border bg-surface-muted/40 px-5 py-3 text-xs font-semibold text-muted">
+            تغييرات الصلاحيات تسري على الموظف عند تسجيل الدخول التالي؛ أدوار النظام لا يمكن حذفها.
+          </footer>
+        </section>
+      </div>
 
       {loadError && (
         <p className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm font-bold text-destructive">
           {loadError}
-          {sessionExpired && (
-            <Link href="/login" className="ms-2 underline underline-offset-2">
-              تسجيل الدخول
-            </Link>
-          )}
         </p>
       )}
 
@@ -391,6 +566,16 @@ export default function AdminStaffPage() {
           initial={modal.editing}
           roles={roles ?? []}
           mode={modal.mode ?? "full"}
+        />
+      )}
+
+      {roleModal.open && (
+        <RoleEditorModal
+          initial={roleModal.role ?? null}
+          roles={roles ?? []}
+          onClose={() => setRoleModal({ open: false })}
+          onSave={handleSaveRole}
+          onDelete={handleDeleteRole}
         />
       )}
 

@@ -40,6 +40,7 @@ export function mapSalesLedgerInvoice(row: Record<string, unknown>): SalesLedger
     id: ledgerText(row.id),
     syncId,
     reference: invoiceReference(syncId),
+    invoiceNumber: ledgerText(row.invoice_number) || undefined,
     branchId: ledgerText(row.branch_id) || null,
     branchName: ledgerText(row.branch_name),
     terminalId: ledgerText(row.terminal_id) || null,

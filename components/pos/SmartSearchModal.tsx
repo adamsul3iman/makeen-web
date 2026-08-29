@@ -7,6 +7,7 @@ import { usePosStore } from "@/store/usePosStore";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { formatMoney } from "@/lib/format";
 import { normalizeArabicText } from "@/lib/arabic";
+import { categoryPath } from "@/lib/categoryTree";
 
 const MAX_QTY = 999;
 const LIMIT = 12;
@@ -16,6 +17,7 @@ interface SearchEntry {
   name: string;
   price: number;
   unitName: string;
+  categoryId: string;
   categoryName?: string;
   brandName?: string;
   barcodes: Array<{ code: string; price: number; unitName: string; variantLabel?: string }>;
@@ -184,6 +186,7 @@ export default function SmartSearchModal() {
         name: p.name,
         price: p.price,
         unitName: p.baseUnit,
+        categoryId: p.categoryId,
         categoryName: categories[p.categoryId]?.name,
         brandName: p.brandName,
         barcodes: byProduct[id] ?? [],
@@ -313,7 +316,7 @@ export default function SmartSearchModal() {
         </header>
 
         <div className="border-b border-border px-5 py-3">
-          <div className="flex items-center gap-2 rounded-xl bg-surface-muted px-3 py-2.5 focus-within:ring-2 focus-within:ring-primary/30">
+          <div className="flex items-center gap-2 rounded-xl bg-surface-muted/70 px-3 py-2.5 focus-within:ring-2 focus-within:ring-primary/15">
             {qtyMode ? (
               <span className="shrink-0 rounded-lg bg-primary px-2.5 py-1 text-sm font-black tabular-nums text-primary-foreground">
                 ×{qty > 0 ? qty : ""}
@@ -385,7 +388,7 @@ export default function SmartSearchModal() {
                           {entry.name}
                         </p>
                         <p className="truncate text-xs text-muted">
-                          {[entry.categoryName, matchedBarcode?.variantLabel, unit].filter(Boolean).join(" • ") || "—"}
+                          {[categoryPath(entry.categoryId, categories).join(" › "), matchedBarcode?.variantLabel, unit].filter(Boolean).join(" • ") || "—"}
                         </p>
                         {matchedBarcode && (
                           <p className="mt-0.5 flex items-center gap-1 text-[11px] font-semibold text-muted-foreground">

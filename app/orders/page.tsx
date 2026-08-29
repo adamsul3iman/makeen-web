@@ -78,6 +78,7 @@ export default function OrdersPage() {
   const settledOrders = useOrdersStore((s) => s.settledOrders);
   const settledLoading = useOrdersStore((s) => s.settledLoading);
   const settledError = useOrdersStore((s) => s.settledError);
+  const settledHasMore = useOrdersStore((s) => s.settledHasMore);
   const fetchSettledHistory = useOrdersStore((s) => s.fetchSettledHistory);
 
   const [tab, setTab] = useState<Tab>("open");

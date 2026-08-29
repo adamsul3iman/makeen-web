@@ -43,6 +43,26 @@ export function buildChildrenByParent<T extends { id: string; parentId: string |
   return childrenByParent;
 }
 
+/**
+ * Resolve the full category path (root → … → leaf) for a category id, e.g.
+ * ["أدوات تنظيف", "مماسح أرضيات"]. Walks the `parentId` chain defensively
+ * (cycle-safe). Falls back to the raw id when the node is unknown.
+ */
+export function categoryPath<T extends { id: string; parentId: string | null; name: string }>(
+  categoryId: string,
+  byId: Record<string, T>,
+): string[] {
+  const names: string[] = [];
+  let cursor: string | null = categoryId;
+  const seen = new Set<string>();
+  while (cursor && byId[cursor] && !seen.has(cursor)) {
+    seen.add(cursor);
+    names.unshift(byId[cursor].name);
+    cursor = byId[cursor].parentId;
+  }
+  return names.length > 0 ? names : [categoryId];
+}
+
 export function collectDescendantIds<T extends { id: string; parentId: string | null }>(
   items: Iterable<T>,
   rootId: string,

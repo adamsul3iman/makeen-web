@@ -71,6 +71,10 @@ async function printViaElectron(
         "*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}",
         "html,body{width:100%;background:#fff;color:#000}",
         "body{font-family:'Courier New',Consolas,monospace;font-size:10px;line-height:1.4;direction:rtl}",
+        /* Thermal paper: size the page to the roll width so the driver never
+           falls back to the browser's A4 default (which mis-sizes the receipt
+           and pushes a blank page through before the real content). */
+        "@page{size:80mm auto;margin:0}",
         "#thermal-receipt{display:block!important;width:100%;max-width:80mm}",
         "#thermal-shift-print{display:block!important;width:100%;max-width:80mm}",
         "#thermal-receipt *,#thermal-shift-print *{visibility:visible;color:#000;background:transparent}",
@@ -172,6 +176,10 @@ export function captureReceiptHtml(): string | null {
     "*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}",
     "html,body{width:100%;background:#fff;color:#000}",
     "body{font-family:'Courier New',Consolas,monospace;font-size:10px;line-height:1.4;direction:rtl}",
+    /* Thermal paper: size the page to the roll width so the iframe never
+       falls back to the browser's A4 default (which mis-sizes the receipt
+       and pushes a blank first page through). */
+    "@page{size:80mm auto;margin:0}",
     "#thermal-receipt{display:block!important;width:100%;max-width:80mm}",
     "#thermal-receipt *{visibility:visible;color:#000;background:transparent;box-shadow:none;text-shadow:none}",
     "table{width:100%;border-collapse:collapse}",
@@ -189,6 +197,36 @@ export function captureReceiptHtml(): string | null {
     "</body>",
     "</html>",
   ].join("\n");
+}
+
+/**
+ * Wait (bounded) for the ThermalReceipt's async content to commit to the DOM
+ * before capturing its HTML. The barcode is an inline SVG built by a lazy
+ * `jsbarcode` import and the fiscal QR is a lazily-rendered SVG string — both
+ * populated in effects AFTER React commits the leaf markup. Diving straight
+ * into `captureReceiptHtml()` in the same tick as checkout can snapshot the
+ * receipt before those resolve, printing a blank barcode/QR. This polls the
+ * `#thermal-receipt` node until the barcode matches a width and the fiscal QR
+ * has non-empty inner HTML, or `timeoutMs` elapses (so a checkout lane is never
+ * blocked — best effort only).
+ */
+export function waitForReceiptSettle(timeoutMs = 1000): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof document === "undefined") return resolve();
+    const started = Date.now();
+    const tick = () => {
+      const el = document.getElementById("thermal-receipt");
+      if (!el) return resolve();
+      const barcode = el.querySelector("svg[data-invoice-barcode]");
+      const barcodeReady = !barcode || barcode.childNodes.length > 0;
+      const qr = el.querySelector("[data-fiscal-qr]");
+      const qrReady = !qr || (qr.textContent || "").trim().length > 0;
+      if (barcodeReady && qrReady) return resolve();
+      if (Date.now() - started >= timeoutMs) return resolve();
+      requestAnimationFrame(tick);
+    };
+    tick();
+  });
 }
 
 // ── Browser print (async-safe, via hidden iframe) ─────────────────

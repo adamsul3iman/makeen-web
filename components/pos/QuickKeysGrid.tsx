@@ -16,7 +16,6 @@ import {
   Loader2,
   PackageSearch,
   Search,
-  Building2,
   Sparkles,
   X,
 } from "lucide-react";
@@ -92,45 +91,6 @@ const CategoryTile = memo(function CategoryTile({
   );
 });
 
-interface BrandTileData {
-  brandId: string;
-  brandName: string;
-  count: number;
-  bgColor: string;
-}
-
-const BrandTile = memo(function BrandTile({
-  brand,
-  onSelect,
-}: {
-  brand: BrandTileData;
-  onSelect: (id: string, name: string) => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={() => onSelect(brand.brandId, brand.brandName)}
-      className="flex min-h-12 min-w-0 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-start shadow-sm transition hover:border-sky-300 hover:bg-sky-50/40 active:scale-[0.98]"
-    >
-      <span
-        aria-hidden
-        className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-slate-700 text-white"
-      >
-        <Building2 className="h-3.5 w-3.5" />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block whitespace-normal text-sm font-black leading-snug text-slate-800">
-          {brand.brandName}
-        </span>
-        <span className="block text-xs font-bold text-slate-400">
-          {brand.count.toLocaleString("ar-JO")} {brand.count === 1 ? "منتج" : "منتجات"}
-        </span>
-      </span>
-      <ChevronLeft className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-    </button>
-  );
-});
-
 function useProductGridMetrics(parentRef: React.RefObject<HTMLDivElement | null>): {
   cols: number;
   tileSize: number;
@@ -169,8 +129,6 @@ export default memo(function QuickKeysGrid() {
   const addQuickKeyItem = usePosStore((state) => state.addQuickKeyItem);
 
   const [showPopular, setShowPopular] = useState(false);
-  const [focusedBrandId, setFocusedBrandId] = useState<string | null>(null);
-  const [focusedBrandName, setFocusedBrandName] = useState<string | null>(null);
   const [categoryQuery, setCategoryQuery] = useState("");
   const [categorySearchOpen, setCategorySearchOpen] = useState(false);
   const [selectedCategoryResult, setSelectedCategoryResult] = useState(0);
@@ -189,13 +147,23 @@ export default memo(function QuickKeysGrid() {
     return counts;
   }, [deferredQuickKeys]);
 
+  // ----------- Category tree (nested) --------------------------------------
+  // Only genuine POS-visible categories participate in navigation. Hidden
+  // rows (showInPos === false - e.g. brand/supplier names accidentally
+  // entered as category rows) are excluded so a brand can never surface as a
+  // category, sub-category, or navigation node.
+  const categoryArray = useMemo(
+    () => Object.values(deferredCategories).filter((c) => c.showInPos !== false),
+    [deferredCategories],
+  );
+
   const childrenByParent = useMemo(() => {
-    const result = buildChildrenByParent(Object.values(deferredCategories));
+    const result = buildChildrenByParent(categoryArray);
     for (const children of result.values()) {
       children.sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name, "ar"));
     }
     return result;
-  }, [deferredCategories]);
+  }, [categoryArray]);
 
   const subtreeProductCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -263,39 +231,19 @@ export default memo(function QuickKeysGrid() {
     [deferredCategories, deferredQuickKeys],
   );
 
-  const brandsInCategory = useMemo<BrandTileData[]>(() => {
-    if (!focusedCategory || focusedBrandId) return [];
-    const keys = deferredQuickKeys.filter((k) => k.categoryId === focusedCategory.id);
-    const grouped = new Map<string, BrandTileData>();
-    for (const key of keys) {
-      const id = key.brandId ?? "__none__";
-      const existing = grouped.get(id);
-      if (existing) {
-        existing.count++;
-      } else {
-        grouped.set(id, {
-          brandId: id,
-          brandName: key.brandName ?? "بدون علامة تجارية",
-          count: 1,
-          bgColor: key.bgColor,
-        });
-      }
-    }
-    return Array.from(grouped.values()).sort((a, b) => b.count - a.count || a.brandName.localeCompare(b.brandName, "ar"));
-  }, [deferredQuickKeys, focusedCategory, focusedBrandId]);
+  const categoryDirectKeys = useMemo(
+    () =>
+      focusedCategory
+        ? deferredQuickKeys.filter((kq) => kq.categoryId === focusedCategory.id)
+        : [],
+    [deferredQuickKeys, focusedCategory],
+  );
 
   const gridKeys = useMemo(() => {
     if (showPopular) return deferredQuickKeys;
-    if (focusedCategory && focusedBrandId) {
-      const noneBrand = focusedBrandId === "__none__";
-      return deferredQuickKeys.filter(
-        (key) =>
-          key.categoryId === focusedCategory.id &&
-          (noneBrand ? !key.brandId : key.brandId === focusedBrandId),
-      );
-    }
+    if (focusedCategory) return categoryDirectKeys;
     return rootCategories.length === 0 ? uncategorizedKeys : [];
-  }, [deferredQuickKeys, focusedCategory, focusedBrandId, rootCategories.length, showPopular, uncategorizedKeys]);
+  }, [deferredQuickKeys, showPopular, focusedCategory, categoryDirectKeys, rootCategories.length, uncategorizedKeys]);
 
   const rows = useMemo<QuickKeyItem[][]>(() => {
     const result: QuickKeyItem[][] = [];
@@ -316,7 +264,7 @@ export default memo(function QuickKeysGrid() {
 
   useEffect(() => {
     if (productScrollRef.current) productScrollRef.current.scrollTop = 0;
-  }, [activeCategoryId, focusedBrandId, showPopular]);
+  }, [activeCategoryId, showPopular]);
 
   useEffect(() => {
     setSelectedCategoryResult(0);
@@ -335,15 +283,7 @@ export default memo(function QuickKeysGrid() {
 
   const openCategory = (id: string) => {
     setShowPopular(false);
-    setFocusedBrandId(null);
-    setFocusedBrandName(null);
     setActiveCategoryId(id);
-  };
-
-  const selectBrand = (id: string, name: string) => {
-    setShowPopular(false);
-    setFocusedBrandId(id);
-    setFocusedBrandName(name);
   };
 
   const finishCategorySearch = (categoryId?: string) => {
@@ -384,10 +324,7 @@ export default memo(function QuickKeysGrid() {
   };
 
   const returnOneLevel = () => {
-    if (focusedBrandId) {
-      setFocusedBrandId(null);
-      setFocusedBrandName(null);
-    } else if (focusedCategory) {
+    if (focusedCategory) {
       setActiveCategoryId(focusedCategory.parentId ?? null);
     }
   };
@@ -407,8 +344,12 @@ export default memo(function QuickKeysGrid() {
               paddingBottom: GRID_GAP,
             }}
           >
-            {row.map((key) => (
-              <QuickKeyCard key={key.id} item={key} onAdd={addQuickKeyItem} />
+            {row.map((key, cellIndex) => (
+              <QuickKeyCard
+                key={`${virtualRow.key}-${cellIndex}-${key.id}-${key.productId ?? ""}-${key.variantLabel ?? ""}`}
+                item={key}
+                onAdd={addQuickKeyItem}
+              />
             ))}
           </div>
         );
@@ -433,7 +374,7 @@ export default memo(function QuickKeysGrid() {
               </button>
               <button
                 type="button"
-                onClick={() => { setActiveCategoryId(null); setFocusedBrandId(null); setFocusedBrandName(null); }}
+                onClick={() => setActiveCategoryId(null)}
                 className="flex h-11 shrink-0 items-center rounded-lg px-2.5 text-xs font-black text-slate-500 hover:bg-slate-50 hover:text-primary"
               >
                 التصنيفات
@@ -443,7 +384,7 @@ export default memo(function QuickKeysGrid() {
                   <ChevronLeft className="h-3 w-3 text-slate-300" />
                   <button
                     type="button"
-                    onClick={() => { openCategory(category.id); setFocusedBrandId(null); }}
+                    onClick={() => openCategory(category.id)}
                     className={`flex h-11 max-w-28 items-center truncate rounded-lg px-2.5 text-xs font-black ${
                       category.id === focusedCategory.id ? "text-slate-900" : "text-slate-500 hover:text-primary"
                     }`}
@@ -452,14 +393,6 @@ export default memo(function QuickKeysGrid() {
                   </button>
                 </span>
               ))}
-              {focusedBrandId && (
-                <span className="flex shrink-0 items-center gap-1">
-                  <ChevronLeft className="h-3 w-3 text-slate-300" />
-                  <span className="max-w-28 truncate px-1 text-xs font-black text-slate-900">
-                    {focusedBrandName || "العلامة"}
-                  </span>
-                </span>
-              )}
             </>
           ) : (
             <span className="flex items-center gap-2 text-sm font-black text-slate-800">
@@ -555,7 +488,6 @@ export default memo(function QuickKeysGrid() {
             onClick={() => {
               setShowPopular(false);
               setActiveCategoryId(null);
-              setFocusedBrandId(null);
             }}
             aria-label="التصنيفات"
             title="التصنيفات"
@@ -570,7 +502,6 @@ export default memo(function QuickKeysGrid() {
             onClick={() => {
               setShowPopular(true);
               setActiveCategoryId(null);
-              setFocusedBrandId(null);
             }}
             aria-label="الأكثر طلبًا"
             title="الأكثر طلبًا"
@@ -617,28 +548,9 @@ export default memo(function QuickKeysGrid() {
             {productRows}
           </div>
         )
-      ) : !focusedBrandId ? (
-        <div className="min-h-0 flex-1 overflow-y-auto rounded-b-xl p-2">
-          {brandsInCategory.length > 0 ? (
-            <div className="grid grid-cols-3 gap-1.5 xl:grid-cols-4">
-              {brandsInCategory.map((brand) => (
-                <BrandTile key={brand.brandId} brand={brand} onSelect={selectBrand} />
-              ))}
-            </div>
-          ) : (
-            <div className="grid h-full place-items-center text-center">
-              <div>
-                <Building2 className="mx-auto h-8 w-8 text-slate-300" />
-                <p className="mt-2 text-xs font-bold text-slate-500">
-                  لا توجد علامات تجارية في هذا التصنيف
-                </p>
-              </div>
-            </div>
-          )}
-        </div>
       ) : (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-b-xl">
-          {visibleFolders.length > 0 && !focusedBrandId && (
+          {visibleFolders.length > 0 && (
             <div className="max-h-[140px] shrink-0 overflow-y-auto border-b border-slate-200 bg-slate-50/70 p-2">
               <div className="grid grid-cols-3 gap-1.5 xl:grid-cols-4">
                 {visibleFolders.map((category) => (

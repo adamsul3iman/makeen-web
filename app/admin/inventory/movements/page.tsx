@@ -103,8 +103,6 @@ export default function InventoryMovementsPage() {
     }
   }, [filterProductId, filterType, page, pageSize]);
 
-  useEffect(() => { setPage(1); }, [filterType]);
-
   const handleFilterProductChange = useCallback((id: string, name: string) => {
     setFilterProductId(id);
     setFilterProductName(name);
@@ -222,7 +220,14 @@ export default function InventoryMovementsPage() {
           <div className="grid gap-3 border-b border-border p-4 sm:grid-cols-[1fr_220px]">
             <AsyncProductCombobox id="movement-filter-product" label="تصفية حسب المنتج" value={filterProductId} selectedLabel={filterProductName} placeholder="كل المنتجات" onChange={(product) => { handleFilterProductChange(product.id, product.name); }} />
             <label className="block text-sm font-bold text-muted">نوع الحركة
-              <select value={filterType} onChange={(event) => setFilterType(event.target.value)} className="mt-1.5 h-11 w-full rounded-lg border border-border bg-white px-3 text-sm font-bold outline-none focus:border-primary">
+              <select
+                value={filterType}
+                onChange={(event) => {
+                  setPage(1);
+                  setFilterType(event.target.value);
+                }}
+                className="mt-1.5 h-11 w-full rounded-lg border border-border bg-white px-3 text-sm font-bold outline-none focus:border-primary"
+              >
                 <option value="">كل الحركات</option>
                 {Object.entries(MOVEMENT_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>

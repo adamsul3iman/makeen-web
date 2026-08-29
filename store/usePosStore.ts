@@ -75,6 +75,7 @@ import {
   posPersistStorage,
 } from "@/lib/persistStorage";
 import { emitPosSound } from "@/lib/posSound";
+import { SCAN_COALESCE_MS } from "@/lib/scanCoalesce";
 import { getSupabaseBrowser, isSupabaseBrowserConfigured } from "@/lib/supabaseBrowser";
 import { useOrdersStore } from "@/store/useOrdersStore";
 import { heldInvoiceToOrder } from "@/types/orders.types";
@@ -84,7 +85,8 @@ import {
   loadCachedCashierSession,
   saveCachedCashierSession,
 } from "@/lib/cashierSessionCache";
-import { hasCapability, STAFF_ROLE_PRESETS, normalizeStaffRoleCode, homePathForDevice } from "@/lib/permissions";
+import { hasCapability, STAFF_ROLE_PRESETS, normalizeStaffRoleCode } from "@/lib/permissions";
+import type { RoleDraft } from "@/lib/staffClient";
 import { updateSettings, updateTaxSettings, type StoreSettings } from "@/lib/settingsClient";
 import { BYPASS_ISTD, pushInvoiceToIstd } from "@/lib/clientIstd";
 
@@ -136,6 +138,7 @@ function completedInvoiceFromQueueRecord(
 const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCKOUT_BASE_MS = 30_000;
 const PIN_LOCKOUT_CAP_MS = 30 * 60_000;
+const MAX_OPEN_INVOICES = 5;
 
 function pinCooldownMs(level: number): number {
   return Math.min(PIN_LOCKOUT_CAP_MS, PIN_LOCKOUT_BASE_MS * Math.pow(2, level));
@@ -189,6 +192,8 @@ export type SecondaryAction =
       cashierId: string;
       name?: string;
     }
+  | { type: "save_role"; role: RoleDraft }
+  | { type: "delete_role"; roleId: string; name?: string }
   | { type: "save_settings"; fields: StoreSettingsUpdate }
   | {
       type: "save_istd";
@@ -548,6 +553,8 @@ interface PosStoreActions {
   /** Admin-only: persist a new/edited cashier (self-verifies the password). */
   saveCashier: (draft: CashierDraft, password: string) => Promise<boolean>;
   deleteCashier: (id: string, password: string) => Promise<boolean>;
+  saveStaffRole: (role: RoleDraft, password: string) => Promise<boolean>;
+  deleteStaffRole: (roleId: string, password: string) => Promise<boolean>;
   openPreviousInvoicesModal: () => void;
   closePreviousInvoicesModal: () => void;
   setLineEditTarget: (index: number | null) => void;
@@ -775,6 +782,37 @@ function round2(n: number): number {
 }
 
 /**
+ * Process-wide scanner double-read / burst-echo coalescing (POS flicker fix).
+ *
+ * A single physical scan can be committed through TWO independent entry
+ * points — the global hardware-scanner listener (`useBarcodeScanner`) and the
+ * omnibar form (`InvoicePanel`) — and cheap scanners routinely re-transmit the
+ * same code a few ms after one trigger. Previously only the hardware listener
+ * coalesced (`lib/scanCoalesce`), so the omnibar path was unprotected: a burst
+ * landing across a focus toggle could be committed twice, momentarily
+ * double-merging (and on a re-scan echoing an inconsistent line) — the
+ * "flash, disappear, reappear on re-scan" symptom.
+ *
+ * This tracker moves the guard to a single atomic choke point on the STORE so
+ * EVERY scan path is protected identically: the first arrival of a code that
+ * matches the most-recent commit within the coalesce window is treated as an
+ * echo and dropped. `scanBarcode` is the only place the cart mutates from a
+ * scan, and it runs synchronously, so coalescing here can never race a sibling
+ * mutation. Distinct codes, and any scan slower than a human re-trigger, are
+ * never coalesced (a deliberate A-A-A quick scan still counts up correctly).
+ */
+const scanDedup = (() => {
+  let lastCode: string | null = null;
+  let lastAt = 0;
+  return (code: string, now = performance.now()): boolean => {
+    const isEcho = lastCode === code && now - lastAt < SCAN_COALESCE_MS;
+    lastCode = code;
+    lastAt = now;
+    return isEcho;
+  };
+})();
+
+/**
  * Cross-tab submit lock (Risk 6). `isCompleting` is per-tab in the zustand
  * store, so two tabs of the same register could each run `completeCheckout`.
  * Mirroring the flag to localStorage during the critical section lets
@@ -831,6 +869,32 @@ export function formatTerminalInvoiceNumber(prefix: string, sequence: number): s
   return `${prefix}-${String(sequence).padStart(4, "0")}`;
 }
 
+/**
+ * Atomically mint the next terminal-scoped invoice number (T1-0007) and the
+ * successor counter map. Reads the durable per-terminal counter, derives the
+ * stable prefix, and increments `last` by exactly one. Pure and synchronous —
+ * the caller commits the returned counter map in the same `set` as the sale,
+ * so every minted number maps 1:1 to a persisted invoice and is never reused.
+ */
+function mintTerminalInvoiceNumber(state: {
+  terminals: Terminal[];
+  terminalInvoiceCounters?: Record<string, TerminalInvoiceCounter>;
+  activeTerminalId: string | null;
+}): { number: string; counters: Record<string, TerminalInvoiceCounter> } {
+  const terminalId = state.activeTerminalId;
+  if (!terminalId) {
+    // No terminal bound: fall back to the invoice reference (UUID) path so a
+    // checkout can never be blocked or mis-numbered.
+    return { number: "", counters: state.terminalInvoiceCounters ?? {} };
+  }
+  const counters = { ...(state.terminalInvoiceCounters ?? {}) };
+  const existing = counters[terminalId];
+  const prefix = existing?.prefix ?? resolveTerminalPrefix(state, terminalId);
+  const next = (existing?.last ?? 0) + 1;
+  counters[terminalId] = { prefix, last: next };
+  return { number: formatTerminalInvoiceNumber(prefix, next), counters };
+}
+
 function flushCriticalPersistWrites(): void {
   if (typeof queueMicrotask === "function") {
     queueMicrotask(flushPersistWrites);
@@ -849,6 +913,7 @@ function partializePosState(state: PosStore) {
     currentCashier: state.currentCashier,
     currentStore: state.currentStore,
     adminSession: state.adminSession,
+    terminalInvoiceCounters: state.terminalInvoiceCounters,
     cartSlots: state.cartSlots,
     activeCartIndex: state.activeCartIndex,
     items: state.items,
@@ -989,7 +1054,7 @@ function addLine(
     };
     return items.map((it, i) => (i !== existing ? it : applyQtyToLine(merged, nextQty)));
   }
-  return [...items, { ...line, lineTotal: round2((delta / (line.unitMultiplier || 1)) * line.unitPrice) }];
+  return [{ ...line, lineTotal: round2((delta / (line.unitMultiplier || 1)) * line.unitPrice) }, ...items];
 }
 
 function computeTotals(
@@ -1574,6 +1639,11 @@ export const usePosStore = create<PosStore>()(
       scanBarcode: async (raw) => {
         const barcode = raw.trim();
         if (!barcode) return;
+        // Atomic double-read coalescing BEFORE any state read or await: a
+        // burst committed by one entry path and echoed by the sibling path
+        // within the window is dropped, so the cart mutates exactly once per
+        // physical scan (see module-level `scanDedup`).
+        if (scanDedup(barcode)) return;
 
         const lookup = get().barcodeIndex[barcode];
         if (!lookup) {
@@ -1669,6 +1739,9 @@ export const usePosStore = create<PosStore>()(
         );
 
         set({ items, totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee, get().b2bMarkupPct) });
+        // Audible confirmation that the quick-key/selected product was added to
+        // the cart (respects the sound-enabled/volume settings via PosLayout).
+        emitPosSound("SCAN_ACCEPTED");
       },
 
       addSearchItem: (productId, qty = 1, barcode) => {
@@ -1743,6 +1816,7 @@ export const usePosStore = create<PosStore>()(
         );
 
         set({ items, totals: computeTotals(items, get().invoiceDiscount, effectiveTaxPercent(get().currentStore), get().deliveryFee, get().b2bMarkupPct) });
+        emitPosSound("SCAN_ACCEPTED");
       },
 
       updateQty: (index, qty) => {
@@ -2076,6 +2150,12 @@ export const usePosStore = create<PosStore>()(
         const b2bAccountName = get().activeB2BAccountName;
         const saleItems = withB2BMarkup(items, b2bMarkupPct);
 
+        // Mint the terminal-scoped receipt number (T1-0007) synchronously and
+        // atomically: the successor counter is committed in the same `set` as
+        // the sale settles, so every minted number maps 1:1 to a persisted
+        // invoice and is never reused, replayed or duplicated across retries.
+        const minted = mintTerminalInvoiceNumber(get());
+
         const record: SyncQueueRecord = {
           sync_id: newUuid(),
           action_type: "INVOICE_CREATED",
@@ -2104,6 +2184,7 @@ export const usePosStore = create<PosStore>()(
             shiftId: activeShift.shiftId ?? undefined,
             branchId: branchId ?? undefined,
             terminalId: terminalId ?? undefined,
+            invoiceNumber: minted.number || undefined,
             completed_at: new Date().toISOString(),
           },
           status: "PENDING",
@@ -2217,6 +2298,7 @@ export const usePosStore = create<PosStore>()(
             b2bMarkupPct: b2bMarkupPct > 0 ? b2bMarkupPct : undefined,
             branchId: branchId ?? undefined,
             terminalId: terminalId ?? undefined,
+            invoiceNumber: minted.number || undefined,
             completed_at: record.payload.completed_at,
           };
 
@@ -2228,6 +2310,7 @@ export const usePosStore = create<PosStore>()(
               isCheckoutModalOpen: false,
               shiftTotals,
               shiftTransactions,
+              terminalInvoiceCounters: minted.counters,
               lastCompletedInvoice: completedInvoice,
               invoiceDiscount: null,
               returnReference: null,
@@ -2242,6 +2325,10 @@ export const usePosStore = create<PosStore>()(
               priceMemory: {},
               notice: { message: "تم حفظ الفاتورة محلياً وستتم المزامنة", tone: "success" },
             });
+            // The counter increment is the one mutation that must not be
+            // coalesced away by the debounced writer — force a durable write
+            // so a reload can never re-mint the same number for a new sale.
+            persistDurablePosState(get());
           };
 
           try {
@@ -2819,13 +2906,30 @@ export const usePosStore = create<PosStore>()(
       },
 
       toggleReturnMode: () =>
-        set((state) => ({
-          isReturnMode: !state.isReturnMode,
-          returnReference: !state.isReturnMode ? null : state.returnReference,
-          notice: state.isReturnMode
-            ? { message: "تم الخروج من وضع المرتجع", tone: "success" }
-            : { message: "وضع المرتجع مفعّل — الأصناف تضاف سالبة", tone: "success" },
-        })),
+        set((state) => {
+          // Safety guard: entering return mode must never touch or invert the
+          // existing sale cart. Refuse to turn return mode ON while sale
+          // (positive-qty) lines are already present, so regular sales and
+          // returns never silently mix in one checkout. The cashier clears the
+          // cart first (or loads a return via the previous-invoice flow, which
+          // sets its own clean return cart). Turning return mode OFF is always
+          // allowed.
+          if (!state.isReturnMode && state.items.some((it) => it.qty > 0)) {
+            return {
+              notice: {
+                message: "أفرغ السلة أولاً قبل تفعيل المرتجع — لا يُخلط بين مبيعات ومرتجعات",
+                tone: "error",
+              },
+            };
+          }
+          return {
+            isReturnMode: !state.isReturnMode,
+            returnReference: !state.isReturnMode ? null : state.returnReference,
+            notice: state.isReturnMode
+              ? { message: "تم الخروج من وضع المرتجع", tone: "success" }
+              : { message: "وضع المرتجع مفعّل — الأصناف الجديدة تضاف سالبة", tone: "success" },
+          };
+        }),
 
       requestReturnModeToggle: () => {
         const state = get();
@@ -3747,6 +3851,24 @@ export const usePosStore = create<PosStore>()(
             return false;
           }
 
+          if (action.type === "save_role") {
+            const ok = await get().saveStaffRole(action.role, password);
+            if (ok) {
+              set({ isSecondaryAuthOpen: false, pendingSecondaryAction: null });
+              return true;
+            }
+            return false;
+          }
+
+          if (action.type === "delete_role") {
+            const ok = await get().deleteStaffRole(action.roleId, password);
+            if (ok) {
+              set({ isSecondaryAuthOpen: false, pendingSecondaryAction: null });
+              return true;
+            }
+            return false;
+          }
+
           if (action.type === "save_istd") {
             // JoFotara device credentials (migration 079): the write happens
             // inside the Edge Function behind the admin password proof; the
@@ -4195,6 +4317,140 @@ export const usePosStore = create<PosStore>()(
         }
       },
 
+      saveStaffRole: async (role, password) => {
+        const session = get().adminSession;
+        if (!session) return false;
+        try {
+          const sb = getSupabaseBrowser();
+          if (!sb) {
+            set({ notice: { message: "Supabase غير مُعد", tone: "error" } });
+            return false;
+          }
+          const storeId = get().currentStore?.id;
+          if (!storeId) return false;
+
+          // Migration 097: proof-per-call role CRUD. The browser never touches
+          // staff_roles directly — the admin password proof and the write are
+          // folded into one SECURITY DEFINER RPC.
+          const baseArgs = {
+            p_store_id: storeId,
+            p_admin_email: session.email,
+            p_admin_password: password,
+            p_name: role.name,
+            p_description: role.description ?? "",
+            p_capabilities: role.capabilities,
+            p_limits: role.limits ?? {},
+          };
+          const { data, error: rpcError } = role.id
+            ? await sb.rpc("admin_update_staff_role", {
+                ...baseArgs,
+                p_role_id: role.id,
+              })
+            : await sb.rpc("admin_create_staff_role", {
+                ...baseArgs,
+                p_code: role.code,
+              });
+          if (rpcError) {
+            set({ notice: { message: rpcError.message ?? "تعذر حفظ الدور", tone: "error" } });
+            return false;
+          }
+          const result = (data ?? {}) as { error?: string; message?: string };
+          if (result.error === "invalid_admin_credentials" || result.error === "locked") {
+            set({ notice: { message: "كلمة المرور غير صحيحة", tone: "error" } });
+            return false;
+          }
+          if (result.error === "duplicate_code") {
+            set({ notice: { message: "هذا الرمز البرمجي مستخدم مسبقاً", tone: "error" } });
+            return false;
+          }
+          if (result.error === "code_invalid") {
+            set({ notice: { message: "رمز الدور غير صالح — أحرف لاتينية صغيرة وأرقام و _ فقط", tone: "error" } });
+            return false;
+          }
+          if (result.error === "name_required") {
+            set({ notice: { message: "أدخل اسم الدور", tone: "error" } });
+            return false;
+          }
+          if (result.error === "capabilities_invalid" || result.error === "limits_invalid") {
+            set({ notice: { message: "بيانات الصلاحيات غير صالحة", tone: "error" } });
+            return false;
+          }
+          if (result.error === "not_found") {
+            set({ notice: { message: "الدور غير موجود", tone: "error" } });
+            return false;
+          }
+          if (result.error) {
+            set({ notice: { message: result.message ?? "تعذر حفظ الدور", tone: "error" } });
+            return false;
+          }
+
+          set({ notice: { message: "تم حفظ الدور والصلاحيات", tone: "success" } });
+          void pushAudit(session.email, "SAVE_STAFF_ROLE", role.id ?? null, {
+            name: role.name,
+            code: role.code,
+            capabilities: role.capabilities,
+            limits: role.limits,
+          });
+          return true;
+        } catch {
+          set({ notice: { message: "تعذر الاتصال — تحقق من الشبكة", tone: "error" } });
+          return false;
+        }
+      },
+
+      deleteStaffRole: async (roleId, password) => {
+        const session = get().adminSession;
+        if (!session) return false;
+        try {
+          const sb = getSupabaseBrowser();
+          if (!sb) {
+            set({ notice: { message: "Supabase غير مُعد", tone: "error" } });
+            return false;
+          }
+          const storeId = get().currentStore?.id;
+          if (!storeId) return false;
+
+          const { data, error: rpcError } = await sb.rpc("admin_delete_staff_role", {
+            p_store_id: storeId,
+            p_admin_email: session.email,
+            p_admin_password: password,
+            p_role_id: roleId,
+          });
+          if (rpcError) {
+            set({ notice: { message: rpcError.message ?? "تعذر حذف الدور", tone: "error" } });
+            return false;
+          }
+          const result = (data ?? {}) as { error?: string };
+          if (result.error === "invalid_admin_credentials" || result.error === "locked") {
+            set({ notice: { message: "كلمة المرور غير صحيحة", tone: "error" } });
+            return false;
+          }
+          if (result.error === "cannot_delete_system") {
+            set({ notice: { message: "لا يمكن حذف دور النظام", tone: "error" } });
+            return false;
+          }
+          if (result.error === "role_in_use") {
+            set({ notice: { message: "لا يمكن حذف دور مخصص لموظف — غيّر دور الموظف أولاً", tone: "error" } });
+            return false;
+          }
+          if (result.error === "not_found") {
+            set({ notice: { message: "الدور غير موجود", tone: "error" } });
+            return false;
+          }
+          if (result.error) {
+            set({ notice: { message: "تعذر حذف الدور", tone: "error" } });
+            return false;
+          }
+
+          set({ notice: { message: "تم حذف الدور", tone: "success" } });
+          void pushAudit(session.email, "DELETE_STAFF_ROLE", roleId);
+          return true;
+        } catch {
+          set({ notice: { message: "تعذر الاتصال — تحقق من الشبكة", tone: "error" } });
+          return false;
+        }
+      },
+
       openPreviousInvoicesModal: () => set({ isPreviousInvoicesModalOpen: true }),
       closePreviousInvoicesModal: () => set({ isPreviousInvoicesModalOpen: false }),
       setLineEditTarget: (index) => set({ lineEditTarget: index }),
@@ -4367,6 +4623,10 @@ export const usePosStore = create<PosStore>()(
 
       createCart: () => {
         const { cartSlots, activeCartIndex, items, invoiceDiscount, deliveryFee, currentStore } = get();
+        if (cartSlots.length >= MAX_OPEN_INVOICES) {
+          set({ notice: { message: "الحد الأقصى للفواتير المفتوحة هو 5 فواتير", tone: "error" } });
+          return;
+        }
         const nextIndex = cartSlots.length;
         const newId = newUuid();
         // Save current cart into the active slot

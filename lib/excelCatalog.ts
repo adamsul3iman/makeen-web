@@ -1,5 +1,5 @@
 /**
- * Catalog Excel Export / Import — hierarchical round-trip.
+ * Catalog Excel Export / Import — ERP-grade sync engine.
  *
  * The DB hierarchy (4-tier + packaging) is:
  *   Department  →  Category  →  Brand  →  Product(parent)  →  Variants(SKU)
@@ -11,21 +11,23 @@
  *
  * FLAT FILE GRAIN — one row per (VARIANT × UNIT). Every unit gets its own row:
  *
- *   ParentName  SKU  VariantLabel  UnitName  ...UnitCost UnitPrice ...  Cost Price Stock ...
+ *   ParentName  SKU  VariantLabel  UnitName  ...UnitCost ...  Cost Price Stock ... ProductID VariantID UnitID
  *
  * Parent-level fields, the variant fields, and one unit's packaging fields are
  * authored together on each unit row. A product with N units × M variants emits
- * M × N rows. When a product has no units a single row (with blank unit fields)
- * is emitted so it still round-trips. Re-import groups rows by ParentName and
- * dedupes units by UnitName and variants by SKU, so re-import never duplicates
- * a unit or a variant.
+ * M × N rows. Re-import groups rows by ParentName and dedupes units by UnitName
+ * and variants by SKU.
  *
- * STOCK SEMANTICS (approved): opening stock is applied ONLY to genuinely NEW
- * SKUs (idempotency-keyed OPENING movement). Re-importing the same file does
- * not re-post stock.
+ * HIDDEN IDS (pillar 1): the far-right ProductID / VariantID / UnitID columns
+ * carry the primary keys. On import, records are matched by ID first; if a
+ * ProductID matches the DB it UPDATES even if the user renamed the product.
+ * When an ID cell is blank/absent the engine falls back to matching by
+ * Name / SKU / UnitName and creates new records as needed.
  *
- * PRICE PRECEDENCE (approved): when a unit/variant price cell is blank it
- * inherits from the parent product; an explicit value wins.
+ * DATA SHIELD (pillar 2): blank cells are treated as "leave unchanged" — they
+ * never overwrite an existing DB value with null/0. Stock is applied ONLY as an
+ * opening balance for genuinely NEW SKUs (idempotency-keyed OPENING movement);
+ * existing SKUs always ignore the Stock column.
  *
  * PAGINATION: catalog reads use a ranged fetch (.range/.order) loop so exports
  * include ALL rows beyond Supabase's 1000-row-per-request response cap.
@@ -69,17 +71,41 @@ export const EXCEL_COLUMNS = [
   "ReorderLevel",
   "AllowPriceChange",
   "IsActive",
+  "ProductID",
+  "VariantID",
+  "UnitID",
 ] as const;
 
 type FlatRow = { [K in (typeof EXCEL_COLUMNS)[number]]: string | number | boolean | null };
 
 const BLANK: FlatRow = Object.fromEntries(EXCEL_COLUMNS.map((c) => [c, null])) as FlatRow;
 
+/**
+ * Product scalar Excel columns that can be patched on update (blank = leave).
+ * Maps the EXCEL flat column name to its DB column.
+ */
+const PRODUCT_PATCH_FIELDS: Record<string, string> = {
+  BaseUnit: "base_unit",
+  TaxPercent: "tax_percent",
+  TaxIncluded: "tax_included",
+  IsSellable: "is_sellable",
+  IsPurchasable: "is_purchasable",
+  ShowInPos: "show_in_pos",
+  IsQuickKey: "is_quick_key",
+  ReorderLevel: "reorder_level",
+  AllowPriceChange: "allow_price_change",
+  IsActive: "is_active",
+  Cost: "cost_price",
+  Price: "selling_price",
+  WholesalePrice: "wholesale_price",
+};
+
 // ---------------------------------------------------------------------------
 // Shared row <-> DB helpers
 // ---------------------------------------------------------------------------
 
 interface UnitSetRow {
+  unitId?: string;
   unitName: string;
   qtyMultiplier: number;
   costPrice: number;
@@ -88,6 +114,8 @@ interface UnitSetRow {
   barcode: string | null;
   isDefaultSale: boolean;
   isDefaultPurchase: boolean;
+  /** Column names present in the file, so blank cells don't overwrite DB. */
+  present: Set<string>;
 }
 
 function toBool(value: unknown, fallback: boolean): boolean {
@@ -117,9 +145,26 @@ function normBarcode(value: string): string {
   return value.replace(/\s+/g, "");
 }
 
+/** True when the raw cell carries a user-authored value (non-empty). */
+function present(value: unknown): boolean {
+  if (value == null) return false;
+  const s = typeof value === "string" ? value.trim() : value;
+  if (typeof s === "string") return s !== "";
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Paginated catalog reader
 // ---------------------------------------------------------------------------
+
+export interface ExportFilters {
+  /** Restrict to a brand (by brandId). */
+  brandId?: string | null;
+  /** Restrict to a category (primary or multi-category link). */
+  categoryId?: string | null;
+  /** Restrict by active state; undefined = all. */
+  status?: "active" | "inactive" | "all" | null;
+}
 
 interface ExportRow {
   products: Array<{
@@ -178,18 +223,53 @@ async function fetchAllRows<T>(
   return all;
 }
 
+/** Filter products + links in memory by the export filters. */
+function applyProductFilters(
+  products: ExportRow["products"],
+  links: ExportRow["links"],
+  filters?: ExportFilters,
+): { products: ExportRow["products"]; links: ExportRow["links"] } {
+  if (!filters) return { products, links };
+  const { brandId, categoryId, status } = filters;
+
+  let filtered = products;
+  if (brandId) filtered = filtered.filter((p) => p.brand_id === brandId);
+  if (status && status !== "all") filtered = filtered.filter((p) => p.is_active === (status === "active"));
+
+  let matchedIds: Set<string> | null = null;
+  if (categoryId) {
+    matchedIds = new Set(links.filter((l) => l.category_id === categoryId).map((l) => l.product_id));
+    filtered = filtered.filter((p) => matchedIds!.has(p.id) || p.category_id === categoryId);
+  }
+
+  if (matchedIds) {
+    links = links.filter((l) => matchedIds!.has(l.product_id));
+  } else if (brandId || categoryId || (status && status !== "all")) {
+    const keep = new Set(filtered.map((p) => p.id));
+    links = links.filter((l) => keep.has(l.product_id));
+  }
+
+  return { products: filtered, links };
+}
+
 /** Read the full catalog for a store and build the export row cache. */
-async function readCatalog(sb: SupabaseClient, storeId: string): Promise<ExportRow> {
-  const products = await fetchAllRows<Record<string, unknown>>(sb, "products", "*", storeId);
+async function readCatalog(sb: SupabaseClient, storeId: string, filters?: ExportFilters): Promise<ExportRow> {
+  const rawProducts = await fetchAllRows<Record<string, unknown>>(sb, "products", "*", storeId);
   // product_categories has no store_id column, so fetch the whole (typically
   // modest) table via the same pagination pattern and filter in memory. This
   // avoids building a giant `.in()` URL that exceeds URI-length limits.
-  const links: Array<{ product_id: string; category_id: string }> = await fetchAllRows<
+  const allLinks: Array<{ product_id: string; category_id: string }> = await fetchAllRows<
     { product_id: string; category_id: string }
   >(sb, "product_categories", "product_id,category_id", "", "product_id");
 
+  const { products, links } = applyProductFilters(
+    rawProducts as ExportRow["products"],
+    allLinks,
+    filters,
+  );
+
   return {
-    products: products as ExportRow["products"],
+    products,
     categories: await fetchAllRows<ExportRow["categories"][number]>(sb, "categories", "id,name,parent_id", storeId),
     brands: await fetchAllRows<ExportRow["brands"][number]>(sb, "product_brands", "id,name", storeId),
     variants: await fetchAllRows<Record<string, unknown>>(sb, "product_variants", "*", storeId),
@@ -203,6 +283,7 @@ async function readCatalog(sb: SupabaseClient, storeId: string): Promise<ExportR
 // ---------------------------------------------------------------------------
 
 interface VariantSlice {
+  id: string;
   barcode: string;
   variant_label: string;
   total_stock: number;
@@ -212,8 +293,8 @@ interface VariantSlice {
 }
 
 /**
- * Build one flat worksheet row per (variant × unit). Parent data and variant
- * fields are repeated on every unit row so no data is hidden in a single cell.
+ * Build one flat worksheet row per (variant × unit). Parent data, variant
+ * fields and hidden DB ids are repeated on every unit row.
  */
 function buildFlatRows(cache: ExportRow): FlatRow[] {
   const rows: FlatRow[] = [];
@@ -224,6 +305,7 @@ function buildFlatRows(cache: ExportRow): FlatRow[] {
     const pid = String(u.product_id);
     const list = unitsByProduct.get(pid) ?? [];
     list.push({
+      unitId: u.id ? String(u.id) : undefined,
       unitName: String(u.unit_name ?? ""),
       qtyMultiplier: Number(u.qty_multiplier ?? 1),
       costPrice: Number(u.cost_price ?? 0),
@@ -232,6 +314,7 @@ function buildFlatRows(cache: ExportRow): FlatRow[] {
       barcode: u.barcode ? String(u.barcode) : null,
       isDefaultSale: u.is_default_sale === true,
       isDefaultPurchase: u.is_default_purchase === true,
+      present: new Set(),
     });
     unitsByProduct.set(pid, list);
   }
@@ -240,6 +323,7 @@ function buildFlatRows(cache: ExportRow): FlatRow[] {
     const pid = String(v.product_id);
     const list = variantsByProduct.get(pid) ?? [];
     list.push({
+      id: String(v.id ?? ""),
       barcode: String(v.barcode ?? ""),
       variant_label: String(v.variant_label ?? ""),
       total_stock: Number(v.total_stock ?? 0),
@@ -256,7 +340,7 @@ function buildFlatRows(cache: ExportRow): FlatRow[] {
     const variantList: VariantSlice[] =
       variants.length > 0
         ? variants
-        : [{ barcode: "", variant_label: p.name, total_stock: p.total_stock }];
+        : [{ id: "", barcode: "", variant_label: p.name, total_stock: p.total_stock }];
 
     const brandName = p.brand_id ? brandById.get(p.brand_id) ?? "" : "";
     const primaryCat = p.category_id ? catById.get(p.category_id) : undefined;
@@ -267,7 +351,7 @@ function buildFlatRows(cache: ExportRow): FlatRow[] {
 
     const unitSet = unitsByProduct.get(p.id) ?? [];
     // A product with no units emits one row with blank unit fields.
-    const unitRows: UnitSetRow[] = unitSet.length > 0 ? unitSet : [{ unitName: "", qtyMultiplier: 1, costPrice: 0, sellingPrice: 0, wholesalePrice: 0, barcode: null, isDefaultSale: false, isDefaultPurchase: false }];
+    const unitRows: UnitSetRow[] = unitSet.length > 0 ? unitSet : [{ unitName: "", qtyMultiplier: 1, costPrice: 0, sellingPrice: 0, wholesalePrice: 0, barcode: null, isDefaultSale: false, isDefaultPurchase: false, present: new Set() }];
 
     for (const v of variantList) {
       for (let ui = 0; ui < unitRows.length; ui++) {
@@ -304,6 +388,11 @@ function buildFlatRows(cache: ExportRow): FlatRow[] {
         row.UnitIsDefaultSale = u.isDefaultSale ? "1" : "0";
         row.UnitIsDefaultPurchase = u.isDefaultPurchase ? "1" : "0";
 
+        // Hidden DB ids for future-proof upserts.
+        row.ProductID = p.id;
+        row.VariantID = v.id || null;
+        row.UnitID = u.unitId ?? null;
+
         rows.push(row);
       }
     }
@@ -311,28 +400,46 @@ function buildFlatRows(cache: ExportRow): FlatRow[] {
   return rows;
 }
 
-/** Build an xlsx Blob of the flat catalog for the given store. */
-export async function exportCatalogToExcel(sb: SupabaseClient, storeId: string): Promise<Blob> {
+/** Build an xlsx Blob of the given flat rows with the shared sheet/_meta layout. */
+async function buildWorkbook(storeId: string, flat: FlatRow[]): Promise<Blob> {
   const XLSX = await import("xlsx");
-  const cache = await readCatalog(sb, storeId);
-  const flat = buildFlatRows(cache);
-
-  const sheet = XLSX.utils.json_to_sheet(flat);
-  sheet["!cols"] = EXCEL_COLUMNS.map((c) => ({ wch: c === "SKU" ? 18 : c.startsWith("Unit") ? 14 : 14 }));
+  // Pass `header` so column order is fixed and an empty dataset still emits a
+  // header row (used by the blank template).
+  const sheet = XLSX.utils.json_to_sheet(flat, { header: [...EXCEL_COLUMNS] });
+  sheet["!cols"] = EXCEL_COLUMNS.map((c) => ({ wch: c === "SKU" ? 18 : c.startsWith("Unit") ? 14 : c.endsWith("ID") ? 34 : 14 }));
   const book = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(book, sheet, EXCEL_SHEET_NAME);
 
   // _meta sheet carries version metadata for tolerant re-imports.
   const meta = XLSX.utils.json_to_sheet([
-    { key: "format", value: "pos-catalog-v2" },
+    { key: "format", value: CATALOG_FORMAT },
     { key: "storeId", value: storeId },
     { key: "exportedAt", value: new Date().toISOString() },
-    { key: "grain", value: "one row per variant x unit (units flattened to their own row)" },
+    { key: "grain", value: "one row per variant x unit; hidden ProductID/VariantID/UnitID for upserts" },
   ]);
   XLSX.utils.book_append_sheet(book, meta, "_meta");
 
   const buffer = XLSX.write(book, { bookType: "xlsx", type: "array" }) as ArrayBuffer;
   return new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+}
+
+/** Build an xlsx Blob of the flat catalog for the given store. */
+export async function exportCatalogToExcel(
+  sb: SupabaseClient,
+  storeId: string,
+  filters?: ExportFilters,
+): Promise<Blob> {
+  const cache = await readCatalog(sb, storeId, filters);
+  return buildWorkbook(storeId, buildFlatRows(cache));
+}
+
+/**
+ * Build a blank catalog import template: identical columns and _meta sheet to a
+ * full export, with zero product rows. Lets users add products without exporting
+ * the entire catalog. Accepts a storeId for metadata only.
+ */
+export async function exportCatalogTemplate(storeId: string): Promise<Blob> {
+  return buildWorkbook(storeId, []);
 }
 
 // ---------------------------------------------------------------------------
@@ -351,7 +458,18 @@ export interface ImportSummary {
   errors: string[];
 }
 
+interface GroupedVariant {
+  variantId?: string;
+  barcode: string;
+  label: string;
+  stock: number;
+  costPrice?: number;
+  sellingPrice?: number;
+  wholesalePrice?: number;
+}
+
 interface GroupedProduct {
+  productId?: string;
   productName: string;
   brand: string;
   department: string;
@@ -369,39 +487,98 @@ interface GroupedProduct {
   costPrice: number;
   sellingPrice: number;
   wholesalePrice: number;
+  /** Raw product scalar columns present in the file (blank = leave unchanged). */
+  present: Set<string>;
   units: UnitSetRow[];
-  variants: Array<{
-    barcode: string;
-    label: string;
-    stock: number;
-    costPrice?: number;
-    sellingPrice?: number;
-    wholesalePrice?: number;
-  }>;
+  variants: GroupedVariant[];
 }
 
-/** Parse a flat workbook into normalized, grouped products (no DB writes). */
-export async function parseCatalogExcel(file: File | ArrayBuffer): Promise<GroupedProduct[]> {
+/** Result of a pure parse; groups + non-fatal row errors (no DB lookup). */
+export interface ParsedCatalog {
+  groups: GroupedProduct[];
+  errors: string[];
+}
+
+/**
+ * The only import format the engine accepts. Exported so tests and consumers
+ * can reference the canonical version contract.
+ */
+export const CATALOG_FORMAT = "pos-catalog-v3";
+
+/**
+ * Read the flat rows and the declared format from the workbook's `_meta`
+ * sheet. Enforces the version contract: if the file carries a `_meta` sheet with
+ * a `format` key it must equal CATALOG_FORMAT (`pos-catalog-v3`). Files without
+ * a `_meta` sheet (hand-made or pre-meta exports) are tolerated so a manually
+ * authored spreadsheet can still import, but any declared older/newer format is
+ * rejected.
+ */
+async function readWorkbook(
+  file: File | ArrayBuffer,
+): Promise<{ rows: Array<Record<string, unknown>>; format: string | null }> {
   const XLSX = await import("xlsx");
   const data = file instanceof File ? await file.arrayBuffer() : file;
   const book = XLSX.read(data, { type: "array" });
-
   const dataSheetName = book.SheetNames.find((n) => n === EXCEL_SHEET_NAME) ?? book.SheetNames[0];
   const sheet = book.Sheets[dataSheetName];
-  const rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null });
+  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null });
 
+  let format: string | null = null;
+  const metaName = book.SheetNames.find((n) => n === "_meta");
+  if (metaName) {
+    const metaRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(book.Sheets[metaName], { defval: null });
+    const fmt = metaRows.find((r) => String(r.key ?? "") === "format")?.value;
+    if (fmt != null && String(fmt) !== "") format = String(fmt);
+    if (format && format !== CATALOG_FORMAT) {
+      throw new Error(
+        `نسخة الملف غير مدعومة (${format}). الحد الأدنى المقبول: ${CATALOG_FORMAT}. أعد التصدير ثم أعد المحاولة.`,
+      );
+    }
+  }
+
+  return { rows, format };
+}
+
+/**
+ * Pure parse of the workbook into grouped products. Unlike the throwing parse,
+ * this one collects per-row errors (missing required fields, duplicate SKU)
+ * instead of aborting, so the caller can show a dry-run preview.
+ */
+export async function parseCatalogDetailed(file: File | ArrayBuffer): Promise<ParsedCatalog> {
+  const { rows: rawRows } = await readWorkbook(file);
+  const errors: string[] = [];
   const byParent = new Map<string, GroupedProduct>();
+  // SKU -> parent name, to detect a SKU reused across different products.
+  const skuOwner = new Map<string, string>();
 
-  for (const raw of rawRows) {
+  for (let ri = 0; ri < rawRows.length; ri++) {
+    const raw = rawRows[ri];
+    const rowNo = ri + 2; // header is row 1
     const sku = normBarcode(cleanStr(raw.SKU ?? raw["SKU"]));
     const parentName = cleanStr(raw.ParentName ?? raw.ParentName);
+
     if (!sku && !parentName) continue; // blank guard row
-    if (!parentName) throw new Error(`صف بلا اسم منتج (SKU=${sku})`);
-    if (!sku) throw new Error(`المنتج "${parentName}" بلا باركود SKU`);
+    if (!parentName) {
+      errors.push(`صف ${rowNo}: لا يوجد اسم منتج (SKU=${sku})`);
+      continue;
+    }
+    if (!sku) {
+      errors.push(`صف ${rowNo}: المنتج "${parentName}" بلا باركود SKU`);
+      continue;
+    }
+
+    const owner = skuOwner.get(sku);
+    if (owner && owner !== parentName) {
+      errors.push(`صف ${rowNo}: الباركود ${sku} مكرر في منتجين ("${owner}" / "${parentName}")`);
+      continue;
+    }
+    skuOwner.set(sku, parentName);
 
     let group = byParent.get(parentName);
     if (!group) {
+      const cellPresent = new Set(EXCEL_COLUMNS.filter((c) => present(raw[c])));
       group = {
+        productId: cleanStr(raw.ProductID) || undefined,
         productName: parentName,
         brand: cleanStr(raw.Brand),
         department: cleanStr(raw.Department),
@@ -419,21 +596,21 @@ export async function parseCatalogExcel(file: File | ArrayBuffer): Promise<Group
         costPrice: toNum(raw.Cost, 0),
         sellingPrice: toNum(raw.Price, 0),
         wholesalePrice: toNum(raw.WholesalePrice, 0),
+        present: cellPresent,
         units: [],
         variants: [],
       };
       byParent.set(parentName, group);
     }
 
-    // Unit: one per row; dedupe by UnitName across the product group so the
-    // flattened (variant × unit) rows never create duplicate units. Only
-    // fields explicitly present on a row overwrite an existing unit's values,
-    // so a later unit row that omits a flag doesn't clobber it with a default.
+    // Unit: one per row; dedupe by UnitName across the group (variant × unit
+    // rows repeat units). Only fields present on a row overwrite values.
     const unitName = cleanStr(raw.UnitName);
     if (unitName) {
       let unit = group.units.find((u) => u.unitName === unitName);
       if (!unit) {
         unit = {
+          unitId: cleanStr(raw.UnitID) || undefined,
           unitName,
           qtyMultiplier: 1,
           costPrice: 0,
@@ -442,36 +619,124 @@ export async function parseCatalogExcel(file: File | ArrayBuffer): Promise<Group
           barcode: null,
           isDefaultSale: false,
           isDefaultPurchase: false,
+          present: new Set(),
         };
         group.units.push(unit);
       }
-      const has = (key: string) => raw[key] != null && cleanStr(raw[key]) !== "";
-      if (has("UnitMultiplier")) unit.qtyMultiplier = toNum(raw.UnitMultiplier, 1);
-      if (has("UnitCost")) unit.costPrice = toNum(raw.UnitCost, 0);
-      if (has("UnitPrice")) unit.sellingPrice = toNum(raw.UnitPrice, 0);
-      if (has("UnitWholesale")) unit.wholesalePrice = toNum(raw.UnitWholesale, 0);
-      if (has("UnitBarcode")) unit.barcode = cleanStr(String(raw.UnitBarcode ?? "")) || null;
-      if (has("UnitIsDefaultSale")) unit.isDefaultSale = toBool(raw.UnitIsDefaultSale, false);
-      if (has("UnitIsDefaultPurchase")) unit.isDefaultPurchase = toBool(raw.UnitIsDefaultPurchase, false);
+      if (present(raw.UnitMultiplier)) unit.qtyMultiplier = toNum(raw.UnitMultiplier, 1);
+      if (present(raw.UnitCost)) unit.costPrice = toNum(raw.UnitCost, 0);
+      if (present(raw.UnitPrice)) unit.sellingPrice = toNum(raw.UnitPrice, 0);
+      if (present(raw.UnitWholesale)) unit.wholesalePrice = toNum(raw.UnitWholesale, 0);
+      if (present(raw.UnitBarcode)) unit.barcode = cleanStr(String(raw.UnitBarcode ?? "")) || null;
+      if (present(raw.UnitIsDefaultSale)) unit.isDefaultSale = toBool(raw.UnitIsDefaultSale, false);
+      if (present(raw.UnitIsDefaultPurchase)) unit.isDefaultPurchase = toBool(raw.UnitIsDefaultPurchase, false);
+      ["UnitMultiplier", "UnitCost", "UnitPrice", "UnitWholesale", "UnitBarcode", "UnitIsDefaultSale", "UnitIsDefaultPurchase"].forEach((k) => {
+        if (present(raw[k])) unit!.present.add(k);
+      });
     }
 
     // Variant: dedupe by SKU (repeated on each of the variant's unit rows).
-    const dup = group.variants.find((v) => v.barcode === sku);
-    if (!dup) {
-      group.variants.push({
+    const variantId = cleanStr(raw.VariantID) || undefined;
+    let variant = group.variants.find((v) => v.barcode === sku || (variantId && v.variantId === variantId));
+    if (!variant) {
+      variant = {
+        variantId,
         barcode: sku,
         label: cleanStr(raw.VariantLabel) || sku,
         stock: Math.max(0, Math.round(toNum(raw.Stock, 0))),
-        costPrice: raw.Cost == null || cleanStr(raw.Cost) === "" ? undefined : toNum(raw.Cost, 0),
-        sellingPrice: raw.Price == null || cleanStr(raw.Price) === "" ? undefined : toNum(raw.Price, 0),
-        wholesalePrice:
-          raw.WholesalePrice == null || cleanStr(raw.WholesalePrice) === "" ? undefined : toNum(raw.WholesalePrice, 0),
-      });
+        costPrice: present(raw.Cost) ? toNum(raw.Cost, 0) : undefined,
+        sellingPrice: present(raw.Price) ? toNum(raw.Price, 0) : undefined,
+        wholesalePrice: present(raw.WholesalePrice) ? toNum(raw.WholesalePrice, 0) : undefined,
+      };
+      group.variants.push(variant);
     }
   }
 
-  return [...byParent.values()];
+  return { groups: [...byParent.values()], errors };
 }
+
+/** Parse a flat workbook into normalized, grouped products (no DB writes). */
+export async function parseCatalogExcel(file: File | ArrayBuffer): Promise<GroupedProduct[]> {
+  const { groups, errors } = await parseCatalogDetailed(file);
+  if (errors.length > 0) throw new Error(errors[0]);
+  return groups;
+}
+
+// ---------------------------------------------------------------------------
+// DRY-RUN preview
+// ---------------------------------------------------------------------------
+
+/** Result of a DB-aware dry-run (no writes performed). */
+export interface DryRunResult {
+  groups: GroupedProduct[];
+  /** Product groups to create. */
+  productsToCreate: number;
+  /** Product groups to update. */
+  productsToUpdate: number;
+  /** Human-readable errors from parsing + classification. */
+  errors: string[];
+  /** Human-readable resolution hint per product (for the preview). */
+  productIds: string[];
+}
+
+/**
+ * Parse a file and classify each product group as NEW or UPDATE by querying the
+ * DB (ID match first, then name match). Performs NO writes — used by the
+ * dry-run preview modal before a user confirms the actual import.
+ */
+export async function previewCatalogImport(
+  sb: SupabaseClient,
+  storeId: string,
+  file: File | ArrayBuffer,
+  onProgress?: (done: number, total: number) => void,
+): Promise<DryRunResult> {
+  const parsed = await parseCatalogDetailed(file);
+
+  // Load existing products once for name/id matching.
+  const existingProducts = await fetchAllRows<{ id: string; name: string }>(
+    sb, "products", "id,name", storeId,
+  );
+  const byId = new Map(existingProducts.map((p) => [p.id, p.name]));
+  const byNameLow = new Map(existingProducts.map((p) => [p.name.toLowerCase(), p.id]));
+
+  const result: DryRunResult = {
+    groups: parsed.groups,
+    productsToCreate: 0,
+    productsToUpdate: 0,
+    errors: [...parsed.errors],
+    productIds: [],
+  };
+
+  const resolvedIds = new Set<string>();
+  const groups = parsed.groups;
+  for (let i = 0; i < groups.length; i++) {
+    const g = groups[i];
+    let resolved: string | undefined;
+    if (g.productId && byId.has(g.productId)) {
+      resolved = g.productId;
+    } else {
+      resolved = byNameLow.get(g.productName.toLowerCase());
+    }
+
+    if (resolved) {
+      result.productsToUpdate += 1;
+      if (resolvedIds.has(resolved)) {
+        result.errors.push(`المنتج "${g.productName}" يتكرر في الملف (تحديث لنفس السجل)`);
+      }
+      resolvedIds.add(resolved);
+    } else {
+      result.productsToCreate += 1;
+    }
+    result.productIds.push(resolved ?? "");
+    onProgress?.(i + 1, groups.length);
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// WRITE (actual import)
+// ---------------------------------------------------------------------------
 
 /**
  * Resolve a department/category path into category ids, creating categories
@@ -493,13 +758,12 @@ async function resolveCategoryPath(
 
     let scoped;
     try {
-      scoped = await sb
-        .from("categories")
-        .select("id")
-        .eq("store_id", storeId)
-        .eq("name", seg)
-        .eq("parent_id", parentId)
-        .maybeSingle();
+      let q = sb.from("categories").select("id").eq("store_id", storeId).eq("name", seg);
+      // PostgREST rejects `.eq("parent_id", null)` on a UUID column; a null
+      // parent must be expressed with `.is("parent_id", null)` instead.
+      if (parentId) q = q.eq("parent_id", parentId);
+      else q = q.is("parent_id", null);
+      scoped = await q.maybeSingle();
     } catch {
       scoped = null;
     }
@@ -560,12 +824,25 @@ async function assertBarcodesFree(
   if (conflict) throw new Error(`الباركود مستخدم مسبقاً: ${conflict.barcode}`);
 }
 
+async function assertUnitBarcodesFree(
+  sb: SupabaseClient,
+  storeId: string,
+  barcodes: string[],
+): Promise<void> {
+  if (barcodes.length === 0) return;
+  const { data, error } = await sb.from("product_units").select("barcode").eq("store_id", storeId).in("barcode", barcodes);
+  if (error) throw new Error(error.message);
+  if ((data ?? []).length > 0) throw new Error(`باركود وحدة مستخدم مسبقاً: ${data[0].barcode}`);
+}
+
 /**
  * Idempotently write one product group. Returns counts of created/updated.
  * Round-trip rules:
- *   - Parent matched by (store_id, lower(name)); update in place or create.
- *   - Variants matched by (store_id, barcode); stock ONLY on brand-new SKUs.
- *   - Units matched by (store_id, product_id, lower(unit_name)).
+ *   - Parent matched by ProductID first, then (store_id, lower(name)).
+ *   - Variants matched by VariantID first, then (store_id, barcode).
+ *   - Units matched by UnitID first, then (store_id, product_id, lower(unit_name)).
+ *   - Stock ONLY posted for brand-new SKUs (idempotency-keyed OPENING movement).
+ *   - Blank cells (absent from `present`) never overwrite existing DB values.
  */
 async function upsertProductGroup(
   sb: SupabaseClient,
@@ -586,34 +863,46 @@ async function upsertProductGroup(
   const parentPrice = defaultUnit ? defaultUnit.sellingPrice : g.sellingPrice;
   const parentWholesale = defaultUnit ? defaultUnit.wholesalePrice : g.wholesalePrice;
 
-  const existing = await sb.from("products").select("id").eq("store_id", storeId).ilike("name", g.productName).maybeSingle();
-  if (existing.error) throw new Error(existing.error.message);
+  // Resolve product by hidden ID first, then by name.
+  let existingProduct: string | null = null;
+  if (g.productId) {
+    const byId = await sb.from("products").select("id").eq("store_id", storeId).eq("id", g.productId).maybeSingle();
+    if (byId.error) throw new Error(byId.error.message);
+    if (byId.data?.id) existingProduct = byId.data.id;
+  }
+  if (!existingProduct) {
+    const byName = await sb.from("products").select("id").eq("store_id", storeId).ilike("name", g.productName).maybeSingle();
+    if (byName.error) throw new Error(byName.error.message);
+    if (byName.data?.id) existingProduct = byName.data.id;
+  }
 
   let productId: string;
-  if (existing.data?.id) {
-    productId = existing.data.id;
-    const upd = await sb
-      .from("products")
-      .update({
-        category_id: cat.primary,
-        brand_id: brandId,
-        base_unit: g.baseUnit,
-        tax_percent: g.taxPercent,
-        tax_included: g.taxIncluded,
-        is_active: g.isActive,
-        show_in_pos: g.showInPos,
-        is_sellable: g.isSellable,
-        is_purchasable: g.isPurchasable,
-        allow_price_change: g.allowPriceChange,
-        is_quick_key: g.isQuickKey,
-        reorder_level: g.reorderLevel,
-        cost_price: parentCost,
-        selling_price: parentPrice,
-        wholesale_price: parentWholesale,
-      })
-      .eq("id", productId)
-      .eq("store_id", storeId);
-    if (upd.error) throw new Error(upd.error.message);
+  if (existingProduct) {
+    productId = existingProduct;
+    // Data Shield: only patch fields the file actually provides.
+    const patch: Record<string, unknown> = {};
+    const scalarMap: Record<string, unknown> = {
+      BaseUnit: g.baseUnit,
+      TaxPercent: g.taxPercent,
+      TaxIncluded: g.taxIncluded,
+      IsSellable: g.isSellable,
+      IsPurchasable: g.isPurchasable,
+      ShowInPos: g.showInPos,
+      IsQuickKey: g.isQuickKey,
+      ReorderLevel: g.reorderLevel,
+      AllowPriceChange: g.allowPriceChange,
+      IsActive: g.isActive,
+      Cost: parentCost,
+      Price: parentPrice,
+      WholesalePrice: parentWholesale,
+    };
+    for (const col of Object.keys(PRODUCT_PATCH_FIELDS)) {
+      if (g.present.has(col)) patch[PRODUCT_PATCH_FIELDS[col]] = scalarMap[col];
+    }
+    if (Object.keys(patch).length > 0) {
+      const upd = await sb.from("products").update(patch).eq("id", productId).eq("store_id", storeId);
+      if (upd.error) throw new Error(upd.error.message);
+    }
     summary.productsUpdated += 1;
   } else {
     const inserted = await sb
@@ -658,7 +947,7 @@ async function upsertProductGroup(
   };
   await replaceLinks();
 
-  // Units: upsert by (product_id, lower(unit_name)).
+  // Units: match by UnitID first, then by (product_id, lower(unit_name)).
   for (let i = 0; i < g.units.length; i++) {
     const u = g.units[i];
     if (u.unitName) {
@@ -668,15 +957,19 @@ async function upsertProductGroup(
     }
   }
 
-  // Variants: upsert by barcode; stock on NEW skus only.
+  // Variants: match by VariantID first, then barcode; stock ONLY on new SKUs.
   for (const v of g.variants) {
-    const existingVariant = await sb
-      .from("product_variants")
-      .select("id")
-      .eq("store_id", storeId)
-      .eq("barcode", v.barcode)
-      .maybeSingle();
-    if (existingVariant.error) throw new Error(existingVariant.error.message);
+    let existingVariant: string | null = null;
+    if (v.variantId) {
+      const byId = await sb.from("product_variants").select("id").eq("store_id", storeId).eq("id", v.variantId).maybeSingle();
+      if (byId.error) throw new Error(byId.error.message);
+      if (byId.data?.id) existingVariant = byId.data.id;
+    }
+    if (!existingVariant) {
+      const byBarcode = await sb.from("product_variants").select("id").eq("store_id", storeId).eq("barcode", v.barcode).maybeSingle();
+      if (byBarcode.error) throw new Error(byBarcode.error.message);
+      if (byBarcode.data?.id) existingVariant = byBarcode.data.id;
+    }
 
     const vp = {
       store_id: storeId,
@@ -688,13 +981,14 @@ async function upsertProductGroup(
       wholesale_price: v.wholesalePrice ?? parentWholesale,
     };
 
-    if (existingVariant.data?.id) {
+    if (existingVariant) {
       const upd = await sb.from("product_variants").update({
+        barcode: v.barcode,
         variant_label: v.label,
-        cost_price: vp.cost_price,
-        selling_price: vp.selling_price,
-        wholesale_price: vp.wholesale_price,
-      }).eq("id", existingVariant.data.id).eq("store_id", storeId);
+        cost_price: v.costPrice ?? parentCost,
+        selling_price: v.sellingPrice ?? parentPrice,
+        wholesale_price: v.wholesalePrice ?? parentWholesale,
+      }).eq("id", existingVariant).eq("store_id", storeId);
       if (upd.error) throw new Error(upd.error.message);
       summary.variantsUpdated += 1;
     } else {
@@ -719,17 +1013,6 @@ async function upsertProductGroup(
   }
 }
 
-async function assertUnitBarcodesFree(
-  sb: SupabaseClient,
-  storeId: string,
-  barcodes: string[],
-): Promise<void> {
-  if (barcodes.length === 0) return;
-  const { data, error } = await sb.from("product_units").select("barcode").eq("store_id", storeId).in("barcode", barcodes);
-  if (error) throw new Error(error.message);
-  if ((data ?? []).length > 0) throw new Error(`باركود وحدة مستخدم مسبقاً: ${data[0].barcode}`);
-}
-
 async function upsertUnit(
   sb: SupabaseClient,
   storeId: string,
@@ -738,14 +1021,25 @@ async function upsertUnit(
   sortOrder: number,
 ): Promise<boolean> {
   const name = cleanStr(u.unitName);
-  const existing = await sb
-    .from("product_units")
-    .select("id")
-    .eq("store_id", storeId)
-    .eq("product_id", productId)
-    .ilike("unit_name", name)
-    .maybeSingle();
-  if (existing.error) throw new Error(existing.error.message);
+
+  // Resolve by hidden UnitID first, then by (product_id, lower(unit_name)).
+  let existingId: string | null = null;
+  if (u.unitId) {
+    const byId = await sb.from("product_units").select("id").eq("store_id", storeId).eq("id", u.unitId).maybeSingle();
+    if (byId.error) throw new Error(byId.error.message);
+    if (byId.data?.id) existingId = byId.data.id;
+  }
+  if (!existingId) {
+    const byName = await sb
+      .from("product_units")
+      .select("id")
+      .eq("store_id", storeId)
+      .eq("product_id", productId)
+      .ilike("unit_name", name)
+      .maybeSingle();
+    if (byName.error) throw new Error(byName.error.message);
+    if (byName.data?.id) existingId = byName.data.id;
+  }
 
   if (u.isDefaultSale) {
     await sb.from("product_units").update({ is_default_sale: false }).eq("store_id", storeId).eq("product_id", productId).eq("is_default_sale", true);
@@ -754,7 +1048,7 @@ async function upsertUnit(
     await sb.from("product_units").update({ is_default_purchase: false }).eq("store_id", storeId).eq("product_id", productId).eq("is_default_purchase", true);
   }
 
-  const values = {
+  const values: Record<string, unknown> = {
     store_id: storeId,
     product_id: productId,
     unit_name: name.slice(0, 60),
@@ -768,8 +1062,23 @@ async function upsertUnit(
     sort_order: sortOrder,
   };
 
-  if (existing.data?.id) {
-    const upd = await sb.from("product_units").update(values).eq("id", existing.data.id).eq("store_id", storeId);
+  // Data Shield: only patch unit fields that are present in the file.
+  const columnMap: Record<string, string> = {
+    UnitMultiplier: "qty_multiplier",
+    UnitCost: "cost_price",
+    UnitPrice: "selling_price",
+    UnitWholesale: "wholesale_price",
+    UnitBarcode: "barcode",
+    UnitIsDefaultSale: "is_default_sale",
+    UnitIsDefaultPurchase: "is_default_purchase",
+  };
+  const updatePayload: Record<string, unknown> = { sort_order: sortOrder };
+  for (const key of Object.keys(columnMap)) {
+    if (u.present.has(key)) updatePayload[columnMap[key]] = values[columnMap[key]];
+  }
+
+  if (existingId) {
+    const upd = await sb.from("product_units").update(updatePayload).eq("id", existingId).eq("store_id", storeId);
     if (upd.error) throw new Error(upd.error.message);
     return false;
   }
@@ -812,7 +1121,7 @@ export async function importCatalogGroups(
   return summary;
 }
 
-/** Convenience: read a File/ArrayBuffer, parse, then import. */
+/** Convenience: read a File/ArrayBuffer, parse, then import (with dry-run-safe groups). */
 export async function importCatalogExcel(
   sb: SupabaseClient,
   storeId: string,

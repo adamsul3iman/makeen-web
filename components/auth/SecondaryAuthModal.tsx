@@ -9,6 +9,8 @@ const ACTION_LABELS: Record<string, string> = {
   cancel_invoice: "إلغاء فاتورة مكتملة",
   save_cashier: "حفظ بيانات موظف",
   delete_cashier: "حذف موظف",
+  save_role: "حفظ دور وصلاحيات",
+  delete_role: "حذف دور",
   save_settings: "تغيير بريد مالك المتجر (بريد الدخول)",
   save_istd: "حفظ بيانات الفوترة الإلكترونية (JoFotara)",
   approve_discount: "الموافقة على خصم يتجاوز الحد",

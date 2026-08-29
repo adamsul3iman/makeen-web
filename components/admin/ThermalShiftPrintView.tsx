@@ -44,7 +44,13 @@ function Header({ children }: { children: React.ReactNode }) {
   );
 }
 
-export default function ThermalShiftPrintView({ shift }: { shift: ShiftAudit }) {
+export default function ThermalShiftPrintView({
+  shift,
+  kind = "Z_REPORT",
+}: {
+  shift: ShiftAudit;
+  kind?: "X_REPORT" | "Z_REPORT";
+}) {
   const durationMs =
     shift.openedAt && shift.closedAt
       ? new Date(shift.closedAt).getTime() - new Date(shift.openedAt).getTime()
@@ -86,7 +92,7 @@ export default function ThermalShiftPrintView({ shift }: { shift: ShiftAudit }) 
         {/* ── HEADER (borderless) ────────────────────────────────── */}
         <table className="th-table">
           <tbody>
-            <Header><strong>مؤسسة البرج — تقرير Z</strong></Header>
+            <Header><strong>{kind === "X_REPORT" ? "تقرير X" : "تقرير Z"}</strong></Header>
             <Header>وردية {shift.shiftId?.slice(0, 8) ?? "—"}</Header>
             <Header>{shift.cashier || "—"}</Header>
             <Header>{shift.branch || "—"}{shift.terminal ? ` — ${shift.terminal}` : ""}</Header>

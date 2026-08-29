@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Ban,
   CheckCircle2,
@@ -10,20 +10,21 @@ import {
   Plus,
   Printer,
   RefreshCw,
-  Trash2,
+  ScanLine,
   Truck,
 } from "lucide-react";
 import { ListPagination } from "@/components/admin/ListPagination";
 import { SearchInput } from "@/components/admin/SearchInput";
-import AsyncProductCombobox, {
-  type AsyncProductOption,
-} from "@/components/admin/AsyncProductCombobox";
+import type { AsyncProductOption } from "@/components/admin/AsyncProductCombobox";
 import POBuilderModal, { type POBuilderItem } from "@/components/admin/POBuilderModal";
 import ReconciliationModal from "@/components/admin/ReconciliationModal";
 import PurchaseOrderPrint from "@/components/admin/PurchaseOrderPrint";
+import LineCard, { type LineInput } from "@/components/admin/PurchasesLineCard";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
+import { usePurchasesScanner } from "@/hooks/usePurchasesScanner";
 import { normalizeArabicText } from "@/lib/arabic";
 import { formatMoney } from "@/lib/format";
+import { emitPosSound } from "@/lib/posSound";
 import type { PurchaseOrderDetail } from "@/lib/purchasesClient";
 import {
   createPurchaseOrder,
@@ -41,26 +42,7 @@ import {
 import EntityCombobox from "@/components/shared/EntityCombobox";
 import QuickCreateEntityModal from "@/components/shared/QuickCreateEntityModal";
 import { usePosStore } from "@/store/usePosStore";
-
-interface LineInput {
-  key: string;
-  productId: string;
-  productName: string;
-  quantity: string;
-  unitCost: string;
-  /** Parent-level reference prices captured when the product was picked. */
-  baseCost: number | null;
-  basePrice: number | null;
-  /** Optional updated selling price pushed onto the product at receive time. */
-  newSellingPrice: string;
-  /** Tier 3.5 enrichment — variant tracking */
-  variantId?: string | null;
-  variantLabel?: string;
-  unitId?: string | null;
-  unitName?: string;
-  unitMultiplier?: number;
-  qtyInUnit?: number;
-}
+import type { LocalUnit } from "@/types/pos.types";
 
 /**
  * A purchase order or a goods-in supplier invoice. The legacy PO flow writes
@@ -94,6 +76,8 @@ function emptyLine(): LineInput {
     productId: "",
     productName: "",
     quantity: "1",
+    qtyInUnit: 1,
+    unitMultiplier: 1,
     unitCost: "",
     baseCost: null,
     basePrice: null,
@@ -128,7 +112,6 @@ export default function AdminPurchasesPage() {
   const [lines, setLines] = useState<LineInput[]>([]);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  const [receivingId, setReceivingId] = useState<string | null>(null);
   const [editing, setEditing] = useState<PurchaseOrderDetail | null>(null);
   const [printDetail, setPrintDetail] = useState<PurchaseOrderDetail | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -140,6 +123,83 @@ export default function AdminPurchasesPage() {
   const [reconcileOpen, setReconcileOpen] = useState(false);
   const [reconcilePoId, setReconcilePoId] = useState<string | null>(null);
   const [reconcilePoNumber, setReconcilePoNumber] = useState<string | null>(null);
+  const [manualCode, setManualCode] = useState("");
+  const [scannerRecent, setScannerRecent] = useState<string | null>(null);
+
+  const scanInputRef = useRef<HTMLInputElement>(null);
+
+  // Cache-resident scans resolve without any network fetch, so the hot path
+  // reads directly from the zustand store snapshot (same O(1) index as POS).
+  const handleScan = useCallback((code: string): void => {
+    const store = usePosStore.getState();
+    const lookup = store.barcodeIndex[code];
+    setScannerRecent(lookup ? lookup.name : code);
+    if (!lookup) {
+      emitPosSound("ERROR");
+      setError("رمز الباركود غير معروف — تحقق من الكود");
+      return;
+    }
+    const product = store.products[lookup.product_id];
+    const multiplier = lookup.qtyMultiplier && lookup.qtyMultiplier > 0 ? lookup.qtyMultiplier : 1;
+    const unitId = lookup.unitId ?? null;
+    const unitName = lookup.unitName ?? product?.baseUnit;
+    const variantId = lookup.variantId ?? null;
+    const variantLabel = lookup.variantLabel;
+
+    setLines((prev) => {
+      const existingIdx = prev.findIndex(
+        (l) =>
+          l.productId === lookup.product_id &&
+          (l.variantId ?? null) === (variantId ?? null) &&
+          (l.unitId ?? null) === (unitId ?? null),
+      );
+      if (existingIdx >= 0) {
+        const next = prev.slice();
+        const cur = next[existingIdx];
+        const qtyInUnit =
+          (cur.qtyInUnit ?? Math.round((parseInt(cur.quantity, 10) || 0) / (cur.unitMultiplier || 1))) + 1;
+        next[existingIdx] = {
+          ...cur,
+          unitMultiplier: multiplier,
+          unitName,
+          unitId,
+          variantId,
+          variantLabel,
+          qtyInUnit,
+          quantity: String(round2(qtyInUnit * multiplier)),
+        };
+        return next;
+      }
+      const baseName = product?.name ?? lookup.name;
+      const name =
+        variantLabel && variantLabel !== "—" ? `${baseName} — ${variantLabel}` : baseName;
+      const newLine: LineInput = {
+        key: makeKey(),
+        productId: lookup.product_id,
+        productName: name,
+        quantity: String(multiplier),
+        qtyInUnit: 1,
+        unitMultiplier: multiplier,
+        unitCost:
+          product?.costPrice != null && product.costPrice > 0 ? String(product.costPrice) : "",
+        baseCost: product?.costPrice ?? null,
+        basePrice: product?.price ?? null,
+        newSellingPrice: "",
+        variantId,
+        variantLabel,
+        unitId,
+        unitName,
+      };
+      return [...prev, newLine];
+    });
+    emitPosSound("SCAN_ACCEPTED");
+  }, []);
+
+  usePurchasesScanner(handleScan);
+
+  useEffect(() => {
+    scanInputRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -219,7 +279,8 @@ export default function AdminPurchasesPage() {
     const newLines: LineInput[] = items.map((item) => ({
       key: makeKey(),
       productId: item.productId,
-      productName: item.variantLabel !== "—" ? `${item.productName} — ${item.variantLabel}` : item.productName,
+      productName:
+        item.variantLabel !== "—" ? `${item.productName} — ${item.variantLabel}` : item.productName,
       quantity: String(item.quantity),
       unitCost: String(item.unitCost),
       baseCost: item.unitCost,
@@ -235,23 +296,68 @@ export default function AdminPurchasesPage() {
     setLines((prev) => [...prev, ...newLines]);
   };
 
-  const updateLine = (key: string, patch: Partial<LineInput>) => {
-    setLines((prev) => prev.map((line) => (line.key === key ? { ...line, ...patch } : line)));
-  };
+  const updateLine = useCallback((key: string, patch: Partial<LineInput> | ((line: LineInput) => Partial<LineInput>)) => {
+    setLines((prev) =>
+      prev.map((line) => (line.key === key ? { ...line, ...(typeof patch === "function" ? patch(line) : patch) } : line)),
+    );
+  }, []);
 
-  const removeLine = (key: string) => {
+  const removeLine = useCallback((key: string) => {
     setLines((prev) => prev.filter((line) => line.key !== key));
-  };
+  }, []);
 
-  const handleProductPicked = (key: string, product: AsyncProductOption) => {
+  const handleProductPicked = useCallback((key: string, product: AsyncProductOption) => {
     updateLine(key, {
       productId: product.id,
       productName: product.name,
-      unitCost:
-        product.costPrice != null && product.costPrice > 0 ? String(product.costPrice) : "",
+      unitId: null,
+      unitName: undefined,
+      unitMultiplier: 1,
+      qtyInUnit: 1,
+      unitCost: product.costPrice != null && product.costPrice > 0 ? String(product.costPrice) : "",
       baseCost: product.costPrice ?? null,
       basePrice: product.sellingPrice ?? null,
     });
+  }, [updateLine]);
+
+  const setQtyInUnit = useCallback((key: string, raw: string) => {
+    updateLine(key, (line) => {
+      const qtyInUnit = parseFloat(raw);
+      const m = line.unitMultiplier && line.unitMultiplier > 0 ? line.unitMultiplier : 1;
+      const count = Number.isFinite(qtyInUnit) && qtyInUnit > 0 ? Math.round(qtyInUnit * 100) / 100 : 0;
+      return { ...line, qtyInUnit: count, quantity: String(round2(count * m)) };
+    });
+  }, [updateLine]);
+
+  const switchLineUnit = useCallback((key: string, unit: LocalUnit | null) => {
+    updateLine(key, (line) => {
+      const currentBase = parseInt(line.quantity, 10) || (line.qtyInUnit ?? 1) * (line.unitMultiplier || 1);
+      const multiplier = unit ? unit.qtyMultiplier : 1;
+      const qtyInUnit = multiplier >= 1 && currentBase > 0 ? Math.ceil(currentBase / multiplier) : 1;
+      return {
+        ...line,
+        ...(unit
+          ? { unitId: unit.id, unitName: unit.unitName, unitMultiplier: multiplier, qtyInUnit }
+          : { unitId: null, unitName: undefined, unitMultiplier: 1, qtyInUnit: currentBase }),
+        quantity: String(round2(qtyInUnit * multiplier)),
+      };
+    });
+  }, [updateLine]);
+
+  const setUnitCost = useCallback((key: string, raw: string) => {
+    updateLine(key, { unitCost: raw });
+  }, [updateLine]);
+
+  const setSelling = useCallback((key: string, raw: string) => {
+    updateLine(key, { newSellingPrice: raw });
+  }, [updateLine]);
+
+  const submitManualScan = () => {
+    const code = manualCode.trim();
+    if (!code) return;
+    handleScan(code);
+    setManualCode("");
+    scanInputRef.current?.focus();
   };
 
   const poTotal = round2(
@@ -268,7 +374,8 @@ export default function AdminPurchasesPage() {
       parseInt(line.quantity, 10) > 0 &&
       (line.unitCost === "" || parseFloat(line.unitCost) >= 0),
   );
-  const canSubmit = supplierId.trim() !== "" && lines.length > 0 && validLines.length === lines.length && !saving;
+  const canSubmit =
+    supplierId.trim() !== "" && lines.length > 0 && validLines.length === lines.length && !saving;
 
   const resetForm = () => {
     setEditing(null);
@@ -280,7 +387,9 @@ export default function AdminPurchasesPage() {
   const createSupplier = async (data: { name: string; phone: string }) => {
     const supplier = await createSupplierApi({ name: data.name, phone: data.phone });
     setSuppliers((current) =>
-      [...current, { id: supplier.id, name: supplier.name }].sort((a, b) => a.name.localeCompare(b.name, "ar")),
+      [...current, { id: supplier.id, name: supplier.name }].sort((a, b) =>
+        a.name.localeCompare(b.name, "ar"),
+      ),
     );
     setSupplierId(supplier.id);
     setAddingSupplier(false);
@@ -332,6 +441,8 @@ export default function AdminPurchasesPage() {
           productId: item.product_id ?? "",
           productName: item.productName,
           quantity: String(item.quantity),
+          qtyInUnit: item.quantity,
+          unitMultiplier: 1,
           unitCost: String(item.unit_cost),
           baseCost: item.unit_cost,
           basePrice: null,
@@ -367,6 +478,7 @@ export default function AdminPurchasesPage() {
   const receivedValue = round2(
     orders.filter((o) => o.status === "received").reduce((acc, o) => acc + o.totalAmount, 0),
   );
+  const productUnits = usePosStore((s) => s.productUnits);
 
   const filteredOrders = useMemo(() => {
     const needle = normalizeArabicText(debouncedQ);
@@ -430,6 +542,43 @@ export default function AdminPurchasesPage() {
             <h2 className="text-lg font-black text-foreground">أمر شراء جديد</h2>
           )}
 
+          <div className="rounded-xl border border-border bg-white">
+            <label className="flex items-center gap-2 px-3 pt-3 pb-1 text-xs font-bold text-muted">
+              <ScanLine className="h-3.5 w-3.5 text-primary" />
+              ماسح الباركود — امسح لإضافة البند مباشرة
+            </label>
+            <div className="flex items-center gap-2 px-3 pb-3">
+              <input
+                ref={scanInputRef}
+                type="text"
+                value={manualCode}
+                onChange={(e) => setManualCode(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    submitManualScan();
+                  }
+                }}
+                placeholder="امسح الباركود أو اكتبه واضغط Enter…"
+                dir="ltr"
+                className="h-11 w-full rounded-lg border border-border bg-white px-3 text-sm font-bold tabular-nums outline-none focus:border-primary"
+              />
+              <button
+                type="button"
+                onClick={submitManualScan}
+                aria-label="إضافة المسح"
+                className="grid h-11 w-11 shrink-0 place-items-center rounded-lg bg-primary text-primary-foreground transition hover:bg-primary-hover"
+              >
+                <ScanLine className="h-5 w-5" />
+              </button>
+            </div>
+            {scannerRecent && (
+              <p className="px-3 pb-3 text-[11px] font-bold text-muted">
+                آخر مسح: <span className="text-foreground">{scannerRecent}</span>
+              </p>
+            )}
+          </div>
+
           <EntityCombobox
             id="po-supplier"
             label="المورد"
@@ -466,89 +615,21 @@ export default function AdminPurchasesPage() {
               </div>
             </div>
             {lines.map((line) => (
-              <div key={line.key} className="rounded-xl border border-border bg-white p-3">
-                <div className="flex items-start justify-between gap-2">
-                  <AsyncProductCombobox
-                    id={`po-product-${line.key}`}
-                    label="الصنف"
-                    value={line.productId}
-                    selectedLabel={line.productName || undefined}
-                    placeholder="ابحث بالاسم…"
-                    required
-                    onChange={(product) => handleProductPicked(line.key, product)}
-                  />
-                  {line.unitName && line.unitMultiplier && line.unitMultiplier > 1 && (
-                    <span className="mt-6 shrink-0 rounded-md bg-primary/10 px-1.5 py-0.5 text-[10px] font-black text-primary">
-                      {line.unitName} (×{line.unitMultiplier})
-                    </span>
-                  )}
-                </div>
-                {(line.baseCost != null || line.basePrice != null) && (
-                  <p className="mt-1.5 flex flex-wrap gap-x-3 text-[11px] font-bold text-muted">
-                    {line.baseCost != null && <span>التكلفة الحالية: <span className="tabular-nums">{formatMoney(line.baseCost)}</span></span>}
-                    {line.basePrice != null && <span>سعر البيع الحالي: <span className="tabular-nums">{formatMoney(line.basePrice)}</span></span>}
-                  </p>
-                )}
-                <div className="mt-2 grid grid-cols-3 gap-2">
-                  <label className="block text-xs font-bold text-muted">
-                    الكمية
-                    <input
-                      type="number"
-                      min={1}
-                      value={line.quantity}
-                      onChange={(e) => updateLine(line.key, { quantity: e.target.value })}
-                      className="mt-1 w-full rounded-lg border border-border bg-white px-2 py-2 text-sm font-bold tabular-nums outline-none focus:border-primary"
-                    />
-                  </label>
-                  <label className="block text-xs font-bold text-muted">
-                    تكلفة الوحدة
-                    <input
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      inputMode="decimal"
-                      dir="ltr"
-                      value={line.unitCost}
-                      onChange={(e) => updateLine(line.key, { unitCost: e.target.value })}
-                      className="mt-1 w-full rounded-lg border border-border bg-white px-2 py-2 text-left text-sm font-bold tabular-nums outline-none focus:border-primary"
-                    />
-                  </label>
-                  <label className="block text-xs font-bold text-muted">
-                    سعر بيع جديد
-                    <input
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      inputMode="decimal"
-                      dir="ltr"
-                      placeholder={line.basePrice != null ? String(line.basePrice) : "اختياري"}
-                      value={line.newSellingPrice}
-                      onChange={(e) => updateLine(line.key, { newSellingPrice: e.target.value })}
-                      className="mt-1 w-full rounded-lg border border-border bg-white px-2 py-2 text-left text-sm font-bold tabular-nums outline-none focus:border-primary placeholder:text-muted/60"
-                    />
-                  </label>
-                </div>
-                <div className="mt-2 flex items-center justify-between">
-                  <p className="text-xs font-semibold text-muted">
-                    إجمالي البند:{" "}
-                    <span className="font-black tabular-nums text-foreground">
-                      {formatMoney(round2((parseInt(line.quantity, 10) || 0) * (parseFloat(line.unitCost) || 0)))}
-                    </span>
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => removeLine(line.key)}
-                    aria-label="حذف الصنف"
-                    className="grid h-8 w-8 place-items-center rounded-lg text-muted transition hover:bg-destructive/10 hover:text-destructive"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
-              </div>
+              <LineCard
+                key={line.key}
+                line={line}
+                units={productUnits[line.productId] ?? []}
+                onProductPicked={handleProductPicked}
+                onQtyChange={setQtyInUnit}
+                onUnitCostChange={setUnitCost}
+                onSellingChange={setSelling}
+                onSwitchUnit={switchLineUnit}
+                onRemove={removeLine}
+              />
             ))}
             {lines.length === 0 && (
               <p className="rounded-xl border border-dashed border-border px-3 py-4 text-center text-xs font-semibold text-muted">
-                لا بنود بعد — أضف صنفاً واحداً على الأقل
+                لا بنود بعد — امسح باركوداً أو أضف صنفاً واحداً على الأقل
               </p>
             )}
           </div>
@@ -671,11 +752,10 @@ export default function AdminPurchasesPage() {
                                 <button
                                   type="button"
                                   onClick={() => void handleReceive(o.id)}
-                                  disabled={receivingId === o.id}
                                   className="inline-flex items-center gap-1 rounded-lg bg-success px-2.5 py-1.5 text-xs font-black text-success-foreground transition hover:bg-success-hover disabled:opacity-40"
                                 >
                                   <CheckCircle2 className="h-3.5 w-3.5" />
-                                  {receivingId === o.id ? "جارٍ الاستلام…" : "استلام"}
+                                  استلام
                                 </button>
                               </>
                             )}

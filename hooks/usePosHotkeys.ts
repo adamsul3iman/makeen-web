@@ -86,8 +86,11 @@ export function usePosHotkeys(): void {
       // Ctrl+K / ⌘K (macOS): toggle the global smart product-search overlay.
       // Handled before the modifier guard below so the accelerator can fire
       // even though Cmd/Ctrl are normally rejected.
+      // The Arabic keyboard maps the K key position to `ن` (U+0646), so both
+      // characters must be accepted for the shortcut to work regardless of the
+      // active keyboard language (Ctrl+K in English, Ctrl+ن in Arabic).
       const isSearchAccel =
-        e.key.toLowerCase() === "k" &&
+        (e.key.toLowerCase() === "k" || e.key === "ن") &&
         (isMac ? e.metaKey && !e.ctrlKey && !e.altKey : e.ctrlKey && !e.metaKey && !e.altKey);
       if (isSearchAccel) {
         if (e.repeat) return;

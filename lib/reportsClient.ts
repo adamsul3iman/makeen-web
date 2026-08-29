@@ -10,21 +10,16 @@ import {
   mapSalesLedgerInvoice,
   mapSalesLedgerSummary,
 } from "./salesLedger";
-import { attachInputTax, profitabilityDelta } from "./profitability";
+import { attachInputTax, mapProfitabilitySnapshot, profitabilityDelta } from "./profitability";
 import type {
   ProfitabilityPeriod,
-  ProfitabilityPurchases,
   ProfitabilityResponse,
-  ProfitabilitySnapshot,
-  ProfitabilityStatementValues,
 } from "@/types/profitability.types";
 import type {
   SalesInvoiceDetail,
   SalesInvoicePaymentDetail,
   SalesLedgerOption,
   SalesLedgerResponse,
-  SalesLedgerSummary,
-  SalesTaxBreakdown,
 } from "@/types/salesLedger.types";
 import type {
   ReportsDataQualityIssue,
@@ -55,10 +50,6 @@ interface ProductRow {
   id: string;
   name: string;
   total_stock: number;
-}
-
-interface ProductCostRow {
-  id: string;
   cost_price: number | string | null;
 }
 
@@ -118,111 +109,9 @@ interface ProductAccumulator {
   stock: number | null;
 }
 
-interface LedgerInvoiceRow {
-  id: string;
-  sync_id: string;
-  branch_id: string | null;
-  terminal_id: string | null;
-  shift_id: string | null;
-  cashier_id: string | null;
-  cashier_name: string | null;
-  customer_id: string | null;
-  customer_name: string | null;
-  customer_phone: string | null;
-  payment_method: string;
-  subtotal: number | string;
-  tax: number | string;
-  discount: number | string;
-  delivery_fee: number | string;
-  total: number | string;
-  cash_amount: number | string;
-  visa_amount: number | string;
-  cliq_amount: number | string;
-  debt_amount: number | string;
-  item_count: number | string;
-  gross_profit: number | string;
-  is_return: boolean | null;
-  is_cancellation: boolean | null;
-  original_invoice_sync_id: string | null;
-  completed_at: string;
-  istd_uuid?: string | null;
-  istd_qr?: string | null;
-}
-
-interface LedgerDetailInvoiceRow extends LedgerInvoiceRow {
-  amount_paid: number | string | null;
-  change_amount: number | string | null;
-}
-
-interface LedgerItemRow {
-  id: string;
-  invoice_id: string;
-  line_no: number | string | null;
-  product_id: string | null;
-  product_name: string;
-  barcode: string;
-  variant_label: string;
-  unit_name: string;
-  qty: number | string;
-  multiplier: number | string | null;
-  unit_price: number | string;
-  line_subtotal: number | string;
-  line_discount: number | string;
-  net_total: number | string;
-  tax_percent: number | string;
-  tax_included: boolean | null;
-  tax_amount: number | string;
-  line_total: number | string;
-  cost_price: number | string;
-  cost_total: number | string;
-  gross_profit: number | string;
-}
-
-interface ProfitInvoiceRow {
-  id: string;
-  subtotal: number | string;
-  tax: number | string;
-  discount: number | string;
-  delivery_fee: number | string;
-  total: number | string;
-  is_return: boolean | null;
-  is_cancellation: boolean | null;
-  completed_at: string;
-}
-
-interface ProfitItemRow {
-  invoice_id: string;
-  qty: number | string;
-  net_total: number | string;
-  barcode: string;
-  product_id: string | null;
-  cost_price: number | string;
-  cost_total: number | string;
-}
-
-interface ProfitExpenseRow {
-  category: string;
-  amount: number | string;
-  created_at: string;
-}
-
-interface PurchaseValueRow {
-  total_amount: number | string | null;
-}
-
 const LEDGER_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const LEDGER_PAYMENT_METHODS = new Set(["CASH", "VISA", "SPLIT", "DEBT", "CLIQ", "UNKNOWN"]);
-
-const LEDGER_INVOICE_SELECT =
-  "id,sync_id,branch_id,terminal_id,shift_id,cashier_id,cashier_name,customer_id,customer_name,customer_phone,payment_method,subtotal,tax,discount,delivery_fee,total,cash_amount,visa_amount,cliq_amount,debt_amount,item_count,gross_profit,is_return,is_cancellation,original_invoice_sync_id,completed_at,istd_uuid,istd_qr";
-
-const LEDGER_ITEM_SELECT =
-  "id,invoice_id,line_no,product_id,product_name,barcode,variant_label,unit_name,qty,multiplier,unit_price,line_subtotal,line_discount,net_total,tax_percent,tax_included,tax_amount,line_total,cost_price,cost_total,gross_profit";
-
-function round3(value: number): number {
-  return Math.round((value + Number.EPSILON) * 1000) / 1000;
-}
 
 /**
  * Parses a report date parameter. Plain YYYY-MM-DD values are interpreted as
@@ -239,16 +128,6 @@ function parseReportDate(value: string | null | undefined, fallback: Date, endOf
 function optionalLedgerUuid(value: string | null | undefined): string | null {
   const clean = value?.trim() ?? "";
   return LEDGER_UUID_RE.test(clean) ? clean : null;
-}
-
-/** Amman calendar date (YYYY-MM-DD) of an instant — the reports' day bucket. */
-function ammanDayKey(date: Date): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Amman" }).format(date);
-}
-
-/** A sales-ledger line whose recorded cost is missing or zero blocks profit. */
-function isZeroCostLine(qty: unknown, costPrice: unknown): boolean {
-  return ledgerNumber(qty) !== 0 && ledgerNumber(costPrice) <= 0;
 }
 
 function round2(value: number): number {
@@ -365,27 +244,34 @@ async function fetchEvents(storeId: string, from: Date, to: Date): Promise<SyncE
   );
 }
 
-async function fetchProducts(storeId: string): Promise<ProductRow[]> {
-  return fetchPage<ProductRow>("products", "id,name,total_stock", storeId, (q) => q.order("name"));
+interface CatalogSnapshot {
+  products: ProductRow[];
+  barcodes: CatalogBarcodeRow[];
 }
 
-async function fetchBarcodes(storeId: string): Promise<CatalogBarcodeRow[]> {
+interface CachedCatalog {
+  snapshot: CatalogSnapshot;
+  fetchedAt: number;
+}
+
+/** Consolidated catalog (products + variant barcodes) in one place. Cost is read
+ *  directly off the products query, eliminating the former duplicate products
+ *  fetch that had to loop the whole table a second time. */
+const catalogCache = new Map<string, CachedCatalog>();
+/** Stale-while-revalidate window: reuse the catalog for this long so switching
+ *  date ranges or revisiting reports doesn't re-download a large catalog. */
+const CATALOG_TTL_MS = 5 * 60 * 1000;
+
+async function fetchProducts(storeId: string): Promise<ProductRow[]> {
+  return fetchPage<ProductRow>("products", "id,name,total_stock,cost_price", storeId, (q) => q.order("name"));
+}
+
+async function fetchBarcodes(storeId: string, products: ProductRow[]): Promise<CatalogBarcodeRow[]> {
   const variants = await fetchPage<VariantRow>("product_variants", "barcode,product_id,variant_label", storeId);
   if (variants.length === 0) return [];
 
-  const sb = getSupabaseBrowser();
-  if (!sb) return [];
-
   const costMap = new Map<string, number | string | null>();
-  for (let start = 0; ; start += PAGE_SIZE) {
-    const { data } = await sb
-      .from("products")
-      .select("id,cost_price")
-      .eq("store_id", storeId)
-      .range(start, start + PAGE_SIZE - 1);
-    for (const row of (data ?? []) as ProductCostRow[]) costMap.set(row.id, row.cost_price);
-    if (!data || data.length < PAGE_SIZE) break;
-  }
+  for (const product of products) costMap.set(product.id, product.cost_price ?? null);
 
   return variants.map((v) => ({
     barcode: v.barcode,
@@ -393,6 +279,20 @@ async function fetchBarcodes(storeId: string): Promise<CatalogBarcodeRow[]> {
     cost_price: costMap.get(v.product_id) ?? null,
     variantLabel: v.variant_label ?? "",
   }));
+}
+
+/** Returns the store's catalog snapshot, reusing a recent in-memory copy so a
+ *  single session doesn't re-download the full products/variants tables on every
+ *  range change or page remount. Serves both the dashboard and reports hub. */
+async function getCatalogSnapshot(storeId: string): Promise<CatalogSnapshot> {
+  const cached = catalogCache.get(storeId);
+  if (cached && Date.now() - cached.fetchedAt < CATALOG_TTL_MS) return cached.snapshot;
+
+  const products = await fetchProducts(storeId);
+  const barcodes = await fetchBarcodes(storeId, products);
+  const snapshot: CatalogSnapshot = { products, barcodes };
+  catalogCache.set(storeId, { snapshot, fetchedAt: Date.now() });
+  return snapshot;
 }
 
 async function fetchSalesInvoices(storeId: string, from: Date, to: Date): Promise<SalesInvoiceRow[]> {
@@ -652,7 +552,11 @@ export async function fetchReportsOverview(
   let products: ProductRow[];
   let barcodes: CatalogBarcodeRow[];
   try {
-    [products, barcodes] = await Promise.all([fetchProducts(storeId), fetchBarcodes(storeId)]);
+    // Single consolidated snapshot (products + barcodes) — cached in-memory so a
+    // session doesn't re-download the whole catalog per range/remount.
+    const snapshot = await getCatalogSnapshot(storeId);
+    products = snapshot.products;
+    barcodes = snapshot.barcodes;
   } catch {
     throw new Error("تعذر الاتصال بالبيانات — تحقق من صلاحيات الجدول (RLS)");
   }
@@ -1056,45 +960,73 @@ export async function fetchSalesInvoiceDetail(invoiceId: string): Promise<{ invo
 export async function fetchProfitabilityReport(params: {
   from: string;
   to: string;
-}): Promise<Record<string, unknown>> {
+}): Promise<ProfitabilityResponse> {
   const sb = getSupabaseBrowser();
   const storeId = getTenantStoreId();
   if (!sb || !storeId) throw new Error("Supabase غير مهيأة");
 
-  const { from, to } = params;
-
-  const { data: invoices, error } = await sb
-    .from("sales_invoices")
-    .select("id,total,gross_profit,tax,discount,is_return,created_at")
-    .eq("store_id", storeId)
-    .gte("created_at", from)
-    .lte("created_at", to + "T23:59:59.999+03:00");
-  if (error) throw new Error(error.message);
-
-  const rows = (invoices ?? []) as Record<string, unknown>[];
-  let totalRevenue = 0, totalCost = 0, totalProfit = 0, totalTax = 0, totalDiscounts = 0, totalReturns = 0;
-  for (const r of rows) {
-    const amt = Number(r.total) || 0;
-    if (r.is_return) {
-      totalReturns += Math.abs(amt);
-    } else {
-      totalRevenue += amt;
-    }
-    const profit = Number(r.gross_profit) || 0;
-    totalProfit += profit;
-    totalCost += (Number(r.total) || 0) - profit;
-    totalTax += Number(r.tax) || 0;
-    totalDiscounts += Number(r.discount) || 0;
+  const toDate = parseReportDate(params.to, new Date(), true);
+  const fromDate = parseReportDate(params.from, new Date(toDate.getTime() - 29 * DAY_MS));
+  if (fromDate > toDate) throw new Error("تاريخ البداية يجب أن يسبق تاريخ النهاية");
+  if (toDate.getTime() - fromDate.getTime() > 731 * DAY_MS) {
+    throw new Error("الفترة القصوى للتقرير سنتان");
   }
 
-  const netRevenue = totalRevenue - totalReturns;
+  // The whole income statement is computed inside the database (profitability_statement),
+  // so the current and previous equal-length periods are requested in ONE parallel batch —
+  // no sequential N+1, no client-side recomputation, no waterfalls.
+  const previousTo = fromDate.getTime() - 1;
+  const periodDays = Math.max(1, Math.round((toDate.getTime() - fromDate.getTime()) / DAY_MS) + 1);
+  const previousFrom = previousTo - (periodDays - 1) * DAY_MS;
+
+  const [currentResult, previousResult, taxResult] = await Promise.all([
+    sb.rpc("profitability_statement", {
+      p_store_id: storeId,
+      p_from: fromDate.toISOString(),
+      p_to: toDate.toISOString(),
+    }),
+    sb.rpc("profitability_statement", {
+      p_store_id: storeId,
+      p_from: new Date(previousFrom).toISOString(),
+      p_to: new Date(previousTo).toISOString(),
+    }),
+    sb.rpc("supplier_accounting_summary", {
+      p_store_id: storeId,
+      p_from: fromDate.toISOString(),
+      p_to: toDate.toISOString(),
+    }),
+  ]);
+  if (currentResult.error) throw new Error(currentResult.error.message);
+  if (previousResult.error) throw new Error(previousResult.error.message);
+  if (taxResult.error) throw new Error(taxResult.error.message);
+
+  const currentPeriod: ProfitabilityPeriod = {
+    from: fromDate.toISOString(),
+    to: toDate.toISOString(),
+    days: periodDays,
+  };
+  const previousPeriod: ProfitabilityPeriod = {
+    from: new Date(previousFrom).toISOString(),
+    to: new Date(previousTo).toISOString(),
+    days: periodDays,
+  };
+
+  let current = mapProfitabilitySnapshot(currentResult.data, currentPeriod);
+  const previous = mapProfitabilitySnapshot(previousResult.data, previousPeriod);
+
+  // Deductible input tax comes from the supplier ledger for the same window;
+  // attach it to the tax position so net payable reflects reclaimable VAT.
+  const taxRows =
+    taxResult.data && typeof taxResult.data === "object"
+      ? (taxResult.data as Record<string, unknown>)
+      : {};
+  const inputTax = typeof taxRows.inputTax === "number" ? taxRows.inputTax : 0;
+  if (inputTax > 0) current = attachInputTax(current, inputTax);
+
   return {
-    current: {
-      summary: { totalRevenue, totalCost, totalProfit, totalTax, totalDiscounts, totalReturns, netRevenue },
-      statement: { grossMargin: totalRevenue > 0 ? (totalProfit / totalRevenue * 100) : 0 },
-      quality: { profitReliable: totalCost > 0 },
-    },
-    previous: null,
+    current,
+    previous,
+    deltaPercent: profitabilityDelta(current, previous),
     generatedAt: new Date().toISOString(),
   };
 }

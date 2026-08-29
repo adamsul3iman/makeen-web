@@ -44,14 +44,24 @@ export default function ActionBar() {
         <button
           type="button"
           onClick={requestReturnModeToggle}
-          className={`flex h-11 flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 text-[13px] font-bold transition active:scale-[0.96] ${
+          aria-pressed={isReturnMode}
+          title={isReturnMode ? "وضع المرتجع مفعّل — اضغط للخروج (F6)" : "تفعيل وضع المرتجع (F6)"}
+          className={`relative flex h-11 flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 text-[13px] font-bold transition active:scale-[0.96] ${
             isReturnMode
-              ? "bg-destructive-soft text-destructive hover:bg-destructive/15"
+              ? "bg-destructive text-destructive-foreground shadow-card hover:bg-destructive-hover"
               : "text-muted hover:bg-surface-muted"
           }`}
         >
           <Undo2 className="h-3.5 w-3.5 shrink-0" />
           مرتجع
+          {isReturnMode && (
+            <span
+              aria-hidden
+              className="absolute -end-1.5 -top-1.5 grid h-4 w-4 place-items-center rounded-full bg-warning text-[10px] font-black text-white ring-2 ring-surface"
+            >
+              !
+            </span>
+          )}
         </button>
       )}
     </footer>

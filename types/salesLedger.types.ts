@@ -42,6 +42,8 @@ export interface SalesLedgerInvoice {
   id: string;
   syncId: string;
   reference: string;
+  /** Terminal-scoped receipt number minted at checkout (e.g. T1-0007). */
+  invoiceNumber?: string;
   branchId: string | null;
   branchName: string;
   terminalId: string | null;

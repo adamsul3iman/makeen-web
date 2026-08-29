@@ -13,6 +13,20 @@ export interface StaffRole {
 }
 
 /**
+ * Draft for creating / editing a role. `code` is required for creation and
+ * immutable on update (cashiers.role stores it textually). Editing a role goes
+ * through the proof-per-call RPCs (migration 097), never direct table DML.
+ */
+export interface RoleDraft {
+  id?: string;
+  code: string;
+  name: string;
+  description?: string;
+  capabilities: string[];
+  limits: Record<string, number | null>;
+}
+
+/**
  * Safe roster row — migration 078 removed browser access to credential
  * columns (pin_salt/pin_hash/password_hash/email). The list comes from the
  * `list_cashiers_public` SECURITY DEFINER RPC.

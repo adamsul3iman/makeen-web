@@ -40,10 +40,16 @@ interface OrdersState {
   settledOrders: LocalOrder[];
   settledLoading: boolean;
   settledError: string | null;
+  /** True when another page of settled history exists on the server. */
+  settledHasMore: boolean;
 
   hydrate: () => Promise<void>;
-  /** Refresh the closed/cancelled history from the server (guarded). */
-  fetchSettledHistory: (limit?: number) => Promise<void>;
+  /**
+   * Refresh the closed/cancelled history from the server (guarded).
+   * `mode: "more"` appends the next offset page and toggles `settledHasMore`;
+   * any other call resets to the first page.
+   */
+  fetchSettledHistory: (limit?: number, mode?: "reset" | "more") => Promise<void>;
   createOrder: (input: {
     items: LocalOrder["items"];
     invoiceDiscount: LocalOrder["invoiceDiscount"];
@@ -104,6 +110,7 @@ export const useOrdersStore = create<OrdersState>()((set, get) => ({
   settledOrders: [],
   settledLoading: false,
   settledError: null,
+  settledHasMore: false,
 
   hydrate: async () => {
     if (get().loading) return;
@@ -150,18 +157,24 @@ export const useOrdersStore = create<OrdersState>()((set, get) => ({
     void get().retryPending();
   },
 
-  fetchSettledHistory: async (limit = 100) => {
+  fetchSettledHistory: async (limit = 100, mode = "reset") => {
     if (get().settledLoading) return;
+    const offset = mode === "more" ? get().settledOrders.length : 0;
     set({ settledLoading: true });
-    const result = await fetchOrdersByStatus(["CLOSED", "CANCELLED"], limit);
+    const result = await fetchOrdersByStatus(["CLOSED", "CANCELLED"], limit, offset);
     if (result.ok) {
       // Feed the shared board/cache too — mergeServerOrders never clobbers
       // local pendingSync rows and keeps the persisted cache bounded.
       get().mergeServerOrders(result.orders);
+      const combined =
+        mode === "more" ? [...get().settledOrders, ...result.orders] : result.orders;
       set({
-        settledOrders: sortByUpdated(result.orders),
+        settledOrders: sortByUpdated(combined),
         settledError: null,
         settledLoading: false,
+        // A short page means we hit the end (offset pagination over
+        // `updated_at` never skips rows), so there is no more to load.
+        settledHasMore: result.orders.length === limit,
       });
     } else {
       // Offline fallback: surface whatever settled rows the cache holds so
@@ -170,6 +183,7 @@ export const useOrdersStore = create<OrdersState>()((set, get) => ({
         settledOrders: sortByUpdated(get().orders.filter((o) => o.status !== "OPEN")),
         settledError: result.error,
         settledLoading: false,
+        settledHasMore: false,
       });
     }
   },
