@@ -9,6 +9,7 @@
 import { renderToString } from "react-dom/server.browser";
 import ShiftPrintView from "@/components/admin/ShiftPrintView";
 import ThermalShiftPrintView from "@/components/admin/ThermalShiftPrintView";
+import { PRINT_FONT_FACES_CSS } from "@/lib/printFonts";
 import type { ShiftAudit } from "@/types/shifts.types";
 import type { CompletedInvoice } from "@/types/pos.types";
 import type { ReceiptTemplateConfig } from "@/types/printTemplates";
@@ -117,11 +118,15 @@ body{font-family:"Tahoma","Arial",sans-serif;font-size:10.5pt;line-height:1.45;d
 
 /* ── Wrapper builder ─────────────────────────────────────────────────────── */
 
-const PRINT_FONT_LINKS = [
-  '<link rel="preconnect" href="https://fonts.googleapis.com" />',
-  '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />',
-  '<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800;900&family=Cairo:wght@400;700;800;900&display=swap" rel="stylesheet" />',
-].join("\n");
+/**
+ * Self-contained `@font-face` rules (Tajawal + Cairo, Arabic & Latin subsets)
+ * embedded as base64 data-URIs. The hidden Electron print window and the
+ * browser iframe load a `data:`/isolated document that has NO network access
+ * to fonts.googleapis.com — the previous external <link> was the ~30s print
+ * stall on AirGapped/POS machines. Inlining the fonts makes every printed
+ * document 100% offline and byte-identical.
+ */
+const PRINT_FONT_EMBED = `<style>${PRINT_FONT_FACES_CSS}</style>`;
 
 function wrapHtml(title: string, activeCss: string, bodyHtml: string): string {
   return [
@@ -130,7 +135,7 @@ function wrapHtml(title: string, activeCss: string, bodyHtml: string): string {
     "<head>",
     '<meta charset="utf-8" />',
     `<title>${title}</title>`,
-    PRINT_FONT_LINKS,
+    PRINT_FONT_EMBED,
     `<style>${activeCss}</style>`,
     "</head>",
     "<body>",

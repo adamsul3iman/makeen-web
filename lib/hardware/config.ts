@@ -37,6 +37,7 @@ export function defaultHardwareHubConfig(
     drawer: {
       baudRate: legacy?.drawerBaudRate ?? 9600,
       pin: legacy?.drawerPin ?? 2,
+      comPort: "",
       triggers: {
         // Preserve the legacy auto-open behavior for cash sales by default.
         cashSale: legacy?.autoOpenDrawer ?? false,
@@ -88,6 +89,7 @@ function normalizeHardwareHubConfig(raw: unknown, legacy: DeviceHardwareSettings
       base.drawer.baudRate = d.baudRate;
     }
     if (d.pin === 2 || d.pin === 5) base.drawer.pin = d.pin;
+    if (typeof d.comPort === "string") base.drawer.comPort = d.comPort.trim();
     if (isRecord(d.triggers)) {
       const t = d.triggers;
       base.drawer.triggers = {

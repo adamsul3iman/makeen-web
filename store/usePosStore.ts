@@ -4044,13 +4044,18 @@ export const usePosStore = create<PosStore>()(
       },
 
       openDrawer: async () => {
-        // Wiring (baud/pin) comes from the central Hardware Hub config; the
+        // Wiring (baud/pin/com) comes from the central Hardware Hub config; the
         // licensed manual-open action just pulses the already-authorized port.
-        const hub = loadHardwareHubConfig(get().activeTerminalId);
-        const opened = await openCashDrawer({
-          baudRate: hub.drawer.baudRate,
-          pin: hub.drawer.pin,
-        });
+        const terminalId = get().activeTerminalId;
+        const hub = loadHardwareHubConfig(terminalId);
+        const opened = await openCashDrawer(
+          {
+            baudRate: hub.drawer.baudRate,
+            pin: hub.drawer.pin,
+            comPort: hub.drawer.comPort || undefined,
+          },
+          terminalId,
+        );
         set({
           notice: opened
             ? { message: "تم فتح الدرج", tone: "success" }

@@ -22,6 +22,19 @@ interface ElectronPrintAPI {
     printerKind?: PrinterKind;
   }): Promise<{ success: boolean; error?: string }>;
   getPrinters(): Promise<Array<{ name: string; isDefault?: boolean }>>;
+  /** Enumerate serial COM devices (Electron raw hardware path). */
+  listComPorts(): Promise<string[]>;
+  /** Raw ESC/POS drawer pulse on a COM device. */
+  kickDrawer(payload: {
+    comPort: string;
+    baudRate: number;
+    pin: number;
+  }): Promise<{ ok: boolean; error?: string }>;
+  /** Raw ESC @ write test on a COM device. */
+  initComPort(payload: {
+    comPort: string;
+    baudRate: number;
+  }): Promise<{ ok: boolean; error?: string }>;
 }
 
 declare global {

@@ -21,7 +21,9 @@ import {
   forgetCashDrawer,
   getCashDrawerStatus,
   hasCashDrawer,
+  listCashDrawerPorts,
   openCashDrawer,
+  testCashDrawerPort,
   type CashDrawerStatus,
 } from "@/lib/cashDrawer";
 import {
@@ -175,6 +177,8 @@ export default function DevicesPage() {
   });
   const [drawerBusy, setDrawerBusy] = useState(false);
   const [drawerMessage, setDrawerMessage] = useState("");
+  const [drawerPorts, setDrawerPorts] = useState<string[]>([]);
+  const [drawerPortsLoading, setDrawerPortsLoading] = useState(false);
 
   const [scannerInput, setScannerInput] = useState("");
   const [scannerResult, setScannerResult] = useState<{ code: string; duration: number } | null>(null);
@@ -184,12 +188,33 @@ export default function DevicesPage() {
     setPrinterMessages((prev) => ({ ...prev, [slot]: msg }));
   }, []);
 
-  const refreshDrawer = useCallback(async () => setDrawerStatus(await getCashDrawerStatus()), []);
+  const refreshDrawer = useCallback(async () => {
+    setDrawerStatus(await getCashDrawerStatus(activeTerminalId));
+  }, [activeTerminalId]);
+
+  const refreshDrawerPorts = useCallback(async () => {
+    setDrawerPortsLoading(true);
+    const ports = await listCashDrawerPorts();
+    setDrawerPorts(ports.sort((a, b) => a.localeCompare(b, undefined, { numeric: true })));
+    setDrawerPortsLoading(false);
+  }, []);
 
   useEffect(() => {
     let active = true;
-    void getCashDrawerStatus().then((status) => {
+    void getCashDrawerStatus(activeTerminalId).then((status) => {
       if (active) setDrawerStatus(status);
+    });
+    return () => {
+      active = false;
+    };
+  }, [activeTerminalId]);
+
+  useEffect(() => {
+    if (!isElectron()) return;
+    let active = true;
+    void listCashDrawerPorts().then((ports) => {
+      if (!active) return;
+      setDrawerPorts(ports.sort((a, b) => a.localeCompare(b, undefined, { numeric: true })));
     });
     return () => {
       active = false;
@@ -238,7 +263,14 @@ export default function DevicesPage() {
   const connectDrawer = async () => {
     setDrawerBusy(true);
     setDrawerMessage("");
-    const connected = await connectCashDrawer({ baudRate: hub.drawer.baudRate, pin: hub.drawer.pin });
+    const connected = await connectCashDrawer(
+      {
+        baudRate: hub.drawer.baudRate,
+        pin: hub.drawer.pin,
+        comPort: hub.drawer.comPort || undefined,
+      },
+      activeTerminalId,
+    );
     setDrawerMessage(connected ? "تم ربط منفذ الدرج" : "لم يتم اختيار منفذ صالح");
     await refreshDrawer();
     setDrawerBusy(false);
@@ -246,15 +278,40 @@ export default function DevicesPage() {
 
   const testDrawer = async () => {
     setDrawerBusy(true);
-    const opened = await openCashDrawer({ baudRate: hub.drawer.baudRate, pin: hub.drawer.pin });
+    const opened = await openCashDrawer(
+      {
+        baudRate: hub.drawer.baudRate,
+        pin: hub.drawer.pin,
+        comPort: hub.drawer.comPort || undefined,
+      },
+      activeTerminalId,
+    );
     setDrawerMessage(opened ? "تم إرسال نبضة فتح الدرج" : "تعذر الوصول إلى الدرج");
+    await refreshDrawer();
+    setDrawerBusy(false);
+  };
+
+  const testInitWrite = async () => {
+    setDrawerBusy(true);
+    const written = await testCashDrawerPort(
+      {
+        baudRate: hub.drawer.baudRate,
+        pin: hub.drawer.pin,
+        comPort: hub.drawer.comPort || undefined,
+      },
+      activeTerminalId,
+    );
+    setDrawerMessage(written ? "تمت كتابة أمر التهيئة (ESC @) إلى المنفذ" : "تعذر الكتابة على المنفذ");
     await refreshDrawer();
     setDrawerBusy(false);
   };
 
   const disconnectDrawer = async () => {
     setDrawerBusy(true);
-    await forgetCashDrawer();
+    await forgetCashDrawer(activeTerminalId);
+    if (isElectron()) {
+      updateConfig((d) => ({ ...d, drawer: { ...d.drawer, comPort: "" } }));
+    }
     setDrawerMessage("تم نسيان منفذ الدرج من هذا الجهاز");
     await refreshDrawer();
     setDrawerBusy(false);
@@ -450,15 +507,48 @@ export default function DevicesPage() {
             </h2>
             <p className={`mt-2 flex items-center gap-2 text-sm font-bold ${drawerStatus.selected ? "text-green-700" : "text-muted"}`}>
               <StatusDot ok={drawerStatus.selected} />
-              {!drawerStatus.supported
-                ? "Web Serial غير متاح في هذا المتصفح"
-                : drawerStatus.selected
-                  ? "منفذ الدرج مربوط"
-                  : "لا يوجد منفذ مربوط"}
+              {isElectron()
+                ? drawerStatus.selected
+                  ? `منفذ الدرج مربوط (${drawerStatus.comPort ?? hub.drawer.comPort})`
+                  : "لا يوجد منفذ مربوط — اختر منفذ COM"
+                : !drawerStatus.supported
+                  ? "Web Serial غير متاح في هذا المتصفح"
+                  : drawerStatus.selected
+                    ? "منفذ الدرج مربوط"
+                    : "لا يوجد منفذ مربوط"}
             </p>
           </div>
 
           <div className="grid w-full min-w-0 gap-4 sm:grid-cols-2 lg:max-w-[560px] lg:flex-1">
+            {isElectron() ? (
+              <label className="block text-xs font-black text-muted sm:col-span-2">
+                منفذ COM (الدرج)
+                <div className="mt-2 flex items-center gap-2">
+                  <select
+                    value={hub.drawer.comPort || ""}
+                    onChange={(event) =>
+                      updateConfig((d) => ({ ...d, drawer: { ...d.drawer, comPort: event.target.value } }))
+                    }
+                    className="h-10 w-full rounded-lg border border-border bg-white px-3 text-sm font-black text-foreground"
+                  >
+                    <option value="">— اختر منفذ —</option>
+                    {drawerPorts.map((port) => (
+                      <option key={port} value={port}>{port}</option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => void refreshDrawerPorts()}
+                    disabled={drawerPortsLoading}
+                    className="inline-flex h-10 shrink-0 items-center gap-2 rounded-lg border border-border bg-white px-3 text-xs font-black text-muted hover:bg-surface-muted disabled:opacity-40"
+                  >
+                    <RotateCcw className="h-4 w-4" />
+                    {drawerPortsLoading ? "..." : "تحديث"}
+                  </button>
+                </div>
+              </label>
+            ) : null}
+
             <label className="block text-xs font-black text-muted">
               سرعة المنفذ
               <select
@@ -541,7 +631,11 @@ export default function DevicesPage() {
         <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border pt-4">
           <button
             type="button"
-            disabled={!drawerStatus.supported || drawerBusy}
+            disabled={
+              !drawerStatus.supported ||
+              drawerBusy ||
+              (isElectron() && !hub.drawer.comPort)
+            }
             onClick={() => void connectDrawer()}
             className="inline-flex h-10 items-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-black text-white disabled:opacity-40"
           >
@@ -555,6 +649,16 @@ export default function DevicesPage() {
           >
             <Cable className="h-4 w-4" /> اختبار فتح الدرج
           </button>
+          {isElectron() ? (
+            <button
+              type="button"
+              disabled={!drawerStatus.selected || drawerBusy}
+              onClick={() => void testInitWrite()}
+              className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-600 px-4 text-sm font-black text-white disabled:opacity-40"
+            >
+              <Printer className="h-4 w-4" /> اختبار الكتابة (ESC @)
+            </button>
+          ) : null}
           <button
             type="button"
             disabled={!drawerStatus.selected || drawerBusy}

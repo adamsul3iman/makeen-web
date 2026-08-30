@@ -1,7 +1,12 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFile } from "node:child_process";
+import { open, write, close } from "node:fs/promises";
+import { promisify } from "node:util";
 
 import electron from "electron";
+
+const execFileAsync = promisify(execFile);
 import serve from "electron-serve";
 import electronUpdater from "electron-updater";
 
@@ -232,6 +237,182 @@ ipcMain.handle("print:getPrinters", async (event) => {
     if (!sender) return [];
     return await sender.getPrintersAsync();
   } catch {
+    return [];
+  }
+});
+
+// ── Raw ESC/POS hardware IPC ────────────────────────────────────────
+// These channels write raw command bytes DIRECTLY to a serial (COM) device
+// with Node's fs — completely bypassing the Windows graphical print spooler.
+// A cash drawer is a dumb electromechanical solenoid: it lives on the RS-232
+// / USB-serial drawer port (or the thermal printer's serial I/O), NOT on the
+// windows spooler. Routing the ESC/POS kick through webContents.print is what
+// produced the "gibberish" symptom (the spooler rasterizes the byte buffer as
+// text), so raw hardware pulses ALWAYS go through these dedicated channels and
+// NEVER through the HTML document pipeline in print:silent.
+//
+// Web Serial (navigator.serial in the renderer) is not wired into this build,
+// which is exactly why the drawer never kicked in the desktop app: the browser
+// Web Serial API, when exposed, ALSO requires a session.setDevicePermission
+// handler + native chooser in Electron. These wired COM channels are the
+// dependency-free, chooser-free drawer path for the packaged app.
+
+const COM_MAX_SCAN = 256;
+const RAW_HARDWARE_TIMEOUT_MS = 2_000;
+
+/** Normalize an operator-entered port ("COM3", "com3", "\\\\.\\COM3") to a
+ *  Windows device path ("\\\\.\\COM3"). Returns null for anything else. */
+function normalizeComPortName(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  const device = /^\\\\\.\\COM\d{1,3}$/i.test(trimmed)
+    ? trimmed
+    : null;
+  const bare = device ?? (/^COM\d{1,3}$/i.test(trimmed) ? `\\\\.\\${trimmed.toUpperCase()}` : null);
+  return bare;
+}
+
+let lastComBaudKey = "";
+
+/** Set the port's baud via the Windows `mode` command, but only when it
+ *  differs from the last applied value for that port. This mirrors the
+ *  baudRate option the old Web Serial path passed to port.open(). Non-fatal:
+ *  a driver that already holds the serial DCB just gets opened as-is. */
+async function ensureComBaud(comPort, baudRate) {
+  const baud = Number(baudRate);
+  if (!Number.isInteger(baud) || baud <= 0) return;
+  const key = `${comPort.toUpperCase()}:${baud}`;
+  if (key === lastComBaudKey) return;
+  try {
+    await execFileAsync(
+      "cmd.exe",
+      ["/c", `mode ${comPort.toUpperCase()}: baud=${baud} parity=n data=8 stop=1`],
+      { windowsHide: true, timeout: RAW_HARDWARE_TIMEOUT_MS },
+    );
+    lastComBaudKey = key;
+  } catch {
+    // The serial DCB belongs to whoever owns the port today; not fatal.
+  }
+}
+
+/** Open the COM device, write the full command buffer, close. Throws on
+ *  failure so callers can wrap with a timeout. */
+async function writeRawCom(comPort, bytes, baudRate) {
+  const device = normalizeComPortName(comPort);
+  if (!device) throw new Error(`Invalid COM port: ${comPort}`);
+  await ensureComBaud(comPort, baudRate);
+  let fd = null;
+  try {
+    fd = await open(device, "r+");
+    const buf = Buffer.from(bytes);
+    let offset = 0;
+    while (offset < buf.length) {
+      const { bytesWritten } = await write(fd, buf, offset, buf.length - offset, null);
+      offset += bytesWritten;
+    }
+  } finally {
+    if (fd) {
+      try {
+        await close(fd);
+      } catch {
+        // Port may already be gone (unplugged mid-write).
+      }
+    }
+  }
+}
+
+/** Enumerate serial ports by probing \\\\.\\COM1..\\\\.\\COM256 with the file
+ *  system. A port that opens exists and is free; EBUSY/EACCES means it exists
+ *  but is held by another driver; ENXIO/ENOENT means no such device. */
+async function listComPorts() {
+  const ports = [];
+  for (let i = 1; i <= COM_MAX_SCAN; i += 1) {
+    const name = `COM${i}`;
+    const device = `\\\\.\\${name}`;
+    let fd = null;
+    try {
+      fd = await open(device, "r+");
+      ports.push(name);
+    } catch (err) {
+      if (err && (err.code === "EBUSY" || err.code === "EACCES")) {
+        ports.push(name);
+      }
+    } finally {
+      if (fd) {
+        try {
+          await close(fd);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+  return ports;
+}
+
+function withRawTimeout(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("RAW_HARDWARE_TIMED_OUT")), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (reason) => {
+        clearTimeout(timer);
+        reject(reason);
+      },
+    );
+  });
+}
+
+/** Raw ESC/POS drawer kick: ESC p m t1 t2 — the SAME 5-byte pulse the browser
+ *  Web Serial path sends. pin 2 → connector 0, pin 5 → connector 1. */
+ipcMain.handle("hardware:drawer", async (_event, opts) => {
+  const { comPort, baudRate, pin } = opts ?? {};
+  if (!normalizeComPortName(comPort)) {
+    return { ok: false, error: "INVALID_COM_PORT" };
+  }
+  const connector = pin === 5 ? 1 : 0;
+  const pulse = [0x1b, 0x70, connector, 0x19, 0xfa];
+  try {
+    await withRawTimeout(
+      writeRawCom(comPort, pulse, baudRate),
+      RAW_HARDWARE_TIMEOUT_MS,
+    );
+    return { ok: true };
+  } catch (err) {
+    console.error("[electron] Drawer kick failed:", err);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+/** Raw write test: ESC @ (printer initialize). Harmless anywhere on a POS
+ *  printer's serial I/O — resets the printer state without feeding paper or
+ *  opening the drawer. Lets an operator validate the COM path in the Devices
+ *  page before relying on it in the live checkout lane. */
+ipcMain.handle("hardware:initPort", async (_event, opts) => {
+  const { comPort, baudRate } = opts ?? {};
+  if (!normalizeComPortName(comPort)) {
+    return { ok: false, error: "INVALID_COM_PORT" };
+  }
+  try {
+    await withRawTimeout(
+      writeRawCom(comPort, [0x1b, 0x40], baudRate),
+      RAW_HARDWARE_TIMEOUT_MS,
+    );
+    return { ok: true };
+  } catch (err) {
+    console.error("[electron] COM init write failed:", err);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
+
+ipcMain.handle("hardware:listPorts", async () => {
+  try {
+    return await withRawTimeout(listComPorts(), RAW_HARDWARE_TIMEOUT_MS);
+  } catch (err) {
+    console.error("[electron] COM port enumeration failed:", err);
     return [];
   }
 });

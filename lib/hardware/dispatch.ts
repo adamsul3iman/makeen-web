@@ -174,12 +174,17 @@ export async function dispatchPrintJob(
   let drawerOk = true;
   if (kickDrawer) {
     kickedDrawer = true;
-    // Pulse the drawer from the hub's own wiring config (baud/pin); no chooser
-    // is ever opened here — the port is authorized once in the Hardware Hub UI.
-    drawerOk = await openCashDrawer({
-      baudRate: config.drawer.baudRate,
-      pin: config.drawer.pin,
-    });
+    // Pulse the drawer from the hub's own wiring config (com/baud/pin); no
+    // chooser is ever opened here — the port is authorized once in the
+    // Hardware Hub UI (Electron picks the COM, browser a Web Serial port).
+    drawerOk = await openCashDrawer(
+      {
+        baudRate: config.drawer.baudRate,
+        pin: config.drawer.pin,
+        comPort: config.drawer.comPort || undefined,
+      },
+      opts.terminalId,
+    );
   }
 
   // ── Print routing ───────────────────────────────────────────────────

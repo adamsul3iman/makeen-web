@@ -36,6 +36,7 @@
     "deploy:phase5:local": "tsx scripts/deploy_phase5.ts --local-only",
     "verify:db": "tsx scripts/check_db.ts",
     "export:usb": "node export-to-usb.js",
+    "fonts:build": "node scripts/build-print-fonts.mjs",
     "electron:dev": "electron electron/main.js",
     "clean:electron": "node scripts/clean-electron.mjs",
     "electron:build": "node scripts/electron-build.mjs",

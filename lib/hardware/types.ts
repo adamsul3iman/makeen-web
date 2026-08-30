@@ -64,6 +64,13 @@ export interface DrawerConfig {
   baudRate: 9600 | 19200 | 38400 | 115200;
   /** ESC/POS connector pin (2 = connector 0, 5 = connector 1). */
   pin: 2 | 5;
+  /**
+   * Windows serial COM device (e.g. "COM3") the drawer is wired to in the
+   * Electron desktop build. Empty in browser builds where Web Serial owns the
+   * transport. Persisted per terminal in the hub config so dispatch and the
+   * manual-open action pulse the exact port.
+   */
+  comPort: string;
   triggers: DrawerTriggers;
 }
 
