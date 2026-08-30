@@ -5,7 +5,7 @@ import {
 import { loadHardwareHubConfig } from "@/lib/hardware/config";
 
 const PORT_KEY = "pos_cash_drawer_port_v2";
-const COM_KEY = "pos_cash_drawer_com_port_v2";
+const SHARE_KEY = "pos_cash_drawer_share_name_v2";
 
 interface SerialPortInfoLike {
   usbVendorId?: number;
@@ -31,8 +31,8 @@ export interface CashDrawerStatus {
   supported: boolean;
   authorizedPortCount: number;
   selected: boolean;
-  /** Windows COM device the drawer is wired to (Electron raw path only). */
-  comPort?: string;
+  /** Windows printer share name the drawer is wired through (Electron only). */
+  shareName?: string;
 }
 
 let selectedPort: SerialPortLike | null = null;
@@ -64,31 +64,33 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 const DRAWER_OPEN_TIMEOUT_MS = 2_000;
 const DRAWER_WRITE_TIMEOUT_MS = 1_500;
 
-// ── Electron raw COM path ─────────────────────────────────────────
-// In the packaged desktop app the drawer lives on a Windows serial COM port
-// and is pulsed with Node fs writes in electron/main.js (hardware:drawer) —
-// it never touches webContents.print and never goes near the graphics
-// spooler. These helpers route to that channel when window.electronAPI is
-// present (isElectron), and the browser Web Serial path otherwise.
+// ── Electron raw UNC-share path ────────────────────────────────────
+// In the packaged desktop app the drawer lives behind the thermal printer's
+// Windows USB virtual port ("USB001") and is pulsed by writing the raw ESC/POS
+// bytes to the printer's Windows SHARE (\\\\127.0.0.1\\<ShareName>) with Node
+// fs in electron/main.js (hardware:drawer) — it never touches webContents.print
+// and never goes near the graphics rendering spooler. These helpers route to
+// that channel when window.electronAPI is present (isElectron), and the browser
+// Web Serial path otherwise.
 
-export function drawerComPortStorageKey(scope?: string | null): string {
+export function drawerShareNameStorageKey(scope?: string | null): string {
   const term = scope?.trim() || "unbound";
-  return `${COM_KEY}:${term}`;
+  return `${SHARE_KEY}:${term}`;
 }
 
-function getSavedComPort(scope?: string | null): string | null {
+function getSavedShareName(scope?: string | null): string | null {
   if (typeof window === "undefined") return null;
-  return window.localStorage.getItem(drawerComPortStorageKey(scope)) || null;
+  return window.localStorage.getItem(drawerShareNameStorageKey(scope)) || null;
 }
 
-function saveComPort(comPort: string, scope?: string | null): void {
+function saveShareName(shareName: string, scope?: string | null): void {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(drawerComPortStorageKey(scope), comPort);
+  window.localStorage.setItem(drawerShareNameStorageKey(scope), shareName);
 }
 
-function clearSavedComPort(scope?: string | null): void {
+function clearSavedShareName(scope?: string | null): void {
   if (typeof window === "undefined") return;
-  window.localStorage.removeItem(drawerComPortStorageKey(scope));
+  window.localStorage.removeItem(drawerShareNameStorageKey(scope));
 }
 
 /** ESC/POS drawer pulse for a given connector pin (2 → connector 0, 5 → 1).
@@ -101,7 +103,7 @@ export function buildDrawerPulse(pin: 2 | 5): Uint8Array {
 
 /**
  * True when a drawer transport is available in the current host.
- *  - Electron desktop → raw COM IPC is always wired (supported).
+ *  - Electron desktop → raw UNC-share IPC is always wired (supported).
  *  - Browser → Web Serial must exist (Chrome/Edge).
  */
 export function hasCashDrawer(): boolean {
@@ -109,14 +111,14 @@ export function hasCashDrawer(): boolean {
   return Boolean(serialApi());
 }
 
-async function resolveComPort(options: DrawerSettingsLike, scope?: string | null): Promise<string | null> {
+async function resolveShareName(options: DrawerSettingsLike, scope?: string | null): Promise<string | null> {
   const explicit =
-    "comPort" in options && options.comPort ? String(options.comPort).trim() : "";
+    "shareName" in options && options.shareName ? String(options.shareName).trim() : "";
   if (explicit) {
-    saveComPort(explicit, scope);
+    saveShareName(explicit, scope);
     return explicit;
   }
-  return getSavedComPort(scope);
+  return getSavedShareName(scope);
 }
 
 function serialApi(): NavigatorWithSerial["serial"] | undefined {
@@ -181,22 +183,22 @@ export async function getCashDrawerStatus(scope?: string | null): Promise<CashDr
   }
 }
 
-/** True when the raw COM IPC bridge is available (Electron desktop). */
+/** True when the raw UNC-share IPC bridge is available (Electron desktop). */
 function isElectronDrawer(): boolean {
   return typeof window !== "undefined" && Boolean(window.electronAPI);
 }
 
-/** Electron drawer status derived from the per-terminal hub config comPort
+/** Electron drawer status derived from the per-terminal hub config shareName
  *  (the single source of truth), falling back to the localStorage seat. */
 function electronCashDrawerStatus(scope?: string | null): CashDrawerStatus {
   const hub = loadHardwareHubConfig(scope);
-  const hubPort = hub.drawer.comPort?.trim() ?? "";
-  const comPort = hubPort || getSavedComPort(scope) || "";
+  const hubShare = hub.drawer.shareName?.trim() ?? "";
+  const shareName = hubShare || getSavedShareName(scope) || "";
   return {
     supported: true,
-    authorizedPortCount: comPort ? 1 : 0,
-    selected: Boolean(comPort),
-    comPort: comPort || undefined,
+    authorizedPortCount: shareName ? 1 : 0,
+    selected: Boolean(shareName),
+    shareName: shareName || undefined,
   };
 }
 
@@ -205,8 +207,9 @@ function electronCashDrawerStatus(scope?: string | null): CashDrawerStatus {
 export interface DrawerPulseOptions {
   baudRate: DeviceHardwareSettings["drawerBaudRate"];
   pin: DeviceHardwareSettings["drawerPin"];
-  /** Windows COM device (e.g. "COM3") for the Electron raw path. */
-  comPort?: string;
+  /** Windows printer share name (e.g. "MAKEENRECEIPT") for the Electron raw
+   *  UNC-share path. Empty in browser builds where Web Serial owns the port. */
+  shareName?: string;
 }
 
 type DrawerSettingsLike = DeviceHardwareSettings | DrawerPulseOptions;
@@ -219,41 +222,23 @@ function drawerPin(options: DrawerSettingsLike): DeviceHardwareSettings["drawerP
   return "drawerPin" in options ? options.drawerPin : options.pin;
 }
 
-/** Enumerate serial ports available to the drawer:
- *  Electron → hardware:listPorts (COM1..COM256 probe), browser → []. */
-export async function listCashDrawerPorts(): Promise<string[]> {
-  if (isElectronDrawer() && window.electronAPI) {
-    try {
-      const ports = (await window.electronAPI.listComPorts()) ?? [];
-      return ports.map((p) => p.trim()).filter(Boolean);
-    } catch (err) {
-      console.error("Cash drawer COM enumeration failed:", err);
-      return [];
-    }
-  }
-  return [];
-}
-
 /**
- * Raw write test (ESC @ initialize) on the drawer's serial device — Electron
- * only. Harmless on any POS printer serial I/O: resets printer state without
- * feeding paper or opening the drawer, so the operator can validate the COM
- * path from the Devices page without a sale. Returns true on a clean write.
+ * Raw write test (ESC @ initialize) on the drawer's shared Windows printer —
+ * Electron only. Harmless on any POS printer: resets printer state without
+ * feeding paper or opening the drawer, so the operator can validate the UNC
+ * share path from the Devices page without a sale. Returns true on a clean write.
  */
 export async function testCashDrawerPort(
   options: DrawerSettingsLike = loadDeviceHardwareSettings(),
   scope?: string | null,
 ): Promise<boolean> {
   if (!isElectronDrawer() || !window.electronAPI) return false;
-  const comPort = await resolveComPort(options, scope);
-  if (!comPort) return false;
+  const shareName = await resolveShareName(options, scope);
+  if (!shareName) return false;
   try {
-    const result = await window.electronAPI.initComPort({
-      comPort,
-      baudRate: drawerBaud(options),
-    });
+    const result = await window.electronAPI.initPrinter({ shareName });
     if (result?.ok) {
-      saveComPort(comPort, scope);
+      saveShareName(shareName, scope);
       return true;
     }
     console.error("Cash drawer init write rejected:", result?.error);
@@ -265,8 +250,9 @@ export async function testCashDrawerPort(
 }
 
 /**
- * Bind the drawer transport. Electron → persists the chosen COM port in
- * localStorage (no OS chooser; the operator picks from listCashDrawerPorts).
+ * Bind the drawer transport. Electron → persists the chosen Windows printer
+ * share name in the hub config / localStorage (no OS chooser; the operator
+ * types the share name in the Devices page).
  * Browser → opens the native Web Serial chooser.
  */
 export async function connectCashDrawer(
@@ -274,10 +260,10 @@ export async function connectCashDrawer(
   scope?: string | null,
 ): Promise<boolean> {
   if (isElectronDrawer()) {
-    const comPort =
-      "comPort" in settings && settings.comPort ? String(settings.comPort).trim() : "";
-    if (!comPort) return false;
-    saveComPort(comPort, scope);
+    const shareName =
+      "shareName" in settings && settings.shareName ? String(settings.shareName).trim() : "";
+    if (!shareName) return false;
+    saveShareName(shareName, scope);
     return true;
   }
   const serial = serialApi();
@@ -298,7 +284,7 @@ export async function connectCashDrawer(
 
 export async function forgetCashDrawer(scope?: string | null): Promise<void> {
   if (isElectronDrawer()) {
-    clearSavedComPort(scope);
+    clearSavedShareName(scope);
     return;
   }
   const port = selectedPort;
@@ -318,8 +304,8 @@ export async function forgetCashDrawer(scope?: string | null): Promise<void> {
  * `{ baudRate, pin }` pair, so the Hardware Hub can drive it from its own
  * drawer config without fabricating unrelated settings.
  *
- * Electron → sends the exact ESC/POS bytes to the Windows COM device through
- * the raw hardware:drawer IPC (never the print spooler).
+ * Electron → sends the exact ESC/POS bytes to the shared Windows printer UNC
+ * path through the raw hardware:drawer IPC (never the print spooler renderer).
  * Browser → writes the same bytes over Web Serial.
  */
 export async function openCashDrawer(
@@ -329,16 +315,15 @@ export async function openCashDrawer(
   const baudRate = drawerBaud(options);
   const pin = drawerPin(options);
   if (isElectronDrawer() && window.electronAPI) {
-    const comPort = await resolveComPort(options, scope);
-    if (!comPort) return false;
+    const shareName = await resolveShareName(options, scope);
+    if (!shareName) return false;
     try {
       const result = await window.electronAPI.kickDrawer({
-        comPort,
-        baudRate,
+        shareName,
         pin,
       });
       if (result?.ok) {
-        saveComPort(comPort, scope);
+        saveShareName(shareName, scope);
         return true;
       }
       console.error("Cash drawer kick rejected:", result?.error);

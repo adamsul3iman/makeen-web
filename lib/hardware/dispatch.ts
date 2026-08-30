@@ -174,14 +174,15 @@ export async function dispatchPrintJob(
   let drawerOk = true;
   if (kickDrawer) {
     kickedDrawer = true;
-    // Pulse the drawer from the hub's own wiring config (com/baud/pin); no
-    // chooser is ever opened here — the port is authorized once in the
-    // Hardware Hub UI (Electron picks the COM, browser a Web Serial port).
+    // Pulse the drawer from the hub's own wiring config (share/baud/pin); no
+    // chooser is ever opened here — the share name is authorized once in the
+    // Hardware Hub UI (Electron types the Windows printer share, browser a
+    // Web Serial port).
     drawerOk = await openCashDrawer(
       {
         baudRate: config.drawer.baudRate,
         pin: config.drawer.pin,
-        comPort: config.drawer.comPort || undefined,
+        shareName: config.drawer.shareName || undefined,
       },
       opts.terminalId,
     );

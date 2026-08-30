@@ -65,12 +65,14 @@ export interface DrawerConfig {
   /** ESC/POS connector pin (2 = connector 0, 5 = connector 1). */
   pin: 2 | 5;
   /**
-   * Windows serial COM device (e.g. "COM3") the drawer is wired to in the
-   * Electron desktop build. Empty in browser builds where Web Serial owns the
-   * transport. Persisted per terminal in the hub config so dispatch and the
-   * manual-open action pulse the exact port.
+   * Windows printer SHARE name (e.g. "MAKEENRECEIPT") the drawer pulses through
+   * in the Electron desktop build — the thermal printer is a USB virtual port
+   * ("USB001"), so raw ESC/POS bytes are written to \\\\127.0.0.1\\<shareName>.
+   * Empty in browser builds where Web Serial owns the transport. Persisted per
+   * terminal in the hub config so dispatch and the manual-open action pulse the
+   * exact share.
    */
-  comPort: string;
+  shareName: string;
   triggers: DrawerTriggers;
 }
 

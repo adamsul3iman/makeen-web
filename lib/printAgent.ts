@@ -22,18 +22,14 @@ interface ElectronPrintAPI {
     printerKind?: PrinterKind;
   }): Promise<{ success: boolean; error?: string }>;
   getPrinters(): Promise<Array<{ name: string; isDefault?: boolean }>>;
-  /** Enumerate serial COM devices (Electron raw hardware path). */
-  listComPorts(): Promise<string[]>;
-  /** Raw ESC/POS drawer pulse on a COM device. */
+  /** Raw ESC/POS drawer pulse on a shared Windows printer (UNC share path). */
   kickDrawer(payload: {
-    comPort: string;
-    baudRate: number;
+    shareName: string;
     pin: number;
   }): Promise<{ ok: boolean; error?: string }>;
-  /** Raw ESC @ write test on a COM device. */
-  initComPort(payload: {
-    comPort: string;
-    baudRate: number;
+  /** Raw ESC @ write test on a shared Windows printer (UNC share path). */
+  initPrinter(payload: {
+    shareName: string;
   }): Promise<{ ok: boolean; error?: string }>;
 }
 

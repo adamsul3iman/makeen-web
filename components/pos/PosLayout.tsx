@@ -444,7 +444,7 @@ export default function PosLayout() {
           const opened = await openCashDrawer({
             baudRate: cfg.drawer.baudRate,
             pin: cfg.drawer.pin,
-            comPort: cfg.drawer.comPort || undefined,
+            shareName: cfg.drawer.shareName || undefined,
           });
           if (opened) incrementDrawerOpenCount();
           else if (!cancelled) notifyReceiptFailure("تم البيع، لكن تعذر فتح درج النقد");
@@ -463,7 +463,7 @@ export default function PosLayout() {
         const opened = await openCashDrawer({
           baudRate: cfg.drawer.baudRate,
           pin: cfg.drawer.pin,
-          comPort: cfg.drawer.comPort || undefined,
+          shareName: cfg.drawer.shareName || undefined,
         });
         if (opened) incrementDrawerOpenCount();
         else if (!cancelled) notifyReceiptFailure("تم البيع، لكن تعذر فتح درج النقد");

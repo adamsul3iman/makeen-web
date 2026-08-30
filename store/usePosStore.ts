@@ -4044,15 +4044,15 @@ export const usePosStore = create<PosStore>()(
       },
 
       openDrawer: async () => {
-        // Wiring (baud/pin/com) comes from the central Hardware Hub config; the
-        // licensed manual-open action just pulses the already-authorized port.
+        // Wiring (baud/pin/share) comes from the central Hardware Hub config; the
+        // licensed manual-open action just pulses the already-authorized share.
         const terminalId = get().activeTerminalId;
         const hub = loadHardwareHubConfig(terminalId);
         const opened = await openCashDrawer(
           {
             baudRate: hub.drawer.baudRate,
             pin: hub.drawer.pin,
-            comPort: hub.drawer.comPort || undefined,
+            shareName: hub.drawer.shareName || undefined,
           },
           terminalId,
         );

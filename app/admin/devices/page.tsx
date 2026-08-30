@@ -21,7 +21,6 @@ import {
   forgetCashDrawer,
   getCashDrawerStatus,
   hasCashDrawer,
-  listCashDrawerPorts,
   openCashDrawer,
   testCashDrawerPort,
   type CashDrawerStatus,
@@ -177,8 +176,6 @@ export default function DevicesPage() {
   });
   const [drawerBusy, setDrawerBusy] = useState(false);
   const [drawerMessage, setDrawerMessage] = useState("");
-  const [drawerPorts, setDrawerPorts] = useState<string[]>([]);
-  const [drawerPortsLoading, setDrawerPortsLoading] = useState(false);
 
   const [scannerInput, setScannerInput] = useState("");
   const [scannerResult, setScannerResult] = useState<{ code: string; duration: number } | null>(null);
@@ -192,13 +189,6 @@ export default function DevicesPage() {
     setDrawerStatus(await getCashDrawerStatus(activeTerminalId));
   }, [activeTerminalId]);
 
-  const refreshDrawerPorts = useCallback(async () => {
-    setDrawerPortsLoading(true);
-    const ports = await listCashDrawerPorts();
-    setDrawerPorts(ports.sort((a, b) => a.localeCompare(b, undefined, { numeric: true })));
-    setDrawerPortsLoading(false);
-  }, []);
-
   useEffect(() => {
     let active = true;
     void getCashDrawerStatus(activeTerminalId).then((status) => {
@@ -208,18 +198,6 @@ export default function DevicesPage() {
       active = false;
     };
   }, [activeTerminalId]);
-
-  useEffect(() => {
-    if (!isElectron()) return;
-    let active = true;
-    void listCashDrawerPorts().then((ports) => {
-      if (!active) return;
-      setDrawerPorts(ports.sort((a, b) => a.localeCompare(b, undefined, { numeric: true })));
-    });
-    return () => {
-      active = false;
-    };
-  }, []);
 
   const loadPrinters = useCallback(async () => {
     if (!isElectron()) {
@@ -267,11 +245,11 @@ export default function DevicesPage() {
       {
         baudRate: hub.drawer.baudRate,
         pin: hub.drawer.pin,
-        comPort: hub.drawer.comPort || undefined,
+        shareName: hub.drawer.shareName || undefined,
       },
       activeTerminalId,
     );
-    setDrawerMessage(connected ? "تم ربط منفذ الدرج" : "لم يتم اختيار منفذ صالح");
+    setDrawerMessage(connected ? "تم حفظ اسم مشاركة الدرج" : "لم يتم إدخال اسم مشاركة صالح");
     await refreshDrawer();
     setDrawerBusy(false);
   };
@@ -282,7 +260,7 @@ export default function DevicesPage() {
       {
         baudRate: hub.drawer.baudRate,
         pin: hub.drawer.pin,
-        comPort: hub.drawer.comPort || undefined,
+        shareName: hub.drawer.shareName || undefined,
       },
       activeTerminalId,
     );
@@ -297,11 +275,11 @@ export default function DevicesPage() {
       {
         baudRate: hub.drawer.baudRate,
         pin: hub.drawer.pin,
-        comPort: hub.drawer.comPort || undefined,
+        shareName: hub.drawer.shareName || undefined,
       },
       activeTerminalId,
     );
-    setDrawerMessage(written ? "تمت كتابة أمر التهيئة (ESC @) إلى المنفذ" : "تعذر الكتابة على المنفذ");
+    setDrawerMessage(written ? "تمت كتابة أمر التهيئة (ESC @) إلى الطابعة المشتركة" : "تعذر الكتابة على الطابعة المشتركة");
     await refreshDrawer();
     setDrawerBusy(false);
   };
@@ -310,9 +288,9 @@ export default function DevicesPage() {
     setDrawerBusy(true);
     await forgetCashDrawer(activeTerminalId);
     if (isElectron()) {
-      updateConfig((d) => ({ ...d, drawer: { ...d.drawer, comPort: "" } }));
+      updateConfig((d) => ({ ...d, drawer: { ...d.drawer, shareName: "" } }));
     }
-    setDrawerMessage("تم نسيان منفذ الدرج من هذا الجهاز");
+    setDrawerMessage("تم نسيان اسم مشاركة الدرج من هذا الجهاز");
     await refreshDrawer();
     setDrawerBusy(false);
   };
@@ -509,8 +487,8 @@ export default function DevicesPage() {
               <StatusDot ok={drawerStatus.selected} />
               {isElectron()
                 ? drawerStatus.selected
-                  ? `منفذ الدرج مربوط (${drawerStatus.comPort ?? hub.drawer.comPort})`
-                  : "لا يوجد منفذ مربوط — اختر منفذ COM"
+                  ? `الدرج مربوط عبر المشاركة (${drawerStatus.shareName ?? hub.drawer.shareName})`
+                  : "لا يوجد اسم مشاركة — أدخل اسم مشاركة الطابعة في Windows"
                 : !drawerStatus.supported
                   ? "Web Serial غير متاح في هذا المتصفح"
                   : drawerStatus.selected
@@ -522,30 +500,30 @@ export default function DevicesPage() {
           <div className="grid w-full min-w-0 gap-4 sm:grid-cols-2 lg:max-w-[560px] lg:flex-1">
             {isElectron() ? (
               <label className="block text-xs font-black text-muted sm:col-span-2">
-                منفذ COM (الدرج)
-                <div className="mt-2 flex items-center gap-2">
-                  <select
-                    value={hub.drawer.comPort || ""}
-                    onChange={(event) =>
-                      updateConfig((d) => ({ ...d, drawer: { ...d.drawer, comPort: event.target.value } }))
-                    }
-                    className="h-10 w-full rounded-lg border border-border bg-white px-3 text-sm font-black text-foreground"
-                  >
-                    <option value="">— اختر منفذ —</option>
-                    {drawerPorts.map((port) => (
-                      <option key={port} value={port}>{port}</option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    onClick={() => void refreshDrawerPorts()}
-                    disabled={drawerPortsLoading}
-                    className="inline-flex h-10 shrink-0 items-center gap-2 rounded-lg border border-border bg-white px-3 text-xs font-black text-muted hover:bg-surface-muted disabled:opacity-40"
-                  >
-                    <RotateCcw className="h-4 w-4" />
-                    {drawerPortsLoading ? "..." : "تحديث"}
-                  </button>
-                </div>
+                اسم مشاركة الطابعة في Windows (الدرج)
+                <input
+                  type="text"
+                  value={hub.drawer.shareName}
+                  onChange={(event) =>
+                    updateConfig((d) => ({ ...d, drawer: { ...d.drawer, shareName: event.target.value } }))
+                  }
+                  placeholder="مثال: MAKEENRECEIPT"
+                  autoComplete="off"
+                  spellCheck={false}
+                  dir="ltr"
+                  className="mt-2 h-10 w-full rounded-lg border border-border bg-white px-3 font-mono text-sm font-black text-foreground"
+                />
+                <span className="mt-1 block text-[11px] font-medium leading-relaxed text-muted">
+                  لتشغيل درج النقد، شارك الطابعة الحرارية في ويندوز ثم اكتب اسم المشاركة هنا.
+                  الخطوات: إعدادات ويندوز ← الأجهزة والطابعات ← يمين-كلك على الطابعة الحرارية ←
+                  «خصائص الطابعة» ← تبويب «المشاركة» ← فعّل «مشاركة هذه الطابعة» واكتب اسم
+                  المشاركة (بدون مسافات، مثال: MAKEENRECEIPT). بعد ذلك، برجاء التأكد من أن
+                  «معالج الطباعة» (Print Processor) في تبويب «خيارات متقدمة» مضبوط على
+                  <span className="font-mono"> winprint </span>
+                  ونوع البيانات
+                  <span className="font-mono"> RAW </span>
+                  لضمان مرور أوامر ESC/POS كما هي.
+                </span>
               </label>
             ) : null}
 
@@ -634,12 +612,12 @@ export default function DevicesPage() {
             disabled={
               !drawerStatus.supported ||
               drawerBusy ||
-              (isElectron() && !hub.drawer.comPort)
+              (isElectron() && !hub.drawer.shareName)
             }
             onClick={() => void connectDrawer()}
             className="inline-flex h-10 items-center gap-2 rounded-lg bg-blue-600 px-4 text-sm font-black text-white disabled:opacity-40"
           >
-            <Usb className="h-4 w-4" /> ربط منفذ
+            <Usb className="h-4 w-4" /> حفظ اسم المشاركة
           </button>
           <button
             type="button"
@@ -665,7 +643,7 @@ export default function DevicesPage() {
             onClick={() => void disconnectDrawer()}
             className="inline-flex h-10 items-center gap-2 rounded-lg border border-border bg-white px-4 text-sm font-black text-muted disabled:opacity-40"
           >
-            <Unplug className="h-4 w-4" /> نسيان المنفذ
+            <Unplug className="h-4 w-4" /> نسيان اسم المشاركة
           </button>
           {drawerMessage ? <span className="text-sm font-bold text-muted">{drawerMessage}</span> : null}
         </div>

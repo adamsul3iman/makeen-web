@@ -19,28 +19,21 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   /**
-   * List serial COM ports (\\\\.\\COM1..COM256) reachable over the file
-   * system. Raw ESC/POS devices (cash drawer / thermal serial I/O) are
-   * driven through these ports, NOT through the Windows print spooler.
+   * Raw ESC/POS drawer kick on a shared Windows printer. Returns { ok, error? }.
+   * Writes the pulse bytes directly to \\\\127.0.0.1\\<shareName> through the
+   * spooler's RAW datatype — never rides print:silent (that path rasterizes
+   * bytes as text → gibberish).
    */
-  listComPorts() {
-    return ipcRenderer.invoke("hardware:listPorts");
+  kickDrawer({ shareName, pin }) {
+    return ipcRenderer.invoke("hardware:drawer", { shareName, pin });
   },
 
   /**
-   * Raw ESC/POS drawer kick on a serial port. Returns { ok, error? }.
-   * Bypasses the print spooler entirely — never rides print:silent.
+   * Raw write test (ESC @ printer initialize) on a shared Windows printer.
+   * Lets an operator validate the UNC share path from the Devices page without
+   * touching the spooler renderer or opening the drawer.
    */
-  kickDrawer({ comPort, baudRate, pin }) {
-    return ipcRenderer.invoke("hardware:drawer", { comPort, baudRate, pin });
-  },
-
-  /**
-   * Raw write test (ESC @ printer initialize) on a serial port. Lets an
-   * operator validate the COM path from the Devices page without touching
-   * the spooler or opening the drawer.
-   */
-  initComPort({ comPort, baudRate }) {
-    return ipcRenderer.invoke("hardware:initPort", { comPort, baudRate });
+  initPrinter({ shareName }) {
+    return ipcRenderer.invoke("hardware:initPrinter", { shareName });
   },
 });
