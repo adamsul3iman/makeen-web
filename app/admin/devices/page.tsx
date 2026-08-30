@@ -1,20 +1,21 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Barcode,
   Cable,
   CheckCircle2,
   CircleX,
+  FileText,
   Printer,
   RotateCcw,
   ScanLine,
+  Tags,
   Unplug,
   Usb,
   Volume2,
   VolumeX,
 } from "lucide-react";
-import ThermalReceipt from "@/components/pos/ThermalReceipt";
 import {
   connectCashDrawer,
   forgetCashDrawer,
@@ -28,10 +29,14 @@ import {
   type DeviceHardwareSettings,
 } from "@/lib/deviceHardware";
 import { useDeviceHardware } from "@/hooks/useDeviceHardware";
+import { useHardwareHub } from "@/hooks/useHardwareHub";
+import { dispatchPrintJob } from "@/lib/hardware/dispatch";
+import { buildSlotTestHtml } from "@/lib/hardware/diagnostics";
+import { ALL_SLOTS, SLOT_A4, SLOT_LABEL, SLOT_RECEIPT, type SlotId } from "@/lib/hardware/slots";
+import type { PrinterSlot, SlotKind } from "@/lib/hardware/types";
 import { usePosStore } from "@/store/usePosStore";
-import type { CompletedInvoice } from "@/types/pos.types";
 import { playPosSound, type PosSoundCue } from "@/lib/posSound";
-import { captureReceiptHtml, isElectron, smartPrint } from "@/lib/printAgent";
+import { isElectron } from "@/lib/printAgent";
 
 const BAUD_RATES: DeviceHardwareSettings["drawerBaudRate"][] = [
   9600,
@@ -53,11 +58,7 @@ function SoundSettingsSection({
   onUpdate: (patch: Partial<DeviceHardwareSettings>) => void;
   onTest: (cue: PosSoundCue) => void;
 }) {
-  const tests: Array<{
-    cue: PosSoundCue;
-    label: string;
-    className: string;
-  }> = [
+  const tests: Array<{ cue: PosSoundCue; label: string; className: string }> = [
     {
       cue: "SCAN_ACCEPTED",
       label: "اختبار المسح",
@@ -105,8 +106,7 @@ function SoundSettingsSection({
 
           <label className={`rounded-lg border border-border px-4 py-3 ${settings.soundEnabled ? "" : "opacity-50"}`}>
             <span className="flex items-center justify-between text-xs font-black text-muted">
-              مستوى الصوت
-              <span className="font-mono text-foreground" dir="ltr">{settings.soundVolume}%</span>
+              مستوى الصوت <span className="font-mono" dir="ltr">{settings.soundVolume}%</span>
             </span>
             <input
               type="range"
@@ -139,11 +139,35 @@ function SoundSettingsSection({
   );
 }
 
+const SLOT_META: Record<SlotId, { icon: typeof Printer; desc: string }> = {
+  [SLOT_RECEIPT]: { icon: Printer, desc: "الطابعة الحرارية 80/58mm لإيصالات نقطة البيع" },
+  [SLOT_LABEL]: { icon: Tags, desc: "طابعة الملصقات والباركود للملصقات اللاصقة" },
+  [SLOT_A4]: { icon: FileText, desc: "طابعة الأوراق A4 للتقارير والفواتير الرسمية" },
+};
+
+const TEST_INTENT: Record<SlotId, Parameters<typeof dispatchPrintJob>[0]> = {
+  [SLOT_RECEIPT]: "TEST_RECEIPT",
+  [SLOT_LABEL]: "TEST_LABEL",
+  [SLOT_A4]: "TEST_A4",
+};
+
 export default function DevicesPage() {
   const activeTerminalId = usePosStore((state) => state.activeTerminalId);
   const terminals = usePosStore((state) => state.terminals);
   const terminal = (terminals ?? []).find((item) => item.id === activeTerminalId);
   const { settings, updateSettings, resetSettings } = useDeviceHardware(activeTerminalId);
+  const {
+    config: hub,
+    printers,
+    updateConfig,
+    resetConfig,
+    refreshPrinters,
+  } = useHardwareHub(activeTerminalId);
+
+  const [printersLoading, setPrintersLoading] = useState(false);
+  const [printerMessages, setPrinterMessages] = useState<Record<string, string>>({});
+  const [testBusy, setTestBusy] = useState<Record<string, boolean>>({});
+
   const [drawerStatus, setDrawerStatus] = useState<CashDrawerStatus>({
     supported: hasCashDrawer(),
     authorizedPortCount: 0,
@@ -151,43 +175,16 @@ export default function DevicesPage() {
   });
   const [drawerBusy, setDrawerBusy] = useState(false);
   const [drawerMessage, setDrawerMessage] = useState("");
+
   const [scannerInput, setScannerInput] = useState("");
   const [scannerResult, setScannerResult] = useState<{ code: string; duration: number } | null>(null);
   const scanStartedAt = useRef(0);
-  const [printers, setPrinters] = useState<Array<{ name: string; isDefault: boolean }>>([]);
-  const [printersLoading, setPrintersLoading] = useState(false);
-  const [printerMessage, setPrinterMessage] = useState("");
-  const [testPrintBusy, setTestPrintBusy] = useState(false);
 
-  const testInvoice = useMemo<CompletedInvoice>(() => ({
-    syncId: "TEST-RECEIPT-2026",
-    shiftId: "TEST-SHIFT",
-    items: [
-      {
-        productId: "test-product",
-        name: "منتج تجريبي",
-        barcode: "6251234567890",
-        qty: 2,
-        unitName: "حبة",
-        unitPrice: 1,
-        lineTotal: 2.32,
-        taxPercent: 16,
-        taxIncluded: false,
-      },
-    ],
-    subtotal: 2,
-    tax: 0.32,
-    discount: 0,
-    total: 2.32,
-    paymentMethod: "CASH",
-    amountPaid: 5,
-    change: 2.68,
-    cashierName: "اختبار الطابعة",
-    terminalId: activeTerminalId ?? undefined,
-    completed_at: new Date().toISOString(),
-  }), [activeTerminalId]);
+  const setSlotMessage = useCallback((slot: SlotId, msg: string) => {
+    setPrinterMessages((prev) => ({ ...prev, [slot]: msg }));
+  }, []);
 
-  const refreshDrawer = async () => setDrawerStatus(await getCashDrawerStatus());
+  const refreshDrawer = useCallback(async () => setDrawerStatus(await getCashDrawerStatus()), []);
 
   useEffect(() => {
     let active = true;
@@ -199,10 +196,49 @@ export default function DevicesPage() {
     };
   }, []);
 
+  const loadPrinters = useCallback(async () => {
+    if (!isElectron()) {
+      setPrintersLoading(false);
+      return;
+    }
+    setPrintersLoading(true);
+    await refreshPrinters();
+    setPrintersLoading(false);
+  }, [refreshPrinters]);
+
+  useEffect(() => {
+    const id = requestAnimationFrame(() => void loadPrinters());
+    return () => cancelAnimationFrame(id);
+  }, [loadPrinters]);
+
+  const testSlot = async (slot: PrinterSlot) => {
+    if (testBusy[slot.id]) return;
+    setTestBusy((prev) => ({ ...prev, [slot.id]: true }));
+    setSlotMessage(slot.id, "");
+    try {
+      const html = buildSlotTestHtml(slot.kind);
+      const result = await dispatchPrintJob(TEST_INTENT[slot.id as SlotId], {
+        html,
+        terminalId: activeTerminalId ?? "",
+        jobType: slot.kind === "A4" ? "Z_REPORT" : "RECEIPT",
+      });
+      setSlotMessage(
+        slot.id,
+        result.printed
+          ? "تم إرسال صفحة الاختبار إلى الطابعة"
+          : "تعذر الطباعة — تحقق من الطابعة ثم أعد المحاولة",
+      );
+    } catch {
+      setSlotMessage(slot.id, "تعذر الطباعة — خطأ غير متوقع");
+    } finally {
+      setTestBusy((prev) => ({ ...prev, [slot.id]: false }));
+    }
+  };
+
   const connectDrawer = async () => {
     setDrawerBusy(true);
     setDrawerMessage("");
-    const connected = await connectCashDrawer(settings);
+    const connected = await connectCashDrawer({ baudRate: hub.drawer.baudRate, pin: hub.drawer.pin });
     setDrawerMessage(connected ? "تم ربط منفذ الدرج" : "لم يتم اختيار منفذ صالح");
     await refreshDrawer();
     setDrawerBusy(false);
@@ -210,7 +246,7 @@ export default function DevicesPage() {
 
   const testDrawer = async () => {
     setDrawerBusy(true);
-    const opened = await openCashDrawer(settings);
+    const opened = await openCashDrawer({ baudRate: hub.drawer.baudRate, pin: hub.drawer.pin });
     setDrawerMessage(opened ? "تم إرسال نبضة فتح الدرج" : "تعذر الوصول إلى الدرج");
     await refreshDrawer();
     setDrawerBusy(false);
@@ -234,15 +270,10 @@ export default function DevicesPage() {
     const code = scannerInput.trim();
     if (!code) return;
     event.preventDefault();
-    setScannerResult({
-      code,
-      duration: Math.max(0, Math.round(performance.now() - scanStartedAt.current)),
-    });
+    setScannerResult({ code, duration: Math.max(0, Math.round(performance.now() - scanStartedAt.current)) });
     setScannerInput("");
     scanStartedAt.current = 0;
-    if (settings.soundEnabled) {
-      void playPosSound("SCAN_ACCEPTED", settings.soundVolume);
-    }
+    if (settings.soundEnabled) void playPosSound("SCAN_ACCEPTED", settings.soundVolume);
   };
 
   const testSound = (cue: PosSoundCue) => {
@@ -250,62 +281,7 @@ export default function DevicesPage() {
     void playPosSound(cue, settings.soundVolume);
   };
 
-  const refreshPrinters = useCallback(async () => {
-    if (!isElectron()) {
-      setPrinters([]);
-      setPrintersLoading(false);
-      return;
-    }
-    setPrintersLoading(true);
-    try {
-      const list = await window.electronAPI?.getPrinters();
-      setPrinters(
-        (list ?? []).map((p) => ({ name: p.name, isDefault: Boolean(p.isDefault) })),
-      );
-    } catch {
-      setPrinters([]);
-    } finally {
-      setPrintersLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    // Defer to a microtask so no setState runs synchronously inside the effect
-    // body (React lint guard) — the printer fetch itself is async anyway.
-    const id = requestAnimationFrame(() => void refreshPrinters());
-    return () => cancelAnimationFrame(id);
-  }, [refreshPrinters]);
-
-  const testPrint = async () => {
-    if (testPrintBusy) return;
-    setTestPrintBusy(true);
-    setPrinterMessage("");
-    if (isElectron()) {
-      const html = captureReceiptHtml();
-      if (!html) {
-        setPrinterMessage("تعذر التقاط الإيصال التجريبي من الصفحة");
-        setTestPrintBusy(false);
-        return;
-      }
-      const printed = await smartPrint({
-        terminalId: activeTerminalId ?? "",
-        jobType: "RECEIPT",
-        renderedHtml: html,
-        printerKind: "THERMAL",
-        printerName: settings.receiptPrinterName || undefined,
-      });
-      setPrinterMessage(
-        printed
-          ? "تم إرسال الإيصال التجريبي إلى الطابعة"
-          : "تعذر الطباعة الصامتة — تحقق من الطابعة ثم أعد المحاولة",
-      );
-    } else {
-      // Plain browser: native dialog is the only silent-free option.
-      setPrinterMessage("خارج تطبيق سطح المكتب تُطبع عبر نافذة المستعرض");
-      window.print();
-    }
-    setTestPrintBusy(false);
-  };
+  const slotKindLabel = (kind: SlotKind) => (kind === "THERMAL" ? "حرارية" : kind === "LABEL" ? "ملصقات" : "A4");
 
   return (
     <div className="mx-auto max-w-5xl space-y-5">
@@ -313,7 +289,7 @@ export default function DevicesPage() {
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-black text-foreground">
             <Usb className="h-6 w-6 text-primary" />
-            الأجهزة والطباعة
+            مركز الأجهزة والطابعات
           </h1>
           <p className="mt-1 text-sm font-bold text-muted">
             {terminal?.name ?? "هذا الجهاز"} • إعدادات محلية لهذه الطرفية
@@ -322,8 +298,9 @@ export default function DevicesPage() {
         <button
           type="button"
           onClick={() => {
+            resetConfig();
             resetSettings();
-            setDrawerMessage("عادت إعدادات الجهاز إلى القيم الافتراضية");
+            setDrawerMessage("عادت إعدادات الأجهزة إلى القيم الافتراضية");
           }}
           className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-border bg-white px-4 text-sm font-black text-muted hover:bg-surface-muted"
         >
@@ -332,111 +309,138 @@ export default function DevicesPage() {
         </button>
       </header>
 
-      <SoundSettingsSection
-        settings={settings}
-        onUpdate={updateSettings}
-        onTest={testSound}
-      />
+      <SoundSettingsSection settings={settings} onUpdate={updateSettings} onTest={testSound} />
 
+      {/* ── Printer slots ─────────────────────────────────────────────── */}
       <section className="rounded-lg border border-border bg-white p-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div>
-            <h2 className="flex items-center gap-2 text-base font-black">
-              <Printer className="h-5 w-5 text-blue-600" />
-              الطابعة الحرارية
-            </h2>
-            <p className="mt-2 flex items-center gap-2 text-sm font-bold text-green-700">
-              <StatusDot ok /> الطباعة عبر نظام التشغيل جاهزة
-            </p>
-            {isElectron() ? (
-              <div className="mt-4">
-                <div className="flex items-end gap-2">
+        <div className="flex items-center gap-2">
+          <Printer className="h-5 w-5 text-blue-600" />
+          <h2 className="text-base font-black">منافذ الطابعات (Slots)</h2>
+        </div>
+        <p className="mt-1 text-sm font-bold text-muted">
+          خصّص كل منفذ لطابعة فعلية. تُوجَّه الأوامر تلقائياً إلى المنفذ حسب نوع العملية.
+        </p>
+
+        <div className="mt-5 grid gap-4">
+          {ALL_SLOTS.map((slotId) => {
+            const slot = hub.slots[slotId];
+            if (!slot) return null;
+            const meta = SLOT_META[slotId];
+            const Icon = meta.icon;
+            return (
+              <div key={slotId} className="rounded-xl border border-border bg-surface-muted/40 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <Icon className="h-5 w-5 text-blue-600" />
+                    <div>
+                      <div className="flex items-center gap-2 text-sm font-black">
+                        {slot.nameAr}
+                        <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-black text-muted" dir="ltr">
+                          {slotId}
+                        </span>
+                        <span className="rounded bg-violet-50 px-1.5 py-0.5 text-[10px] font-black text-violet-700">
+                          {slotKindLabel(slot.kind)}
+                        </span>
+                      </div>
+                      <p className="text-xs font-bold text-muted">{meta.desc}</p>
+                    </div>
+                  </div>
+                  <label className="flex items-center gap-2 text-xs font-black text-muted">
+                    مفعّل
+                    <input
+                      type="checkbox"
+                      checked={slot.enabled}
+                      onChange={(event) => updateConfig((d) => ({
+                        ...d,
+                        slots: { ...d.slots, [slotId]: { ...d.slots[slotId], enabled: event.target.checked } },
+                      }))}
+                      className="h-5 w-5 accent-blue-600"
+                    />
+                  </label>
+                </div>
+
+                <div className="mt-3 flex flex-wrap items-end gap-3">
                   <label className="block min-w-0 flex-1 text-xs font-black text-muted">
                     الطابعة المختارة
-                    <div className="relative mt-2">
-                      <select
-                        value={settings.receiptPrinterName ?? ""}
-                        onChange={(event) =>
-                          updateSettings({ receiptPrinterName: event.target.value })
-                        }
-                        className="h-10 w-full appearance-none rounded-lg border border-border bg-white px-3 text-sm font-black text-foreground"
-                      >
-                        <option value="">تلقائي (حسب نوع الطابعة)</option>
-                        {printers.map((p) => (
-                          <option key={p.name} value={p.name}>
-                            {p.name}
-                            {p.isDefault ? " (افتراضي)" : ""}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
+                    <select
+                      value={slot.deviceName}
+                      onChange={(event) => updateConfig((d) => ({
+                        ...d,
+                        slots: { ...d.slots, [slotId]: { ...d.slots[slotId], deviceName: event.target.value } },
+                      }))}
+                      className="mt-1.5 h-10 w-full appearance-none rounded-lg border border-border bg-white px-3 text-sm font-black text-foreground"
+                    >
+                      <option value="">تلقائي (حسب نوع الطابعة)</option>
+                      {printers.map((p) => (
+                        <option key={p.name} value={p.name}>
+                          {p.name}
+                          {p.isDefault ? " (افتراضي)" : ""}
+                        </option>
+                      ))}
+                    </select>
                   </label>
+
+                  {slotId === SLOT_RECEIPT && (
+                    <div>
+                      <p className="mb-1.5 text-xs font-black text-muted">عرض الورق</p>
+                      <div className="grid grid-cols-2 rounded-lg bg-surface-muted p-1">
+                        {([80, 58] as const).map((width) => (
+                          <button
+                            key={width}
+                            type="button"
+                            onClick={() => updateConfig((d) => ({
+                              ...d,
+                              slots: { ...d.slots, [slotId]: { ...d.slots[slotId], paperWidth: width } },
+                            }))}
+                            className={`h-9 rounded-md text-sm font-black ${slot.paperWidth === width ? "bg-white text-primary shadow-sm" : "text-muted"}`}
+                          >
+                            {width}mm
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   <button
                     type="button"
-                    onClick={() => void refreshPrinters()}
-                    disabled={printersLoading}
-                    className="inline-flex h-10 items-center gap-2 rounded-lg border border-border bg-white px-3 text-xs font-black text-muted hover:bg-surface-muted disabled:opacity-40"
+                    disabled={testBusy[slotId]}
+                    onClick={() => void testSlot(slot)}
+                    className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-900 px-4 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-40"
                   >
-                    <RotateCcw className="h-4 w-4" />
-                    تحديث
+                    <Printer className="h-4 w-4" />
+                    {testBusy[slotId] ? "جارٍ الطباعة…" : "اختبار الطباعة"}
                   </button>
                 </div>
-                <p className="mt-2 text-xs font-bold text-muted">
-                  {printersLoading
-                    ? "جاري جلب الطابعات…"
-                    : printers.length === 0
-                      ? "لم يتم العثور على طابعات مثبتة"
-                      : `تم العثور على ${printers.length} طابعة ملحقة بالنظام`}
-                </p>
-              </div>
-            ) : null}
-          </div>
 
-          <div className="grid w-full min-w-0 gap-4 sm:grid-cols-2 lg:max-w-[560px] lg:flex-1">
-            <div>
-              <p className="mb-2 text-xs font-black text-muted">عرض الورق</p>
-              <div className="grid grid-cols-2 rounded-lg bg-surface-muted p-1">
-                {([80, 58] as const).map((width) => (
-                  <button
-                    key={width}
-                    type="button"
-                    onClick={() => updateSettings({ receiptWidth: width })}
-                    className={`h-9 rounded-md text-sm font-black ${settings.receiptWidth === width ? "bg-white text-primary shadow-sm" : "text-muted"}`}
-                  >
-                    {width}mm
-                  </button>
-                ))}
+                {printerMessages[slotId] ? (
+                  <p className="mt-2 text-sm font-bold text-muted">{printerMessages[slotId]}</p>
+                ) : null}
               </div>
-            </div>
-
-            <label className="flex min-h-16 items-center justify-between gap-3 rounded-lg border border-border px-4 py-3">
-              <span className="text-sm font-black">طباعة تلقائية بعد البيع</span>
-              <input
-                type="checkbox"
-                checked={settings.autoPrintReceipt}
-                onChange={(event) => updateSettings({ autoPrintReceipt: event.target.checked })}
-                className="h-5 w-5 accent-blue-600"
-              />
-            </label>
-          </div>
+            );
+          })}
         </div>
 
-        <div className="mt-4 flex items-center justify-end gap-3 border-t border-border pt-4">
-          {printerMessage ? (
-            <span className="text-sm font-bold text-muted">{printerMessage}</span>
-          ) : null}
+        <div className="mt-4 flex items-center justify-between gap-3 border-t border-border pt-4">
+          <p className="text-xs font-bold text-muted">
+            {printersLoading
+              ? "جاري جلب الطابعات…"
+              : printers.length === 0
+                ? "لم يتم العثور على طابعات مثبتة (أو خارج تطبيق سطح المكتب)"
+                : `تم العثور على ${printers.length} طابعة ملحقة بالنظام`}
+          </p>
           <button
             type="button"
-            disabled={testPrintBusy}
-            onClick={() => void testPrint()}
-            className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-900 px-4 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-40"
+            onClick={() => void loadPrinters()}
+            disabled={printersLoading}
+            className="inline-flex h-10 items-center gap-2 rounded-lg border border-border bg-white px-3 text-xs font-black text-muted hover:bg-surface-muted disabled:opacity-40"
           >
-            <Printer className="h-4 w-4" />
-            {testPrintBusy ? "جاري الطباعة…" : "طباعة إيصال اختبار"}
+            <RotateCcw className="h-4 w-4" />
+            تحديث القائمة
           </button>
         </div>
       </section>
 
+      {/* ── Cash drawer ───────────────────────────────────────────────── */}
       <section className="rounded-lg border border-border bg-white p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>
@@ -458,8 +462,16 @@ export default function DevicesPage() {
             <label className="block text-xs font-black text-muted">
               سرعة المنفذ
               <select
-                value={settings.drawerBaudRate}
-                onChange={(event) => updateSettings({ drawerBaudRate: Number(event.target.value) as DeviceHardwareSettings["drawerBaudRate"] })}
+                value={hub.drawer.baudRate}
+                onChange={(event) =>
+                  updateConfig((d) => ({
+                    ...d,
+                    drawer: {
+                      ...d.drawer,
+                      baudRate: Number(event.target.value) as 9600 | 19200 | 38400 | 115200,
+                    },
+                  }))
+                }
                 className="mt-2 h-10 w-full rounded-lg border border-border bg-white px-3 text-sm font-black text-foreground"
               >
                 {BAUD_RATES.map((rate) => <option key={rate} value={rate}>{rate}</option>)}
@@ -473,8 +485,10 @@ export default function DevicesPage() {
                   <button
                     key={pin}
                     type="button"
-                    onClick={() => updateSettings({ drawerPin: pin })}
-                    className={`h-9 rounded-md text-sm font-black ${settings.drawerPin === pin ? "bg-white text-primary shadow-sm" : "text-muted"}`}
+                    onClick={() =>
+                      updateConfig((d) => ({ ...d, drawer: { ...d.drawer, pin } }))
+                    }
+                    className={`h-9 rounded-md text-sm font-black ${hub.drawer.pin === pin ? "bg-white text-primary shadow-sm" : "text-muted"}`}
                   >
                     Pin {pin}
                   </button>
@@ -482,15 +496,45 @@ export default function DevicesPage() {
               </div>
             </div>
 
-            <label className="flex min-h-16 items-center justify-between gap-3 rounded-lg border border-border px-4 py-3 sm:col-span-2">
-              <span className="text-sm font-black">فتح الدرج تلقائياً عند الدفع النقدي</span>
-              <input
-                type="checkbox"
-                checked={settings.autoOpenDrawer}
-                onChange={(event) => updateSettings({ autoOpenDrawer: event.target.checked })}
-                className="h-5 w-5 accent-green-600"
-              />
-            </label>
+            <div className="sm:col-span-2">
+              <p className="mb-2 text-xs font-black text-muted">توجيه فتح الدرج أثناء البيع</p>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <label className="flex min-h-14 items-center justify-between gap-3 rounded-lg border border-border px-4 py-3">
+                  <span className="text-sm font-black">عند الدفع نقداً</span>
+                  <input
+                    type="checkbox"
+                    checked={hub.drawer.triggers.cashSale}
+                    onChange={(event) =>
+                      updateConfig((d) => ({
+                        ...d,
+                        drawer: {
+                          ...d.drawer,
+                          triggers: { ...d.drawer.triggers, cashSale: event.target.checked },
+                        },
+                      }))
+                    }
+                    className="h-5 w-5 accent-green-600"
+                  />
+                </label>
+                <label className="flex min-h-14 items-center justify-between gap-3 rounded-lg border border-border px-4 py-3">
+                  <span className="text-sm font-black">عند الدفع نقد + بطاقة</span>
+                  <input
+                    type="checkbox"
+                    checked={hub.drawer.triggers.splitSale}
+                    onChange={(event) =>
+                      updateConfig((d) => ({
+                        ...d,
+                        drawer: {
+                          ...d.drawer,
+                          triggers: { ...d.drawer.triggers, splitSale: event.target.checked },
+                        },
+                      }))
+                    }
+                    className="h-5 w-5 accent-green-600"
+                  />
+                </label>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -509,7 +553,7 @@ export default function DevicesPage() {
             onClick={() => void testDrawer()}
             className="inline-flex h-10 items-center gap-2 rounded-lg bg-green-600 px-4 text-sm font-black text-white disabled:opacity-40"
           >
-            <Cable className="h-4 w-4" /> اختبار الفتح
+            <Cable className="h-4 w-4" /> اختبار فتح الدرج
           </button>
           <button
             type="button"
@@ -523,6 +567,7 @@ export default function DevicesPage() {
         </div>
       </section>
 
+      {/* ── Scanner ───────────────────────────────────────────────────── */}
       <section className="rounded-lg border border-border bg-white p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>
@@ -582,8 +627,6 @@ export default function DevicesPage() {
           )}
         </div>
       </section>
-
-      <ThermalReceipt invoice={testInvoice} paperWidth={settings.receiptWidth} />
     </div>
   );
 }

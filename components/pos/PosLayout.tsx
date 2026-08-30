@@ -38,6 +38,10 @@ import {
   REGISTER_LEASE_PREFIX,
 } from "@/lib/crossTabLock";
 import { openCashDrawer } from "@/lib/cashDrawer";
+import { dispatchPrintJob, intentKicksDrawer } from "@/lib/hardware/dispatch";
+import { loadHardwareHubConfig } from "@/lib/hardware/config";
+import { resolveReceiptTemplateForPrint } from "@/lib/clientPrintTemplates";
+import type { PrintIntent } from "@/lib/hardware/types";
 import {
   POS_SOUND_EVENT,
   playPosSound,
@@ -71,13 +75,14 @@ import {
   getStoragePressure,
   type StoragePressureDetail,
 } from "@/lib/storageGuard";
-import {
-  smartPrint,
-  captureReceiptHtml,
-  isElectron,
-  printInBrowser,
-  waitForReceiptSettle,
-} from "@/lib/printAgent";
+import type { CompletedInvoice } from "@/types/pos.types";
+
+// Durable auto-print guard. Keyed by invoice syncId so a receipt prints exactly
+// ONCE per unique order, even when PosLayout remounts (SPA navigation away and
+// back, or a dev hot-reload) while `lastCompletedInvoice` still holds that
+// invoice. A component ref reset on remount would re-fire the print — the
+// duplicate this module-level variable eliminates.
+let lastHandledInvoiceSyncId: string | null = null;
 
 export default function PosLayout() {
   const router = useRouter();
@@ -123,6 +128,7 @@ export default function PosLayout() {
   const checkoutSession = usePosStore((s) => s.checkoutSession);
   const lastCompletedInvoice = usePosStore((s) => s.lastCompletedInvoice);
   const currentCashier = usePosStore((s) => s.currentCashier);
+  const currentStore = usePosStore((s) => s.currentStore);
   const currentStoreId = usePosStore((s) => s.currentStore?.id ?? null);
   const registerLeaseHeld = usePosStore((s) => s.registerLeaseHeld);
 
@@ -138,7 +144,6 @@ export default function PosLayout() {
   const activeBranchId = usePosStore((s) => s.activeBranchId);
   const activeTerminalId = usePosStore((s) => s.activeTerminalId);
   const { settings: hardwareSettings } = useDeviceHardware(activeTerminalId);
-  const handledHardwareInvoice = useRef<string | null>(null);
   const lastAudibleNotice = useRef(notice);
   const [printedInvoiceId, setPrintedInvoiceId] = useState<string | null>(null);
   const canAccessBackoffice = hasCapability(
@@ -318,74 +323,148 @@ export default function PosLayout() {
     }
   }, [modalOpen]);
 
-  const printReceipt = useCallback(async () => {
-    // Silent printing with a robust browser fallback. In a plain browser
-    // smartPrint ALWAYS reaches the fallback (a print_jobs queue insert is
-    // never treated as "printed"), and we print via a hidden iframe so the
-    // dialog opens even though the original click gesture was consumed by the
-    // checkout flow's awaits (Chrome blocks window.print() in that case).
-    // Inside Electron the fallback stays suppressed and a failed silent print
-    // surfaces as a notice (no dialog may block a checkout lane).
-    if (!activeTerminalId || !lastCompletedInvoice) return;
-    // Give the lazily-built barcode + fiscal QR a beat to commit to the DOM
-    // before snapshotting the markup; capturing too early prints blank SVGs.
-    await waitForReceiptSettle();
-    const html = captureReceiptHtml();
-    if (!html) return;
+  // ── Hardware Hub receipt intent ─────────────────────────────────────
+  // Both the auto-print-after-checkout and the manual reprint buttons converge
+  // on this single choke point. It captures the rendered receipt from the DOM
+  // (with a deterministic SSR fallback so confirm NEVER silently prints
+  // nothing), then dispatches through the central Hardware Hub dispatcher —
+  // which routes to the RECEIPT slot and, for cash-bearing intents, kicks the
+  // cash drawer per the drawer-routing config.
 
-    void smartPrint({
-      terminalId: activeTerminalId,
-      jobType: "RECEIPT",
-      renderedHtml: html,
-      printerKind: "THERMAL",
-      printerName: hardwareSettings.receiptPrinterName || undefined,
-      onFallback: (fallbackHtml) => {
-        if (fallbackHtml) void printInBrowser(fallbackHtml);
-        else window.print();
-      },
-    }).then((printed) => {
-      if (printed) return;
-      // Every silent tier failed. Inside the wrapper no dialog may appear —
-      // tell the cashier the receipt did not print instead.
-      if (isElectron()) {
-        usePosStore.setState({
-          notice: {
-            message: "تم البيع، لكن فشلت الطباعة الصامتة — تحقق من الطابعة ثم أعد الطباعة",
-            tone: "error",
-          },
-        });
-      }
-    });
-  }, [activeTerminalId, lastCompletedInvoice, hardwareSettings.receiptPrinterName]);
+  const paymentIntent = useCallback(
+    (method: CompletedInvoice["paymentMethod"]): PrintIntent => {
+      if (method === "CASH") return "RECEIPT_CASH";
+      if (method === "SPLIT") return "RECEIPT_SPLIT";
+      return "RECEIPT_OTHER";
+    },
+    [],
+  );
 
-  // Settle local hardware after a completed sale. The drawer call never opens
-  // a chooser here; it only uses a port explicitly authorized in Devices.
+  const buildReceiptHtml = useCallback(async (): Promise<string | null> => {
+    if (!lastCompletedInvoice) return null;
+    try {
+      const { renderReceiptPrintHtml } = await import("@/lib/printRenderer");
+      const branchName =
+        branches.find((b) => b.id === (lastCompletedInvoice.branchId ?? activeBranchId))?.name ?? "";
+      const terminalName =
+        (terminals ?? []).find(
+          (t) => t.id === (lastCompletedInvoice.terminalId ?? activeTerminalId),
+        )?.name ?? "";
+      // Resolve the Print Studio template at print time (never the generic
+      // snapshot), so a checkout that settles before the lazy template fetch
+      // has hydrated still prints the store's exact custom design — the
+      // cache-write inside makes every subsequent receipt a fast cache hit.
+      const config = await resolveReceiptTemplateForPrint(currentStoreId);
+      return await renderReceiptPrintHtml(lastCompletedInvoice, {
+        config,
+        paperWidth: hardwareSettings.receiptWidth === 58 ? 58 : 80,
+        store: currentStore
+          ? {
+              name: currentStore.name,
+              logoUrl: currentStore.logoUrl,
+              address: currentStore.address,
+              phone: currentStore.phone,
+              receiptHeader: currentStore.receiptHeader,
+              receiptFooter: currentStore.receiptFooter,
+              taxNumber: currentStore.taxNumber,
+            }
+          : undefined,
+        branchName,
+        terminalName,
+      });
+    } catch {
+      return null;
+    }
+  }, [
+    lastCompletedInvoice,
+    currentStoreId,
+    hardwareSettings.receiptWidth,
+    currentStore,
+    branches,
+    terminals,
+    activeBranchId,
+    activeTerminalId,
+  ]);
+
+  /**
+   * Dispatch a receipt print intent through the hub. Returns the hub result so
+   * callers (auto-settle effect, reprint buttons) can surface errors uniformly.
+   */
+  const runReceiptIntent = useCallback(
+    async (intent: PrintIntent): Promise<ReturnType<typeof dispatchPrintJob> | null> => {
+      if (!lastCompletedInvoice) return null;
+      const html = await buildReceiptHtml();
+      if (!html) return null;
+      const config = loadHardwareHubConfig(activeTerminalId);
+      return dispatchPrintJob(
+        intent,
+        { html, terminalId: activeTerminalId ?? "", jobType: "RECEIPT" },
+        { config, paymentMethod: lastCompletedInvoice.paymentMethod },
+      );
+    },
+    [activeTerminalId, buildReceiptHtml, lastCompletedInvoice],
+  );
+
+  const notifyReceiptFailure = useCallback((message: string) => {
+    usePosStore.setState({ notice: { message, tone: "error" } });
+  }, []);
+
+  // Auto-print + drawer after a complete sale. One effect, one dispatcher: the
+  // drawer kick and the receipt print are decided together from the SAME intent
+  // so the routing is auditable in a single place.
   useEffect(() => {
     if (!lastCompletedInvoice) return;
-    if (handledHardwareInvoice.current === lastCompletedInvoice.syncId) return;
-    handledHardwareInvoice.current = lastCompletedInvoice.syncId;
+    if (lastHandledInvoiceSyncId === lastCompletedInvoice.syncId) return;
+    lastHandledInvoiceSyncId = lastCompletedInvoice.syncId;
     let cancelled = false;
 
     const settleHardware = async () => {
-      const cashPayment =
-        lastCompletedInvoice.paymentMethod === "CASH" ||
-        lastCompletedInvoice.paymentMethod === "SPLIT";
-      if (hardwareSettings.autoOpenDrawer && cashPayment) {
-        const opened = await openCashDrawer(hardwareSettings);
-        if (opened) {
-          incrementDrawerOpenCount();
-        }
-        if (!opened && !cancelled) {
-          usePosStore.setState({
-            notice: {
-              message: "تم البيع، لكن تعذر فتح درج النقد",
-              tone: "error",
-            },
+      const intent = paymentIntent(lastCompletedInvoice.paymentMethod);
+
+      // Cash drawer routing is decided by the Hardware Hub config (migrated
+      // from the legacy autoOpenDrawer toggle). Only cash-bearing intents can
+      // ever kick the drawer; the hub decides which of CASH/SPLIT do.
+      const cfg = loadHardwareHubConfig(activeTerminalId);
+      const shouldKick = intentKicksDrawer(intent, cfg);
+      const shouldPrint = hardwareSettings.autoPrintReceipt;
+
+      if (shouldPrint) {
+        // SINGLE DISPATCHER: dispatchPrintJob decides and performs the drawer
+        // kick AND the receipt print together from the same intent, so a cash
+        // sale can never pulse the drawer twice. The drawer still opens for
+        // cash-bearing flows even if the thermal slot is disabled or the print
+        // itself fails — dispatch kicks the drawer before touching print.
+        const result = await runReceiptIntent(intent);
+        if (result && result.kickedDrawer) {
+          if (result.drawerOk) incrementDrawerOpenCount();
+          else if (!cancelled) notifyReceiptFailure("تم البيع، لكن تعذر فتح درج النقد");
+        } else if (result === null && shouldKick) {
+          // Receipt HTML failed to build → the dispatcher never ran, so open
+          // the drawer directly instead of silently dropping the kick.
+          const opened = await openCashDrawer({
+            baudRate: cfg.drawer.baudRate,
+            pin: cfg.drawer.pin,
           });
+          if (opened) incrementDrawerOpenCount();
+          else if (!cancelled) notifyReceiptFailure("تم البيع، لكن تعذر فتح درج النقد");
         }
-      }
-      if (hardwareSettings.autoPrintReceipt && !cancelled) {
-        printReceipt();
+        if (result && result.attempted && !result.printed && !cancelled) {
+          notifyReceiptFailure(
+            result.error === "print_failed"
+              ? "تم البيع، لكن فشلت الطباعة الصامتة — تحقق من الطابعة ثم أعد الطباعة"
+              : "تم البيع، لكن لم تكتمل الطباعة — تحقق من الطابعة ثم أعد الطباعة",
+          );
+        }
+        if (result?.printed) setPrintedInvoiceId(lastCompletedInvoice.syncId);
+      } else if (shouldKick) {
+        // No printing configured, but the drawer should still open — kick once,
+        // directly (there is no parallel dispatcher to double-pulse it).
+        const opened = await openCashDrawer({
+          baudRate: cfg.drawer.baudRate,
+          pin: cfg.drawer.pin,
+        });
+        if (opened) incrementDrawerOpenCount();
+        else if (!cancelled) notifyReceiptFailure("تم البيع، لكن تعذر فتح درج النقد");
       }
     };
 
@@ -393,7 +472,29 @@ export default function PosLayout() {
     return () => {
       cancelled = true;
     };
-  }, [hardwareSettings, lastCompletedInvoice]);
+  }, [
+    activeTerminalId,
+    hardwareSettings.autoPrintReceipt,
+    incrementDrawerOpenCount,
+    lastCompletedInvoice,
+    notifyReceiptFailure,
+    paymentIntent,
+    runReceiptIntent,
+  ]);
+
+  // Manual reprint of the last receipt (no drawer kick).
+  const printReceipt = useCallback(async () => {
+    if (!lastCompletedInvoice) return;
+    const result = await runReceiptIntent("RECEIPT_REPRINT");
+    if (result && result.attempted && !result.printed) {
+      notifyReceiptFailure(
+        result.error === "print_failed"
+          ? "فشلت الطباعة الصامتة — تحقق من الطابعة ثم أعد المحاولة"
+          : "لم تكتمل الطباعة — تحقق من الطابعة ثم أعد المحاولة",
+      );
+    }
+    if (result?.printed) setPrintedInvoiceId(lastCompletedInvoice.syncId);
+  }, [lastCompletedInvoice, notifyReceiptFailure, runReceiptIntent]);
 
   // Keep the most recent receipt available for a cashier reprint.
   useEffect(() => {

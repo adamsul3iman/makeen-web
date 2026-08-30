@@ -113,6 +113,7 @@ export default function AdminSettingsPage() {
   const [istdClientSecret, setIstdClientSecret] = useState("");
   const [istdSecretMasked, setIstdSecretMasked] = useState("");
   const [istdConfigured, setIstdConfigured] = useState(false);
+  const [istdBuyerCategory, setIstdBuyerCategory] = useState<"B2B" | "B2C">("B2C");
   const [savingIstd, setSavingIstd] = useState(false);
   const [istdSaved, setIstdSaved] = useState(false);
   const [istdError, setIstdError] = useState("");
@@ -155,6 +156,7 @@ export default function AdminSettingsPage() {
         setIstdClientId(t.istdClientId);
         setIstdSecretMasked(t.istdSecretMasked);
         setIstdConfigured(t.configured);
+        setIstdBuyerCategory(t.istdBuyerCategory);
       })
       .catch(() => {
         /* offline: leave the JoFotara section empty */
@@ -315,6 +317,7 @@ export default function AdminSettingsPage() {
         setIstdClientId(t.istdClientId);
         setIstdSecretMasked(t.istdSecretMasked);
         setIstdConfigured(t.configured);
+        setIstdBuyerCategory(t.istdBuyerCategory);
         setIstdClientSecret("");
       })
       .catch(() => {
@@ -344,6 +347,7 @@ export default function AdminSettingsPage() {
         tax_number: istdTaxNumber.trim(),
         istd_client_id: istdClientId.trim(),
         istd_client_secret: istdClientSecret.trim(),
+        istd_buyer_category: istdBuyerCategory,
       },
     });
   };
@@ -598,6 +602,30 @@ export default function AdminSettingsPage() {
                 dir="ltr"
                 placeholder="issuer_device id"
               />
+              <div className="md:col-span-2">
+                <label className="block text-sm font-bold text-muted">
+                  تصنيف المشتري الافتراضي (الفوترة الإلكترونية)
+                  <div className="mt-1 flex gap-2">
+                    {(["B2C", "B2B"] as const).map((cat) => (
+                      <button
+                        key={cat}
+                        type="button"
+                        onClick={() => setIstdBuyerCategory(cat)}
+                        className={`h-10 flex-1 rounded-lg border px-3 text-sm font-black transition ${
+                          istdBuyerCategory === cat
+                            ? "border-primary bg-primary/10 text-primary"
+                            : "border-border bg-surface-muted text-muted hover:border-primary/40"
+                        }`}
+                      >
+                        {cat === "B2C" ? "B2C — مستهلك" : "B2B — شركة"}
+                      </button>
+                    ))}
+                  </div>
+                  <span className="mt-1 block text-xs font-semibold text-muted">
+                    B2B عند البيع لشركة (يتطلب رقم ضريبي للمشتري)، B2C للأفراد
+                  </span>
+                </label>
+              </div>
               <div className="md:col-span-2">
                 <label className="block text-sm font-bold text-muted">
                   JoFotara secret_key

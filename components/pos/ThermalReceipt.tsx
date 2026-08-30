@@ -121,6 +121,10 @@ export default function ThermalReceipt({
 
   const isSettlement = Boolean(invoice.isSettlement);
   const isReturn = invoice.total < 0;
+  // Jordan ISTD: the fiscal QR is only lawful on a finalized sale. Parked /
+  // OPEN / proforma documents must render as a proforma slip (no QR). Live
+  // checkout documents are always finalized, so this is defense-in-depth.
+  const isFinalized = invoice.isFinalized !== false;
   const isLoyaltyEarning =
     currentStore?.loyaltyEnabled !== false && Boolean(invoice.customerId || invoice.customerName);
   const pointsEarned =
@@ -136,7 +140,8 @@ export default function ThermalReceipt({
   // in the legally-compliant Smart QR. Both must be set for the QR to print.
   const taxNumber = currentStore?.taxNumber?.trim() || "";
   const showTaxBreakdown = Math.abs(invoice.tax) > 0 && !isSettlement;
-  const showFiscalQr = showTaxBreakdown && Boolean(taxNumber) && !isReturn && invoice.total >= 0;
+  const showFiscalQr =
+    isFinalized && showTaxBreakdown && Boolean(taxNumber) && !isReturn && invoice.total >= 0;
   // Official ISTD QR wins once JoFotara clears the invoice; otherwise the
   // locally-built TLV QR (same payload fields) keeps the receipt compliant.
   // The SVG itself is built lazily in an effect (see above).
@@ -176,11 +181,13 @@ export default function ThermalReceipt({
     return `${divider} ${border}`;
   };
 
-  const invoiceTitle = isSettlement
-    ? "سند قبض ذمة"
-    : isReturn
-      ? "فاتورة مرتجع"
-      : "فاتورة مبيعات";
+  const invoiceTitle = !isFinalized
+    ? "فاتورة مبدئية / مفتوحة"
+    : isSettlement
+      ? "سند قبض ذمة"
+      : isReturn
+        ? "فاتورة مرتجع"
+        : "فاتورة مبيعات";
 
   const grandTotalLabel = isSettlement ? "المبلغ المقبوض" : "الإجمالي";
 
@@ -257,6 +264,11 @@ export default function ThermalReceipt({
 
       {/* Document title + invoice number — the corporate block */}
       {sectionVisible("document") && <section style={orderedSection("document")} className={sectionDivider("document")}>
+        {!isFinalized && (
+          <p className="mx-auto mt-2 w-fit rounded-sm border-2 border-black px-2 py-1 text-center text-[12px] font-black leading-snug">
+            فاتورة مبدئية (غير نهائية) — ليست فاتورة ضريبية
+          </p>
+        )}
         <p
           className={`mt-2 text-center text-[11px] font-black tracking-[0.25em] ${isReturn || isSettlement ? "pr-[0.25em]" : ""}`}
         >
@@ -370,7 +382,7 @@ export default function ThermalReceipt({
                 return (
                   <tr key={i} className={`${template.itemStyle === "lines" ? "border-b border-dashed border-black" : ""} ${template.zebraRows && i % 2 === 1 ? "bg-black/10" : ""}`}>
                     <td className={`${template.itemStyle === "grid" ? CELL : ""} ${itemPad} px-1 align-top text-right`}>
-                      <p className="text-[11px] font-bold leading-snug">
+                      <p className="break-words text-[11px] font-bold leading-snug">
                         {template.showLineNumbers ? `${i + 1}. ` : ""}
                         {formatProductDisplayName(item.name, item.variantLabel)}
                       </p>

@@ -122,6 +122,14 @@ export function useBackgroundSync(): void {
     const handleOffline = () => {
       usePosStore.getState().setOnline(false);
     };
+    // Immediate flush after a checkout settles: completeCheckout dispatches
+    // "pos:invoice-queued" once the invoice is durably enqueued, so an online
+    // sale pushes to Supabase in the same tick instead of waiting up to the
+    // 15s interval. When already mid-drain, processSyncQueue's module lock
+    // coalesces the call — no double work, no lost events.
+    const handleInvoiceQueued = () => {
+      void syncIfOnline();
+    };
     const handleVisibility = () => {
       if (document.visibilityState === "visible") {
         void syncIfOnline();
@@ -137,15 +145,22 @@ export function useBackgroundSync(): void {
 
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
+    window.addEventListener("pos:invoice-queued", handleInvoiceQueued);
     document.addEventListener("visibilitychange", handleVisibility);
 
     void refreshPendingCount();
     void runRetentionSweeps();
+    // Immediate drain on mount so a freshly-launched register (or a reload)
+    // recovers any invoices trapped in the queue without waiting for the first
+    // 15s tick. processSyncQueue's tenant guard no-ops until rehydrate has set
+    // the active store id; the interval retries it a moment later.
+    void syncIfOnline();
 
     return () => {
       clearInterval(interval);
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
+      window.removeEventListener("pos:invoice-queued", handleInvoiceQueued);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, []);

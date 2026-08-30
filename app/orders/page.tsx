@@ -16,11 +16,20 @@ import {
 import { usePosStore } from "@/store/usePosStore";
 import { useOrdersStore } from "@/store/useOrdersStore";
 import { usePosStoreHydrated } from "@/hooks/usePosStoreHydrated";
+import { useOrdersBoot } from "@/hooks/useOrdersBoot";
+import { subscribeCatalogRefresh } from "@/lib/catalogInvalidation";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { computeSaleTotals } from "@/lib/saleMath";
 import { formatMoney } from "@/lib/format";
 import { formatProductDisplayName } from "@/lib/productDisplayName";
 import type { LocalOrder } from "@/types/orders.types";
+import OrderPrintButton from "@/components/orders/OrderPrintButton";
+import OrderReturnButton from "@/components/orders/OrderReturnButton";
+import OrderFilter, {
+  EMPTY_FILTER,
+  type OrderFilterState,
+} from "@/components/orders/OrderFilter";
+import { isWedgeBurst } from "@/hooks/useBarcodeScanner";
 
 type Tab = "open" | "closed";
 
@@ -59,6 +68,42 @@ function matchesQuery(order: LocalOrder, q: string): boolean {
   return haystack.includes(q.toLowerCase());
 }
 
+/** True when the query exactly identifies one order (scanned barcode match). */
+function isExactId(order: LocalOrder, q: string): boolean {
+  const needle = q.trim().toLowerCase();
+  if (!needle) return false;
+  return (
+    order.orderNumber.toLowerCase() === needle ||
+    (order.invoiceSyncId ?? "").toLowerCase() === needle
+  );
+}
+
+function matchesFilters(order: LocalOrder, filter: OrderFilterState): boolean {
+  if (filter.status !== "all") {
+    if (filter.status === "CANCELLED" && order.status !== "CANCELLED") return false;
+    if (filter.status === "COMPLETED" && order.status !== "CLOSED") return false;
+  }
+
+  const stamp = order.closedAt ?? order.createdAt;
+  if (filter.date !== "all" && stamp) {
+    const d = new Date(stamp);
+    const today = new Date();
+    const startOfDay = (dt: Date) =>
+      new Date(dt.getFullYear(), dt.getMonth(), dt.getDate()).getTime();
+    if (filter.date === "today" && startOfDay(d) !== startOfDay(today)) return false;
+    if (filter.date === "yesterday") {
+      const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+      if (startOfDay(d) !== startOfDay(yesterday)) return false;
+    }
+    if (filter.date === "date" && filter.dateValue) {
+      const target = new Date(`${filter.dateValue}T00:00:00`);
+      if (startOfDay(d) !== startOfDay(target)) return false;
+    }
+  }
+
+  return true;
+}
+
 /**
  * صفحة الطلبات (Phase 3). Cross-device parked-order board: an Open tab to
  * resume/retire live carts and a Closed tab for settled history — responsive
@@ -84,9 +129,31 @@ export default function OrdersPage() {
   const [tab, setTab] = useState<Tab>("open");
   const [q, setQ] = useState("");
   const debouncedQ = useDebouncedValue(q.trim(), 250);
+  const [filter, setFilter] = useState<OrderFilterState>(EMPTY_FILTER);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null);
   const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Live cross-device order sync. This standalone route does NOT render
+  // PosLayout (the only place useOrdersBoot is otherwise mounted), so the
+  // pos_orders realtime socket would tear down on navigation and Cashier B
+  // would never see Cashier A's open/close/cancel until a manual refresh.
+  // Mount it here too — the hook is reference-counted (start/stopCatalogWatch)
+  // so it coexists with PosLayout, and it returns early when no tenant is set.
+  useOrdersBoot();
+
+  // useOrdersBoot's "orders" handler re-pulls the OPEN board only. Keep the
+  // Closed tab live too: when a pos_orders event fires while the Closed tab is
+  // active, refresh settled history so another register's close/cancel appears
+  // without a manual refresh (pos_orders events only ever target our store).
+  useEffect(() => {
+    if (!hydrated || !currentCashier) return;
+    if (tab !== "closed") return;
+    const unsub = subscribeCatalogRefresh((reason) => {
+      if (reason === "orders") void fetchSettledHistory();
+    });
+    return unsub;
+  }, [tab, hydrated, currentCashier, fetchSettledHistory]);
 
   // Register-area guard: without a live cashier session there is nothing to
   // show — bounce to login like the register shell does.
@@ -103,10 +170,28 @@ export default function OrdersPage() {
     void hydrate();
   }, [hydrated, currentCashier, hydrate]);
 
-  // The Closed tab always pulls fresh history when activated.
+  // The Closed tab always pulls fresh history when activated, and re-pulls
+  // whenever the window regains focus while still on it (a checkout closed
+  // on another device must appear without a manual refresh). A mounted page
+  // opened directly on the closed tab is covered by the focus listener too.
   useEffect(() => {
-    if (tab !== "closed" || !hydrated || !currentCashier) return;
-    void fetchSettledHistory();
+    if (!hydrated || !currentCashier) return;
+    if (tab !== "closed") return;
+    let cancelled = false;
+    const refresh = () => {
+      if (!cancelled) void fetchSettledHistory();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    refresh();
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [tab, hydrated, currentCashier, fetchSettledHistory]);
 
   useEffect(
@@ -115,6 +200,72 @@ export default function OrdersPage() {
     },
     [],
   );
+
+  // Scanner-ready search: a USB barcode scanner behaves as a machine-fast
+  // keyboard burst terminated by Enter. When the cashier scans a receipt
+  // barcode (order_number / invoice_id) without focusing the search field, we
+  // capture the burst and route it into the search as an exact match. Focused
+  // field scans flow through the input's onChange naturally.
+  useEffect(() => {
+    let buffer: string[] = [];
+    let start = 0;
+    let last = 0;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.altKey || e.ctrlKey || e.metaKey || e.repeat) return;
+      const el = document.activeElement;
+      const inField =
+        el &&
+        (el.tagName === "INPUT" ||
+          el.tagName === "TEXTAREA" ||
+          el.tagName === "SELECT" ||
+          (el as HTMLElement).isContentEditable);
+      // A scanner typing into a focused field is handled by the browser
+      // itself; only capture bursts typed while nothing editable is focused.
+      if (inField) return;
+
+      if (e.key === "Enter" || e.key === "Tab") {
+        if (buffer.length >= 3) {
+          const now = performance.now();
+          if (
+            isWedgeBurst({
+              length: buffer.length,
+              start,
+              now,
+              avgKeyMs: (now - start) / buffer.length,
+            })
+          ) {
+            e.preventDefault();
+            const code = buffer.join("");
+            setTab("closed");
+            setQ(code);
+            setExpandedId(null);
+          }
+        }
+        buffer = [];
+        start = 0;
+        last = 0;
+        return;
+      }
+
+      if (e.key.length !== 1) return;
+      const now = performance.now();
+      if (buffer.length === 0 || now - last > 60) {
+        buffer = [];
+        start = now;
+      }
+      last = now;
+      buffer.push(e.key);
+      if (buffer.length >= 128 || now - start > 600) {
+        buffer = [];
+        start = 0;
+        last = 0;
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   const openOrders = useMemo(() => orders.filter((o) => o.status === "OPEN"), [orders]);
 
@@ -127,7 +278,15 @@ export default function OrdersPage() {
   }, [tab, orders, settledOrders, settledError]);
 
   const rows = tab === "open" ? openOrders : settledRows;
-  const visible = useMemo(() => rows.filter((o) => matchesQuery(o, debouncedQ)), [rows, debouncedQ]);
+
+  const visible = useMemo(() => {
+    const exactMatches = debouncedQ ? rows.filter((o) => isExactId(o, debouncedQ)) : [];
+    const base = exactMatches.length > 0 ? exactMatches : rows;
+    return base.filter((o) => {
+      if (!matchesQuery(o, debouncedQ)) return false;
+      return matchesFilters(o, filter);
+    });
+  }, [rows, debouncedQ, filter]);
 
   const handleCancelClick = (orderId: string) => {
     if (confirmTimer.current) clearTimeout(confirmTimer.current);
@@ -143,6 +302,14 @@ export default function OrdersPage() {
   const handleResume = (order: LocalOrder) => {
     restoreInvoice(order.id);
     router.push("/pos");
+  };
+
+  // Fetch the next page of settled history. Offset pagination over `updated_at`
+  // never skips a row, so every closed/cancelled invoice stays reachable even
+  // past the first page (previously hard-capped at 100 and silently hidden).
+  const handleLoadMore = () => {
+    if (tab !== "closed" || settledLoading) return;
+    void fetchSettledHistory(undefined, "more");
   };
 
   const refreshing = tab === "open" ? loading : settledLoading;
@@ -223,12 +390,15 @@ export default function OrdersPage() {
                 طلبات مغلقة
               </button>
             </div>
-            <input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="ابحث برقم الطلب أو الزبون أو الكاشير…"
-              className="h-11 w-full rounded-xl border border-border bg-white px-3 text-sm font-bold outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/30 lg:w-80"
-            />
+            <div className="flex w-full items-center gap-2 lg:w-auto">
+              <input
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="ابحث برقم الطلب أو الزبون أو الكاشير…"
+                className="h-11 w-full flex-1 rounded-xl border border-border bg-white px-3 text-sm font-bold outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/30 lg:w-80"
+              />
+              <OrderFilter value={filter} onChange={setFilter} />
+            </div>
           </div>
         </section>
 
@@ -267,10 +437,14 @@ export default function OrdersPage() {
             )}
           </div>
         ) : (
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          <>
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
             {visible.map((order) => {
               const total = orderTotal(order);
-              const itemCount = order.items.reduce((n, it) => n + it.qty, 0);
+              const itemCount = order.items.reduce(
+                (n, it) => n + (Number.isFinite(it.qty) ? it.qty : 0),
+                0,
+              );
               const isOpen = order.status === "OPEN";
               const cancelled = order.status === "CANCELLED";
               const expanded = expandedId === order.id;
@@ -324,7 +498,7 @@ export default function OrdersPage() {
                             {formatProductDisplayName(item.name, item.variantLabel)}
                             <span className="text-muted">
                               {" "}
-                              ×{item.qty} {item.unitName}
+                              ×{Number.isFinite(item.qty) ? item.qty : 0} {item.unitName}
                             </span>
                           </span>
                           <span className="shrink-0 tabular-nums">{formatMoney(item.lineTotal)}</span>
@@ -343,6 +517,8 @@ export default function OrdersPage() {
                       <p className="text-lg font-black tabular-nums leading-tight">{formatMoney(total)}</p>
                     </div>
                     <div className="flex shrink-0 items-center gap-1.5">
+                      <OrderPrintButton order={order} />
+                      <OrderReturnButton order={order} />
                       <button
                         type="button"
                         aria-label={expanded ? "إخفاء الأصناف" : "عرض الأصناف"}
@@ -393,7 +569,23 @@ export default function OrdersPage() {
                 </article>
               );
             })}
-          </div>
+            </div>
+
+            {/* Keep the entire closed/cancelled history reachable — a fixed
+                cap would silently hide older invoices. Page in the rest. */}
+            {tab === "closed" && settledHasMore && (
+              <div className="flex justify-center pt-2">
+                <button
+                  type="button"
+                  onClick={handleLoadMore}
+                  disabled={settledLoading}
+                  className="flex h-11 items-center justify-center gap-2 rounded-xl border border-border bg-surface px-6 text-sm font-black text-primary transition hover:bg-surface-muted disabled:opacity-50"
+                >
+                  {settledLoading ? "جارٍ التحميل..." : "تحميل طلبات أقدم"}
+                </button>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

@@ -71,7 +71,7 @@ export default function ReceiptTemplatePreview({
     customer: <div className="border border-black px-2 py-1 text-[8px] font-bold">العميل: محمد العلي • 0790000000</div>,
     items: (
       <table className={`w-full table-fixed border-collapse text-[8px] ${config.itemStyle === "grid" ? "border border-black" : ""}`}>
-        <colgroup><col />{fullColumns && <col className="w-[19%]" />}<col className="w-[14%]" /><col className="w-[22%]" /></colgroup>
+        <colgroup><col />{fullColumns && <col className="w-[20%]" />}<col className="w-[14%]" /><col className="w-[23%]" /></colgroup>
         <thead><tr className={headerClass}><th className="px-1 py-1 text-right">الصنف</th>{fullColumns && <th className="px-0.5 py-1 text-center">السعر</th>}<th className="px-0.5 py-1 text-center">الكمية</th><th className="px-1 py-1 text-left">الإجمالي</th></tr></thead>
         <tbody>
           {[{ name: "حليب كامل الدسم", code: "625100000001", qty: 2, unit: "حبة", price: 1.25, total: 2.5 }, { name: "مناديل ورقية", code: "625100000002", qty: 1, unit: "عبوة", price: 1, total: 1 }].map((row, index) => (
@@ -91,7 +91,7 @@ export default function ReceiptTemplatePreview({
         <div className="flex justify-between px-1 py-0.5"><span>ضريبة المنتجات</span><span>{formatMoney(0.48)}</span></div>
       </div>
     ),
-    total: <div className={`flex items-end justify-between ${totalClass}`}><span className="text-[10px] font-black">الإجمالي</span><strong dir="ltr" style={{ fontSize: `${config.totalScale * 20}px` }}>{formatMoney(3.5)}</strong></div>,
+    total: <div className={`flex items-end justify-between ${totalClass}`}><span className="text-[10px] font-black">الإجمالي</span><strong dir="ltr" style={{ fontSize: `${config.totalScale * 30}px` }}>{formatMoney(3.5)}</strong></div>,
     payment: <div className="flex justify-between text-[8px] font-bold"><span>طريقة الدفع</span><span>نقداً • الباقي {formatMoney(1.5)}</span></div>,
     codes: (
       <div className="text-center">
@@ -109,7 +109,7 @@ export default function ReceiptTemplatePreview({
       className={`mx-auto bg-white p-3 font-sans leading-snug text-black shadow-xl ${space}`}
       style={{
         width: config.paperWidth === 58 ? 250 : 330,
-        fontSize: `${config.fontScale * 10}px`,
+        fontSize: `${config.fontScale * 11}px`,
       }}
     >
       {config.sections.filter((row) => row.visible).map((section, index, visible) => (

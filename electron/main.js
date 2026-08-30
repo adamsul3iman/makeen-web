@@ -18,8 +18,31 @@ let updateCheckTimer = null;
 
 const DEFAULT_THERMAL_PRINTER = "Rongta RP80";
 const THERMAL_NAME_HINTS = ["rongta", "rp80", "rp326", "80mm", "thermal", "receipt"];
+const LABEL_NAME_HINTS = ["label", "barcode", "tsp", "tspl", "tsc", "zebra", "godex"];
 const A4_NAME_HINTS = ["a4", "laser", "inkjet", "hp", "canon", "epson wf"];
 const PRINT_CALLBACK_TIMEOUT_MS = 20_000;
+
+// A THERMAL (receipt) job MUST never land on a label/TSPL or text-passthrough
+// device. Those drivers spool the job's raw bytes to the printer instead of
+// rasterizing a graphic, which is exactly the reported symptom: a receipt page
+// coming out as literal "SIZE 10 mm, 10 mm / SET PEEL OFF / PRINT 1,1" label
+// commands. When such a device name is the only match, we fail loudly instead
+// of spraying raw TSPL at the receipt printer.
+const LABEL_OR_TEXT_DEVICE_RE =
+  /label|tspl|tsp|tsc|zebra|godex|barcode|text only|generic\/text|raw|print to/i;
+
+// Raw command buffers (TSPL/ESC-POS) are reserved for BARCODE jobs which this
+// bridge does NOT implement — there is deliberately no raw IPC channel. These
+// signatures are matched against incoming html payloads so a mis-routed label
+// buffer can never be interpreted as a receipt document and silently spooled.
+const RAW_COMMAND_PATTERNS = [
+  /^\s*(CLS|DIR|DRIVE|MODE|GAP|DENSITY|SET|SIZE|PRINT|BARCODE|TEXT|BLOCK|BOX|CUT|EOP|FEED|PEEL)\b/i,
+  /\bsize\s*[\d.]+(\s*mm)?\s*,\s*[\d.]+(\s*mm)?\s*$/im,
+  /\b(set\s+)?peel\s+(on|off)\s*$/im,
+  /^\s*print\s+\d+\s*,\s*\d+\s*$/im,
+  /\bbarcode\s*[-"\d]+\s*[, ]\s*[-\d]+/i,
+  /^\s*gap\s+[\d.]+\s*mm,/im,
+];
 
 // ── Silent-print IPC ─────────────────────────────────────────────────
 // Renderer calls window.electronAPI.printSilent({ html, printerName, printerKind }).
@@ -39,13 +62,38 @@ function resolveDeviceName(printers, requestedName, printerKind) {
     );
     if (caseInsensitive) return caseInsensitive.name;
   }
-  const hints = printerKind === "A4" ? A4_NAME_HINTS : THERMAL_NAME_HINTS;
+  const hints = printerKind === "A4" ? A4_NAME_HINTS : printerKind === "LABEL" ? LABEL_NAME_HINTS : THERMAL_NAME_HINTS;
+  // Receipt jobs must stay on a real thermal receipt driver. Hint scans skip
+  // label/TSPL/text-passthrough devices so a RECEIPT never resolves onto a
+  // device that would print the job as raw TSPL command text.
+  const candidates =
+    printerKind === "THERMAL"
+      ? printers.filter((p) => !LABEL_OR_TEXT_DEVICE_RE.test(p.name))
+      : printers;
+  const pool = candidates.length > 0 ? candidates : printers;
   for (const hint of hints) {
-    const hit = printers.find((p) => p.name.toLowerCase().includes(hint));
+    const hit = pool.find((p) => p.name.toLowerCase().includes(hint));
     if (hit) return hit.name;
   }
-  const fallback = printers.find((p) => p.isDefault);
+  const fallback = pool.find((p) => p.isDefault);
   return fallback?.name ?? null;
+}
+
+/**
+ * Reject any payload that is NOT a real HTML document before it ever reaches
+ * the spooler. The silent bridge prints STATICALLY (webContents.print rasterizes
+ * the page) and is reserved for receipts/reports; raw TSPL/ESC-POS buffers have
+ * no business travelling through it. A label job must use its own raw channel —
+ * which does not exist in this build — and a mis-routed buffer must fail here
+ * rather than print itself as literal command text on the thermal paper.
+ */
+function looksLikeRawLabelPayload(html) {
+  if (typeof html !== "string") return true;
+  const trimmed = html.replace(/^\uFEFF/, "").trim();
+  if (!trimmed) return true;
+  // A real document starts with markup. Command buffers start with a command.
+  if (!trimmed.startsWith("<")) return true;
+  return RAW_COMMAND_PATTERNS.some((re) => re.test(trimmed));
 }
 
 function printWithResult(webContents, options) {
@@ -74,9 +122,36 @@ function printWithResult(webContents, options) {
   });
 }
 
+// Serialize silent prints: webContents.print is not concurrency-safe for
+// multiple hidden windows and the OS spooler can balk when several jobs are
+// handed off simultaneously. A promise-chain mutex guarantees one in-flight
+// job at a time, so a burst of receipts/shift reports never creates orphaned
+// BrowserWindows or drops payloads under load.
+let printQueueTail = null;
+
 ipcMain.handle("print:silent", async (_event, { html, printerName, printerKind }) => {
+  // ── Raw-payload gate ────────────────────────────────────────────────
+  // This channel exists ONLY to render HTML graphics on the receipt/report
+  // printer. Any payload that is a raw TSPL/ESC-POS command buffer is rejected
+  // outright so label commands can never be physically printed as text.
+  if (looksLikeRawLabelPayload(html)) {
+    console.error("[electron] Silent print REJECTED: non-HTML (raw label/command) payload", {
+      printerName,
+      printerKind,
+    });
+    return { success: false, error: "REJECTED_RAW_LABEL_PAYLOAD" };
+  }
+
+  // Each job awaits the previous one before starting, so hidden print windows
+  // are created/destroyed strictly one at a time.
+  const previous = printQueueTail;
+  let release;
+  printQueueTail = new Promise((resolve) => (release = resolve));
+  // Guarded so the mutex is ALWAYS released (see finally) even if the queue
+  // predecessor rejects — a leaked lock would starve every later print.
   let printWindow = null;
   try {
+    await previous;
     printWindow = new BrowserWindow({
       show: false,
       width: 400,
@@ -97,11 +172,20 @@ ipcMain.handle("print:silent", async (_event, { html, printerName, printerKind }
     await new Promise((r) => setTimeout(r, 300));
 
     const printers = await printWindow.webContents.getPrintersAsync();
-    const deviceName = resolveDeviceName(
-      printers,
-      printerName || DEFAULT_THERMAL_PRINTER,
-      printerKind,
-    );
+    const requested = printerName || DEFAULT_THERMAL_PRINTER;
+    // A RECEIPT must never resolve to a label/TSPL/text device even when it is
+    // explicitly named — that is the mis-routing that prints raw label commands
+    // on the receipt printer instead of the HTML graphic. (LABEL jobs may use
+    // label devices; each channel keeps to its own device class.)
+    if (printerKind === "THERMAL" && LABEL_OR_TEXT_DEVICE_RE.test(requested)) {
+      console.error("[electron] Silent print REJECTED: receipt routed to label/text device", {
+        requested,
+        printerKind,
+        installed: printers.map((p) => p.name),
+      });
+      return { success: false, error: "LABEL_DEVICE_REJECTED_FOR_RECEIPT", requested };
+    }
+    const deviceName = resolveDeviceName(printers, requested, printerKind);
     if (!deviceName) {
       console.error("[electron] Silent print: no matching printer for", {
         printerName,
@@ -127,6 +211,7 @@ ipcMain.handle("print:silent", async (_event, { html, printerName, printerKind }
     // OS spooler, but some USB thermal drivers abort in-flight jobs if the
     // source window is destroyed immediately. Let the spooler settle.
     await new Promise((r) => setTimeout(r, 750));
+    console.info("[electron] Silent print OK:", { deviceName, printerKind, bytes: html.length });
     return { success: true, deviceName };
   } catch (err) {
     console.error("[electron] Silent print failed:", err);
@@ -135,6 +220,9 @@ ipcMain.handle("print:silent", async (_event, { html, printerName, printerKind }
     if (printWindow && !printWindow.isDestroyed()) {
       printWindow.destroy();
     }
+    // Always release the mutex (even on throw) so later jobs in the queue are
+    // never starved.
+    if (release) release();
   }
 });
 

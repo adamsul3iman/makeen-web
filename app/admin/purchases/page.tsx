@@ -79,6 +79,8 @@ function emptyLine(): LineInput {
     qtyInUnit: 1,
     unitMultiplier: 1,
     unitCost: "",
+    taxPercent: "16",
+    taxIncluded: true,
     baseCost: null,
     basePrice: null,
     newSellingPrice: "",
@@ -182,6 +184,8 @@ export default function AdminPurchasesPage() {
         unitMultiplier: multiplier,
         unitCost:
           product?.costPrice != null && product.costPrice > 0 ? String(product.costPrice) : "",
+        taxPercent: product?.taxPercent != null ? String(product.taxPercent) : "16",
+        taxIncluded: product?.taxIncluded ?? true,
         baseCost: product?.costPrice ?? null,
         basePrice: product?.price ?? null,
         newSellingPrice: "",
@@ -283,6 +287,8 @@ export default function AdminPurchasesPage() {
         item.variantLabel !== "—" ? `${item.productName} — ${item.variantLabel}` : item.productName,
       quantity: String(item.quantity),
       unitCost: String(item.unitCost),
+      taxPercent: "16",
+      taxIncluded: true,
       baseCost: item.unitCost,
       basePrice: null,
       newSellingPrice: item.newSellingPrice != null ? String(item.newSellingPrice) : "",
@@ -352,6 +358,14 @@ export default function AdminPurchasesPage() {
     updateLine(key, { newSellingPrice: raw });
   }, [updateLine]);
 
+  const setTaxPercent = useCallback((key: string, raw: string) => {
+    updateLine(key, { taxPercent: raw });
+  }, [updateLine]);
+
+  const setTaxIncluded = useCallback((key: string, included: boolean) => {
+    updateLine(key, { taxIncluded: included });
+  }, [updateLine]);
+
   const submitManualScan = () => {
     const code = manualCode.trim();
     if (!code) return;
@@ -404,6 +418,10 @@ export default function AdminPurchasesPage() {
         product_id: line.productId,
         quantity: parseInt(line.quantity, 10) || 0,
         unit_cost: parseFloat(line.unitCost) || 0,
+        // Empty tax% falls back to the 16% Jordan default server-side; a blank
+        // field means "use default", never an unintended 0% exemption.
+        tax_percent: line.taxPercent === "" ? undefined : parseFloat(line.taxPercent) || 0,
+        tax_included: line.taxIncluded,
         new_selling_price: parseFloat(line.newSellingPrice) || undefined,
         variant_id: line.variantId || undefined,
         unit_id: line.unitId || undefined,
@@ -444,6 +462,8 @@ export default function AdminPurchasesPage() {
           qtyInUnit: item.quantity,
           unitMultiplier: 1,
           unitCost: String(item.unit_cost),
+          taxPercent: String(item.tax_percent ?? 16),
+          taxIncluded: item.tax_included ?? true,
           baseCost: item.unit_cost,
           basePrice: null,
           newSellingPrice: item.new_selling_price != null ? String(item.new_selling_price) : "",
@@ -623,6 +643,8 @@ export default function AdminPurchasesPage() {
                 onQtyChange={setQtyInUnit}
                 onUnitCostChange={setUnitCost}
                 onSellingChange={setSelling}
+                onTaxPercentChange={setTaxPercent}
+                onTaxIncludedChange={setTaxIncluded}
                 onSwitchUnit={switchLineUnit}
                 onRemove={removeLine}
               />

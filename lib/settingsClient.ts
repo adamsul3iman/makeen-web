@@ -1,6 +1,6 @@
 import { getSupabaseBrowser } from "./supabaseBrowser";
 import { getTenantStoreId } from "./tenantClient";
-import { jofotaraInvoke } from "./istdIntegration";
+import { jofotaraInvoke, type BuyerCategory } from "./istdIntegration";
 
 export interface StoreSettings {
   id: string;
@@ -113,6 +113,8 @@ export interface TaxSettings {
   istdClientId: string;
   istdSecretMasked: string;
   configured: boolean;
+  /** Store-level default buyer registration category (B2B / B2C). */
+  istdBuyerCategory: BuyerCategory;
 }
 
 /**
@@ -127,6 +129,7 @@ export async function fetchTaxSettings(): Promise<TaxSettings> {
     ok: boolean;
     taxNumber?: string;
     istdClientId?: string;
+    istdBuyerCategory?: BuyerCategory;
     configured?: boolean;
     message?: string;
   }>({ action: "config_get", storeId });
@@ -138,6 +141,10 @@ export async function fetchTaxSettings(): Promise<TaxSettings> {
     istdClientId,
     istdSecretMasked: data.configured ? "***configured***" : "",
     configured: data.configured === true,
+    istdBuyerCategory:
+      data.istdBuyerCategory === "B2B" || data.istdBuyerCategory === "B2C"
+        ? data.istdBuyerCategory
+        : "B2C",
   };
 }
 
@@ -146,6 +153,7 @@ export async function updateTaxSettings(
     tax_number?: string;
     istd_client_id?: string;
     istd_client_secret?: string;
+    istd_buyer_category?: BuyerCategory;
   },
   adminEmail: string,
   adminPassword: string,
@@ -157,6 +165,7 @@ export async function updateTaxSettings(
     ok: boolean;
     taxNumber?: string;
     istdClientId?: string;
+    istdBuyerCategory?: BuyerCategory;
     configured?: boolean;
     code?: string;
     message?: string;
@@ -168,6 +177,10 @@ export async function updateTaxSettings(
     taxNumber: (data.tax_number ?? "").trim().slice(0, 30),
     clientId: (data.istd_client_id ?? "").trim().slice(0, 200),
     secret: (data.istd_client_secret ?? "").trim(),
+    istdBuyerCategory:
+      data.istd_buyer_category === "B2B" || data.istd_buyer_category === "B2C"
+        ? data.istd_buyer_category
+        : "B2C",
   });
   if (!res.ok) {
     if (res.code === "invalid_admin_credentials") {
@@ -180,6 +193,10 @@ export async function updateTaxSettings(
     istdClientId: res.istdClientId ?? "",
     istdSecretMasked: res.configured ? "***configured***" : "",
     configured: res.configured === true,
+    istdBuyerCategory:
+      res.istdBuyerCategory === "B2B" || res.istdBuyerCategory === "B2C"
+        ? res.istdBuyerCategory
+        : "B2C",
   };
 }
 

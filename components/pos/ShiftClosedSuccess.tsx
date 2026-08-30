@@ -5,8 +5,10 @@ import { Printer, LogOut, CheckCircle } from "lucide-react";
 import { usePosStore } from "@/store/usePosStore";
 import { formatMoney } from "@/lib/format";
 import { formatShiftDateTime } from "@/lib/dateTime";
-import { smartPrint, isElectron } from "@/lib/printAgent";
+import { isElectron } from "@/lib/printAgent";
 import { buildLiveShiftAudit } from "@/lib/shiftPrintPayload";
+import { renderShiftPrintHtml } from "@/lib/printRenderer";
+import { dispatchPrintJob } from "@/lib/hardware/dispatch";
 
 const REASON_LABELS: Record<string, string> = {
   cash_counting_error: "خطأ في العد",
@@ -75,25 +77,26 @@ export default function ShiftClosedSuccess() {
     }
     if (!activeTerminalId || !s) return;
     setPrinting(true);
+    const shift = buildLiveShiftAudit({
+      shiftId: s.shiftId,
+      startTime: s.startTime,
+      startingCash: s.startingCash,
+      totals: s,
+      cashierName: currentCashier?.name ?? "",
+      closedAt: s.closeTime,
+      actualCash: s.actualCash,
+      variance: s.variance,
+      discrepancyReason: s.discrepancyReason,
+      discrepancyNote: s.discrepancyNote,
+    });
     try {
-      const usedAgent = await smartPrint({
-        terminalId: activeTerminalId,
+      const result = await dispatchPrintJob("A4_REPORT", {
+        html: renderShiftPrintHtml(shift, "Z_REPORT"),
+        shift,
         jobType: "Z_REPORT",
-        printerKind: "THERMAL",
-        shift: buildLiveShiftAudit({
-          shiftId: s.shiftId,
-          startTime: s.startTime,
-          startingCash: s.startingCash,
-          totals: s,
-          cashierName: currentCashier?.name ?? "",
-          closedAt: s.closeTime,
-          actualCash: s.actualCash,
-          variance: s.variance,
-          discrepancyReason: s.discrepancyReason,
-          discrepancyNote: s.discrepancyNote,
-        }),
+        terminalId: activeTerminalId,
       });
-      if (!usedAgent && !isElectron()) window.print();
+      if (!result.printed && !result.attempted && !isElectron()) window.print();
     } catch {
       if (!isElectron()) window.print();
     } finally {

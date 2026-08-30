@@ -410,6 +410,13 @@ export interface CompletedInvoice {
   istdUuid?: string;
   /** Official ISTD/JoFotara QR payload, when the invoice was cleared. */
   istdQr?: string;
+  /**
+   * True when this document is a finalized, settled sale eligible for the
+   * fiscal ISTD QR. False for parked/OPEN/proforma documents, which MUST NOT
+   * carry a tax QR (Jordan: only finalized invoices may bear the fiscal code).
+   * Defaults to true for live checkout documents.
+   */
+  isFinalized?: boolean;
   completed_at: string;
 }
 

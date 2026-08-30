@@ -33,6 +33,33 @@ export interface CashDrawerStatus {
 
 let selectedPort: SerialPortLike | null = null;
 
+/** Bound a hardware operation so a wedged/unplugged serial device can never
+ *  hang the checkout lane (which awaits the drawer pulse before printing).
+ *  Returns the resolved value, or rejects with `name === "DrawerTimeout"`.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const err = new Error(`${label} timed out after ${ms}ms`);
+      err.name = "DrawerTimeout";
+      reject(err);
+    }, ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (reason) => {
+        clearTimeout(timer);
+        reject(reason);
+      },
+    );
+  });
+}
+
+const DRAWER_OPEN_TIMEOUT_MS = 2_000;
+const DRAWER_WRITE_TIMEOUT_MS = 1_500;
+
 function serialApi(): NavigatorWithSerial["serial"] | undefined {
   if (typeof navigator === "undefined") return undefined;
   return (navigator as NavigatorWithSerial).serial;
@@ -68,7 +95,9 @@ async function ensureWritable(
   port: SerialPortLike,
   baudRate: DeviceHardwareSettings["drawerBaudRate"],
 ): Promise<WritableStream<Uint8Array> | null> {
-  if (!port.writable) await port.open({ baudRate });
+  if (!port.writable) {
+    await withTimeout(port.open({ baudRate }), DRAWER_OPEN_TIMEOUT_MS, "drawer open");
+  }
   return port.writable;
 }
 
@@ -93,14 +122,28 @@ export async function getCashDrawerStatus(): Promise<CashDrawerStatus> {
 }
 
 /** Must be called directly from a user click so the native chooser is allowed. */
-export async function connectCashDrawer(
-  settings = loadDeviceHardwareSettings(),
-): Promise<boolean> {
+/** Drawer wiring needed to connect/pulse the ESC/POS port. */
+export interface DrawerPulseOptions {
+  baudRate: DeviceHardwareSettings["drawerBaudRate"];
+  pin: DeviceHardwareSettings["drawerPin"];
+}
+
+type DrawerSettingsLike = DeviceHardwareSettings | DrawerPulseOptions;
+
+function drawerBaud(options: DrawerSettingsLike): DeviceHardwareSettings["drawerBaudRate"] {
+  return "drawerBaudRate" in options ? options.drawerBaudRate : options.baudRate;
+}
+
+function drawerPin(options: DrawerSettingsLike): DeviceHardwareSettings["drawerPin"] {
+  return "drawerPin" in options ? options.drawerPin : options.pin;
+}
+
+export async function connectCashDrawer(settings: DrawerSettingsLike = loadDeviceHardwareSettings()): Promise<boolean> {
   const serial = serialApi();
   if (!serial) return false;
   try {
     const port = await serial.requestPort();
-    await ensureWritable(port, settings.drawerBaudRate);
+    await ensureWritable(port, drawerBaud(settings));
     selectedPort = port;
     rememberPort(port);
     return true;
@@ -124,20 +167,27 @@ export async function forgetCashDrawer(): Promise<void> {
   }
 }
 
-/** Pulse an already-authorized ESC/POS drawer port without opening a chooser. */
+/**
+ * Pulse an already-authorized ESC/POS drawer port without opening a chooser.
+ * Accepts either the full legacy `DeviceHardwareSettings` object or a focused
+ * `{ baudRate, pin }` pair, so the Hardware Hub can drive it from its own
+ * drawer config without fabricating unrelated settings.
+ */
 export async function openCashDrawer(
-  settings = loadDeviceHardwareSettings(),
+  options: DrawerSettingsLike = loadDeviceHardwareSettings(),
 ): Promise<boolean> {
+  const baudRate = drawerBaud(options);
+  const pin = drawerPin(options);
   try {
     const port = await resolveAuthorizedPort();
     if (!port) return false;
-    const writable = await ensureWritable(port, settings.drawerBaudRate);
+    const writable = await ensureWritable(port, baudRate);
     const writer = writable?.getWriter();
     if (!writer) return false;
-    const connector = settings.drawerPin === 5 ? 1 : 0;
+    const connector = pin === 5 ? 1 : 0;
     const pulse = new Uint8Array([0x1b, 0x70, connector, 0x19, 0xfa]);
     try {
-      await writer.write(pulse);
+      await withTimeout(writer.write(pulse), DRAWER_WRITE_TIMEOUT_MS, "drawer pulse");
     } finally {
       writer.releaseLock();
     }
@@ -145,6 +195,8 @@ export async function openCashDrawer(
     return true;
   } catch (error) {
     console.error("Cash drawer pulse failed:", error);
+    // A wedged/unplugged port must not poison the next attempt: drop the stale
+    // reference so resolveAuthorizedPort re-queries the OS on the next kick.
     selectedPort = null;
     return false;
   }

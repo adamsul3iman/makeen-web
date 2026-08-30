@@ -153,6 +153,39 @@ function present(value: unknown): boolean {
   return true;
 }
 
+/**
+ * Sanitize a money field to a non-negative finite number. Prices/costs can
+ * never meaningfully be negative; clamping at parse time keeps uploaded rows
+ * from ever carrying inverted sign that could poison downstream math.
+ */
+function sanitizeMoney(value: unknown, fallback: number): number {
+  const n = toNum(value, fallback);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
+ * Sanitize the qty multiplier of a packaging unit. DB enforces
+ * `qty_multiplier > 0` (migration 080), so clamp any absent/non-positive
+ * value to 1 to avoid a mid-import CHECK violation. `tooSmall` is set when
+ * the user actually authored an invalid (<=0) multiplier so the row can be
+ * surfaced as an error instead of silently corrected.
+ */
+function sanitizeMultiplier(value: unknown, fallback: number, tooSmall?: { value: boolean }): number {
+  const n = toNum(value, fallback);
+  if (!Number.isFinite(n) || n <= 0) {
+    if (present(value) && tooSmall) tooSmall.value = true;
+    return 1;
+  }
+  return n;
+}
+
+/** Sanitize a tax percentage into [0, 100] (DB CHECK range from migration 022). */
+function sanitizeTax(value: unknown, fallback: number): number {
+  const n = toNum(value, fallback);
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(100, Math.max(0, n));
+}
+
 // ---------------------------------------------------------------------------
 // Paginated catalog reader
 // ---------------------------------------------------------------------------
@@ -466,6 +499,8 @@ interface GroupedVariant {
   costPrice?: number;
   sellingPrice?: number;
   wholesalePrice?: number;
+  /** Raw variant scalar columns present in the file (blank = leave unchanged). */
+  present: Set<string>;
 }
 
 interface GroupedProduct {
@@ -584,7 +619,7 @@ export async function parseCatalogDetailed(file: File | ArrayBuffer): Promise<Pa
         department: cleanStr(raw.Department),
         categories: String(raw.Categories ?? "").split(",").map((s) => cleanStr(s)).filter(Boolean),
         baseUnit: cleanStr(raw.BaseUnit) || "قطعة",
-        taxPercent: toNum(raw.TaxPercent, 16),
+        taxPercent: sanitizeTax(raw.TaxPercent, 16),
         taxIncluded: toBool(raw.TaxIncluded, true),
         isSellable: toBool(raw.IsSellable, true),
         isPurchasable: toBool(raw.IsPurchasable, true),
@@ -593,9 +628,9 @@ export async function parseCatalogDetailed(file: File | ArrayBuffer): Promise<Pa
         reorderLevel: Math.max(0, Math.round(toNum(raw.ReorderLevel, 0))),
         allowPriceChange: toBool(raw.AllowPriceChange, true),
         isActive: toBool(raw.IsActive, true),
-        costPrice: toNum(raw.Cost, 0),
-        sellingPrice: toNum(raw.Price, 0),
-        wholesalePrice: toNum(raw.WholesalePrice, 0),
+        costPrice: sanitizeMoney(raw.Cost, 0),
+        sellingPrice: sanitizeMoney(raw.Price, 0),
+        wholesalePrice: sanitizeMoney(raw.WholesalePrice, 0),
         present: cellPresent,
         units: [],
         variants: [],
@@ -623,10 +658,14 @@ export async function parseCatalogDetailed(file: File | ArrayBuffer): Promise<Pa
         };
         group.units.push(unit);
       }
-      if (present(raw.UnitMultiplier)) unit.qtyMultiplier = toNum(raw.UnitMultiplier, 1);
-      if (present(raw.UnitCost)) unit.costPrice = toNum(raw.UnitCost, 0);
-      if (present(raw.UnitPrice)) unit.sellingPrice = toNum(raw.UnitPrice, 0);
-      if (present(raw.UnitWholesale)) unit.wholesalePrice = toNum(raw.UnitWholesale, 0);
+      if (present(raw.UnitMultiplier)) {
+        const invalid = { value: false };
+        unit.qtyMultiplier = sanitizeMultiplier(raw.UnitMultiplier, 1, invalid);
+        if (invalid.value) errors.push(`صف ${rowNo}: مضاعف الوحدة "${unitName}" يجب أن يكون أكبر من صفر (تم ضبطه إلى 1)`);
+      }
+      if (present(raw.UnitCost)) unit.costPrice = sanitizeMoney(raw.UnitCost, 0);
+      if (present(raw.UnitPrice)) unit.sellingPrice = sanitizeMoney(raw.UnitPrice, 0);
+      if (present(raw.UnitWholesale)) unit.wholesalePrice = sanitizeMoney(raw.UnitWholesale, 0);
       if (present(raw.UnitBarcode)) unit.barcode = cleanStr(String(raw.UnitBarcode ?? "")) || null;
       if (present(raw.UnitIsDefaultSale)) unit.isDefaultSale = toBool(raw.UnitIsDefaultSale, false);
       if (present(raw.UnitIsDefaultPurchase)) unit.isDefaultPurchase = toBool(raw.UnitIsDefaultPurchase, false);
@@ -639,14 +678,19 @@ export async function parseCatalogDetailed(file: File | ArrayBuffer): Promise<Pa
     const variantId = cleanStr(raw.VariantID) || undefined;
     let variant = group.variants.find((v) => v.barcode === sku || (variantId && v.variantId === variantId));
     if (!variant) {
+      const variantPresent = new Set<string>();
+      for (const k of ["Cost", "Price", "WholesalePrice", "VariantLabel"] as const) {
+        if (present(raw[k])) variantPresent.add(k);
+      }
       variant = {
         variantId,
         barcode: sku,
         label: cleanStr(raw.VariantLabel) || sku,
         stock: Math.max(0, Math.round(toNum(raw.Stock, 0))),
-        costPrice: present(raw.Cost) ? toNum(raw.Cost, 0) : undefined,
-        sellingPrice: present(raw.Price) ? toNum(raw.Price, 0) : undefined,
-        wholesalePrice: present(raw.WholesalePrice) ? toNum(raw.WholesalePrice, 0) : undefined,
+        costPrice: present(raw.Cost) ? sanitizeMoney(raw.Cost, 0) : undefined,
+        sellingPrice: present(raw.Price) ? sanitizeMoney(raw.Price, 0) : undefined,
+        wholesalePrice: present(raw.WholesalePrice) ? sanitizeMoney(raw.WholesalePrice, 0) : undefined,
+        present: variantPresent,
       };
       group.variants.push(variant);
     }
@@ -982,13 +1026,14 @@ async function upsertProductGroup(
     };
 
     if (existingVariant) {
-      const upd = await sb.from("product_variants").update({
-        barcode: v.barcode,
-        variant_label: v.label,
-        cost_price: v.costPrice ?? parentCost,
-        selling_price: v.sellingPrice ?? parentPrice,
-        wholesale_price: v.wholesalePrice ?? parentWholesale,
-      }).eq("id", existingVariant).eq("store_id", storeId);
+      // Data Shield: only patch variant scalar fields the file actually
+      // provides, so blank cells never overwrite stored prices with the
+      // parent fallback.
+      const vup: Record<string, unknown> = {};
+      if (v.present.has("Cost")) vup.cost_price = v.costPrice ?? parentCost;
+      if (v.present.has("Price")) vup.selling_price = v.sellingPrice ?? parentPrice;
+      if (v.present.has("WholesalePrice")) vup.wholesale_price = v.wholesalePrice ?? parentWholesale;
+      const upd = await sb.from("product_variants").update(vup).eq("id", existingVariant).eq("store_id", storeId);
       if (upd.error) throw new Error(upd.error.message);
       summary.variantsUpdated += 1;
     } else {
@@ -1052,7 +1097,8 @@ async function upsertUnit(
     store_id: storeId,
     product_id: productId,
     unit_name: name.slice(0, 60),
-    qty_multiplier: u.qtyMultiplier,
+    // Defensive clamp: DB enforces qty_multiplier > 0 (migration 080).
+    qty_multiplier: Number.isFinite(u.qtyMultiplier) && u.qtyMultiplier > 0 ? u.qtyMultiplier : 1,
     cost_price: u.costPrice,
     selling_price: u.sellingPrice,
     wholesale_price: u.wholesalePrice,
@@ -1094,6 +1140,7 @@ export async function importCatalogGroups(
   groups: GroupedProduct[],
   onProgress?: (done: number, total: number) => void,
 ): Promise<ImportSummary> {
+  if (!storeId) throw new Error("لم يتم تحديد المتجر — تعذر الاستيراد (متجر غير معروف)");
   const summary: ImportSummary = {
     parsedRows: groups.reduce((n, g) => n + g.variants.length, 0),
     productsCreated: 0,

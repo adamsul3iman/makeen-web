@@ -46,10 +46,18 @@ export async function jofotaraInvoke<T = Record<string, unknown>>(
   return (await response.json().catch(() => ({ ok: false, code: "bad_json" }))) as T;
 }
 
+export type BuyerCategory = "B2B" | "B2C";
+
 export interface TenantTaxSettings {
   storeId: string;
   taxNumber: string;
   istdClientId: string;
+  /**
+   * Store-level default buyer registration category (B2B / B2C) chosen in
+   * Settings. Applied to every ISTD submission unless a specific invoice
+   * overrides it via `IstdInvoiceLike.buyerCategory`.
+   */
+  istdBuyerCategory?: BuyerCategory;
   /**
    * Always empty in the browser since migration 079 — the secret never leaves
    * the Edge Function. Kept on the shape for legacy callers/tests.
@@ -117,8 +125,25 @@ export interface IstdInvoiceLike {
   customerName?: string;
   customerPhone?: string;
   customerId?: string;
+  /**
+   * Optional buyer VAT/TIN when mapping as B2B. Blank for consumer (B2C)
+   * sales. Reported as the buyer's tax ID on the fiscal payload.
+   */
+  customerTin?: string;
+  /**
+   * Optional per-invoice buyer registration category override. When omitted the
+   * store's configurable default (`TenantTaxSettings.istdBuyerCategory`) is
+   * used, falling back to B2C for anonymous walk-ins.
+   */
+  buyerCategory?: BuyerCategory;
   /** Optional authoritative line breakdown; omitted -> aggregated single line. */
   items?: IstdInvoiceLine[];
+  /**
+   * True when this document is a finalized, settled sale. False for parked /
+   * OPEN / proforma documents, which must never be submitted to the tax
+   * authority.
+   */
+  isFinalized?: boolean;
 }
 
 /**
@@ -133,10 +158,24 @@ export function mapSalesInvoiceToIstd(
   taxSettings: TenantTaxSettings,
   supplier: IstdSupplier,
 ): Record<string, unknown> {
+  // Jordan ISTD: only finalized sales may be submitted. Parked/OPEN/proforma
+  // documents (isFinalized === false) must never be reported to the tax
+  // authority, regardless of how they reach this mapping.
+  if (invoice.isFinalized === false) {
+    throw new IstdError(
+      "proforma_not_submittable",
+      "لا يمكن إرسال فاتورة مبدئية / مفتوحة إلى المصلحة",
+      409,
+    );
+  }
   const completedAt = invoice.completedAt;
   const date = completedAt.slice(0, 10);
   const time = completedAt.length > 11 ? completedAt.slice(11, 19) : "";
   const isReturn = invoice.total < 0;
+  // Registration category: per-invoice override wins, else the store's
+  // configurable default, else B2C for anonymous walk-ins.
+  const buyerCategory: BuyerCategory =
+    invoice.buyerCategory ?? taxSettings.istdBuyerCategory ?? "B2C";
 
   const items = Array.isArray(invoice.items) && invoice.items.length > 0
     ? invoice.items.map((item) => {
@@ -172,6 +211,17 @@ export function mapSalesInvoiceToIstd(
   if (invoice.customerName) buyer.name = invoice.customerName;
   if (invoice.customerPhone) buyer.phone = invoice.customerPhone;
   if (invoice.customerId) buyer.id = invoice.customerId;
+  buyer.category = buyerCategory;
+  // Jordan ISTD: B2B invoices carry the buyer's VAT/TIN; report it only when a
+  // business buyer was actually identified, never for consumer sales.
+  if (buyerCategory === "B2B" && invoice.customerTin) buyer.tin = invoice.customerTin;
+
+  // Secure rounding: derive the totals from the authoritative line figures just
+  // mapped (never trusting a client-supplied header total that could drift from
+  // the line_items), then round each to 2 JOD decimals.
+  const lineGross = round2(items.reduce((acc, it) => acc + (it.total as number), 0));
+  const lineTax = round2(items.reduce((acc, it) => acc + (it.tax_amount as number), 0));
+  const lineExclusive = round2(items.reduce((acc, it) => acc + (it.tax_exclusive_price as number), 0));
 
   return {
     invoice_uuid: invoice.id,
@@ -190,16 +240,16 @@ export function mapSalesInvoiceToIstd(
     buyer,
     line_items: items,
     totals: {
-      tax_exclusive_total: round2(invoice.total - invoice.tax),
+      tax_exclusive_total: lineExclusive,
       discount_total: round2(invoice.discount),
-      tax_total: round2(invoice.tax),
-      grand_total: round2(invoice.total),
+      tax_total: lineTax,
+      grand_total: lineGross,
     },
     signature: {
       algorithm: "ISTD-SHA256",
       tax_number: taxSettings.taxNumber,
-      invoice_total: jordanAmount(invoice.total),
-      tax_amount: jordanAmount(invoice.tax),
+      invoice_total: jordanAmount(lineGross),
+      tax_amount: jordanAmount(lineTax),
     },
   };
 }
@@ -216,6 +266,7 @@ interface ConfigGetResponse {
   ok: boolean;
   taxNumber?: string;
   istdClientId?: string;
+  istdBuyerCategory?: BuyerCategory;
   configured?: boolean;
   code?: string;
   message?: string;
@@ -241,6 +292,10 @@ export async function getTenantTaxSettings(storeId: string): Promise<TenantTaxSe
       storeId,
       taxNumber: data.taxNumber ?? "",
       istdClientId: data.istdClientId ?? "",
+      istdBuyerCategory:
+        data.istdBuyerCategory === "B2B" || data.istdBuyerCategory === "B2C"
+          ? data.istdBuyerCategory
+          : undefined,
       istdClientSecret: "",
     };
   } catch {
@@ -278,6 +333,8 @@ export async function submitInvoiceToIstd(
         customerName: invoice.customerName,
         customerPhone: invoice.customerPhone,
         customerId: invoice.customerId,
+        customerTin: invoice.customerTin,
+        buyerCategory: invoice.buyerCategory,
         supplier_name: supplier.name,
       },
     },

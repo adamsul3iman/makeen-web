@@ -61,7 +61,15 @@ export async function fetchPrintTemplates(kind?: PrintTemplateKind): Promise<Pri
   return ((data ?? []) as PrintTemplateRow[]).map(toTemplate);
 }
 
-/** Create a template, or update it in place when `id` is provided. */
+/**
+ * Create a template, or update it in place when `id` is provided.
+ *
+ * Default selection is delegated to the atomic `save_print_template` RPC: it
+ * clears the previous default for the same (store_id, kind) and installs the
+ * new one inside a single transaction, so saving a default from Print Studio
+ * never collides with the `uq_print_templates_default_kind` partial unique
+ * index (which previously surfaced as a 409 conflict).
+ */
 export async function savePrintTemplate(
   data: SavePrintTemplateInput,
   id?: string,
@@ -72,34 +80,21 @@ export async function savePrintTemplate(
 
   const name = typeof data.name === "string" ? data.name.trim().slice(0, 80) : "";
   if (!name) throw new Error("اسم القالب مطلوب");
-  if (!id && !data.kind) throw new Error("نوع القالب غير صالح");
+  const kind: PrintTemplateKind = data.kind ?? "RECEIPT";
 
-  const values = {
-    name,
-    is_default: data.isDefault === true,
-    config: data.config ?? null,
-  };
-
-  if (id) {
-    const { data: row, error } = await sb
-      .from("print_templates")
-      .update(values)
-      .eq("id", id)
-      .eq("store_id", storeId)
-      .select(TEMPLATE_SELECT)
-      .maybeSingle();
-    if (error) throw new Error(error.message);
-    if (!row) throw new Error("القالب غير موجود");
-    return toTemplate(row as PrintTemplateRow);
+  const { data: row, error } = await sb.rpc("save_print_template", {
+    p_store_id: storeId,
+    p_id: id ?? null,
+    p_kind: kind,
+    p_name: name,
+    p_is_default: data.isDefault === true,
+    p_config: data.config ?? {},
+  });
+  if (error || !row) throw new Error(error?.message ?? "تعذر حفظ القالب");
+  if (typeof row === "object" && "id" in (row as Record<string, unknown>)) {
+    return toTemplate(row as unknown as PrintTemplateRow);
   }
-
-  const { data: row, error } = await sb
-    .from("print_templates")
-    .insert({ store_id: storeId, kind: data.kind, ...values })
-    .select(TEMPLATE_SELECT)
-    .single();
-  if (error || !row) throw new Error(error?.message ?? "تعذر إنشاء القالب");
-  return toTemplate(row as PrintTemplateRow);
+  throw new Error("تعذر حفظ القالب");
 }
 
 /** Delete a template owned by the caller's store. */

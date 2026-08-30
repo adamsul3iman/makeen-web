@@ -166,14 +166,25 @@ export const useOrdersStore = create<OrdersState>()((set, get) => ({
       // Feed the shared board/cache too — mergeServerOrders never clobbers
       // local pendingSync rows and keeps the persisted cache bounded.
       get().mergeServerOrders(result.orders);
-      const combined =
-        mode === "more" ? [...get().settledOrders, ...result.orders] : result.orders;
+      let combined: LocalOrder[];
+      if (mode === "more") {
+        combined = [...get().settledOrders, ...result.orders];
+      } else {
+        // Reset: keep any locally-prepended still-pending close/cancel rows the
+        // server hasn't acknowledged yet, so a freshly settled order is never
+        // dropped from the top of the Closed tab mid-sync.
+        const pending = get().settledOrders.filter(
+          (o) => o.pendingSync && !result.orders.some((r) => r.id === o.id),
+        );
+        combined = [...pending, ...result.orders];
+      }
       set({
         settledOrders: sortByUpdated(combined),
         settledError: null,
         settledLoading: false,
-        // A short page means we hit the end (offset pagination over
-        // `updated_at` never skips rows), so there is no more to load.
+        // A short page means we hit the end (offset pagination over the
+        // deterministic `updated_at, id` order never skips rows), so there is
+        // no more to load.
         settledHasMore: result.orders.length === limit,
       });
     } else {
@@ -263,57 +274,71 @@ export const useOrdersStore = create<OrdersState>()((set, get) => ({
 
   cancelOrder: (id, reason) => {
     const storeId = getTenantStoreId() ?? "";
-    set((state) => ({
-      orders: state.orders.map((o) =>
-        o.id === id && o.status === "OPEN"
-          ? {
-              ...o,
-              status: "CANCELLED",
-              cancelReason: reason.trim(),
-              closedAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-              pendingSync: true,
-            }
-          : o,
-      ),
-    }));
+    const now = new Date().toISOString();
+    const found = get().orders.find((o) => o.id === id);
+    if (!found || found.status !== "OPEN") return;
+    const cancelled: LocalOrder = {
+      ...found,
+      status: "CANCELLED",
+      cancelReason: reason.trim(),
+      closedAt: now,
+      updatedAt: now,
+      pendingSync: true,
+    };
+    set((state) => {
+      const orders = state.orders.map((o) => (o.id === id ? cancelled : o));
+      // Cancelled orders live in the settled history tab too — mirror into it
+      // immediately (dedupe + newest-first) so cancellation shows up without
+      // waiting on the realtime round-trip or a later refetch.
+      const settled = sortByUpdated([
+        cancelled,
+        ...state.settledOrders.filter((o) => o.id !== id),
+      ]);
+      return { orders, settledOrders: settled };
+    });
     persistAll(get().orders, storeId);
-    const cancelled = get().orders.find((o) => o.id === id);
-    if (cancelled) {
-      void cancelOrderRemote(id, reason).then((result) => {
-        if (result.ok) {
-          set((state) => ({
-            orders: state.orders.map((o) =>
-              o.id === id ? { ...result.order } : o,
-            ),
-            lastSyncError: null,
-          }));
-        } else {
-          set({ lastSyncError: result.error });
-        }
-        persistAll(get().orders, storeId);
-      });
-    }
+    void cancelOrderRemote(id, reason).then((result) => {
+      if (result.ok) {
+        set((state) => ({
+          orders: state.orders.map((o) =>
+            o.id === id ? { ...result.order } : o,
+          ),
+          lastSyncError: null,
+        }));
+      } else {
+        set({ lastSyncError: result.error });
+      }
+      persistAll(get().orders, storeId);
+    });
   },
 
   closeWithInvoice: (id, invoiceSyncId) => {
     const storeId = getTenantStoreId() ?? "";
     const trimmed = invoiceSyncId.trim();
     if (!trimmed) return;
-    set((state) => ({
-      orders: state.orders.map((o) =>
-        o.id === id && o.status === "OPEN"
-          ? {
-              ...o,
-              status: "CLOSED",
-              invoiceSyncId: trimmed,
-              closedAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-              pendingSync: true,
-            }
-          : o,
-      ),
-    }));
+    const now = new Date().toISOString();
+    const found = get().orders.find((o) => o.id === id);
+    if (!found || found.status !== "OPEN") return;
+    const closed: LocalOrder = {
+      ...found,
+      status: "CLOSED",
+      invoiceSyncId: trimmed,
+      closedAt: now,
+      updatedAt: now,
+      pendingSync: true,
+    };
+    set((state) => {
+      const orders = state.orders.map((o) => (o.id === id ? closed : o));
+      // Mirror into the settled history immediately (dedupe by id + newest-first
+      // re-sort) so the Closed tab reflects the close the instant it happens —
+      // no dependence on the realtime round-trip or a later refetch. Do NOT cap
+      // this list: it is the paged server history, not the bounded board.
+      const settled = sortByUpdated([
+        closed,
+        ...state.settledOrders.filter((o) => o.id !== id),
+      ]);
+      return { orders, settledOrders: settled };
+    });
     persistAll(get().orders, storeId);
     void closeOrderRemote(id, trimmed).then((result) => {
       if (result.ok) {

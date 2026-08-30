@@ -106,10 +106,13 @@ function orderToRow(order: LocalOrder): Record<string, unknown> {
  * Fetch the store's orders filtered by status, newest first. Powers both the
  * open board (["OPEN"]) and the settled history tab (["CLOSED","CANCELLED"]).
  *
- * Pagination is offset-based (never cursor/timestamp, because ordering is by
- * `updated_at` which is a non-unique tie source — an offset slice guarantees
- * no row is skipped or double-counted when the underlying set changes between
- * pages). A `limit` of 0 means "fetch everything" (used by the open board).
+ * Pagination is offset-based. Ordering is newest-first by `updated_at`
+ * (the close/cancel time for settled rows) with a deterministic `id` secondary
+ * key — `updated_at` alone is a non-unique tie source, so without a total
+ * order an offset slice could skip or double-count a row when the underlying
+ * set changes between pages. The composite key makes the sort stable and
+ * total so "newest closed/cancelled first" holds across every page.
+ * A `limit` of 0 means "fetch everything" (used by the open board).
  */
 export async function fetchOrdersByStatus(
   statuses: LocalOrder["status"][],
@@ -127,7 +130,8 @@ export async function fetchOrdersByStatus(
       .select(ORDER_COLUMNS)
       .eq("store_id", storeId)
       .in("status", statuses)
-      .order("updated_at", { ascending: false });
+      .order("updated_at", { ascending: false })
+      .order("id", { ascending: false });
     if (limit > 0) query = query.range(offset, offset + limit - 1);
     // A >0 paginated slice is a "last page" indicator: an empty page means
     // there is no more — the caller surfaces that as no-more-history.

@@ -94,12 +94,13 @@ interface TenantSettingsRow {
   tax_number: string | null;
   istd_client_id: string | null;
   istd_client_secret: string | null;
+  istd_buyer_category: string | null;
 }
 
 async function loadSettings(storeId: string): Promise<TenantSettingsRow | null> {
   const { data, error } = await sb
     .from("tenant_tax_settings")
-    .select("tax_number,istd_client_id,istd_client_secret")
+    .select("tax_number,istd_client_id,istd_client_secret,istd_buyer_category")
     .eq("store_id", storeId)
     .maybeSingle();
   if (error) throw new Error(error.message);
@@ -185,6 +186,15 @@ interface InvoiceLineInput {
 }
 
 function mapInvoicePayload(invoice: Record<string, unknown>): Record<string, unknown> {
+  // Jordan ISTD: only finalized sales may be reported. Refuse proforma / open
+  // documents (isFinalized === false) so the tax authority never receives a
+  // non-finalized invoice, even if a stale queue record reaches this function.
+  if (invoice.isFinalized === false) {
+    throw Object.assign(
+      new Error("لا يمكن إرسال فاتورة مبدئية / مفتوحة إلى المصلحة"),
+      { code: "proforma_not_submittable" },
+    );
+  }
   const completedAt = text(invoice.completed_at ?? invoice.completedAt);
   const date = completedAt.slice(0, 10);
   const time = completedAt.length > 11 ? completedAt.slice(11, 19) : "";
@@ -196,6 +206,14 @@ function mapInvoicePayload(invoice: Record<string, unknown>): Record<string, unk
     ? PAYMENT_METHOD_ISTD[invoice.paymentMethod] ?? "cash"
     : "cash";
   const taxNumber = text(invoice.tax_number);
+  // Registration category: per-invoice override wins, else the store's
+  // configurable default (injected server-side before mapping), else B2C.
+  const buyerCategory: "B2B" | "B2C" =
+    invoice.buyerCategory === "B2B" || invoice.buyerCategory === "B2C"
+      ? invoice.buyerCategory
+      : invoice.istd_buyer_category === "B2B"
+        ? "B2B"
+        : "B2C";
 
   const rawItems = Array.isArray(invoice.items) ? (invoice.items as InvoiceLineInput[]) : [];
   const items = rawItems.length > 0
@@ -232,6 +250,17 @@ function mapInvoicePayload(invoice: Record<string, unknown>): Record<string, unk
   if (text(invoice.customerName)) buyer.name = text(invoice.customerName);
   if (text(invoice.customerPhone)) buyer.phone = text(invoice.customerPhone);
   if (text(invoice.customerId)) buyer.id = text(invoice.customerId);
+  buyer.category = buyerCategory;
+  if (buyerCategory === "B2B" && text(invoice.customerTin)) buyer.tin = text(invoice.customerTin);
+
+  // Secure rounding: recompute the totals from the authoritative line figures
+  // just mapped, never trusting the client-supplied header total that could
+  // drift from line_items. Each value is rounded to 2 JOD decimals.
+  const lineGross = round2(items.reduce((acc, it) => acc + (it.total as number), 0));
+  const lineTax = round2(items.reduce((acc, it) => acc + (it.tax_amount as number), 0));
+  const lineExclusive = round2(
+    items.reduce((acc, it) => acc + (it.tax_exclusive_price as number), 0),
+  );
 
   return {
     invoice_uuid: text(invoice.sync_id ?? invoice.id),
@@ -250,16 +279,16 @@ function mapInvoicePayload(invoice: Record<string, unknown>): Record<string, unk
     buyer,
     line_items: items,
     totals: {
-      tax_exclusive_total: round2(total - taxTotal),
+      tax_exclusive_total: lineExclusive,
       discount_total: round2(discount),
-      tax_total: round2(taxTotal),
-      grand_total: round2(total),
+      tax_total: lineTax,
+      grand_total: lineGross,
     },
     signature: {
       algorithm: "ISTD-SHA256",
       tax_number: taxNumber,
-      invoice_total: jordanAmount(total),
-      tax_amount: jordanAmount(taxTotal),
+      invoice_total: jordanAmount(lineGross),
+      tax_amount: jordanAmount(lineTax),
     },
   };
 }
@@ -272,6 +301,10 @@ async function handleConfigGet(storeId: string): Promise<Response> {
     ok: true,
     taxNumber: text(row?.tax_number),
     istdClientId: text(row?.istd_client_id),
+    istdBuyerCategory:
+      row?.istd_buyer_category === "B2B" || row?.istd_buyer_category === "B2C"
+        ? row.istd_buyer_category
+        : "B2C",
     configured: configuredOf(row),
   });
 }
@@ -283,6 +316,10 @@ async function handleConfigSave(body: Record<string, unknown>): Promise<Response
   const taxNumber = text(body.taxNumber).slice(0, 30);
   const clientId = text(body.clientId).slice(0, 200);
   const secret = typeof body.secret === "string" ? body.secret.trim() : "";
+  const buyerCategory: "B2B" | "B2C" =
+    body.istdBuyerCategory === "B2B" || body.istdBuyerCategory === "B2C"
+      ? body.istdBuyerCategory
+      : "B2C";
 
   if (!storeId) return json({ ok: false, code: "bad_request", message: "storeId مطلوب" }, 400);
 
@@ -297,6 +334,7 @@ async function handleConfigSave(body: Record<string, unknown>): Promise<Response
     tax_number: taxNumber,
     istd_client_id: clientId,
     istd_client_secret: nextSecret,
+    istd_buyer_category: buyerCategory,
   };
   const { error } = await sb
     .from("tenant_tax_settings")
@@ -311,6 +349,7 @@ async function handleConfigSave(body: Record<string, unknown>): Promise<Response
     ok: true,
     taxNumber,
     istdClientId: clientId,
+    istdBuyerCategory: buyerCategory,
     configured: Boolean(taxNumber && clientId && nextSecret),
   });
 }
@@ -344,6 +383,7 @@ async function handleInvoiceSubmit(body: Record<string, unknown>): Promise<Respo
   invoice.supplier_name = text(storeRow?.name) || "متجر التجزئة";
   invoice.tax_number = taxNumber;
   invoice.sync_id = syncId;
+  invoice.istd_buyer_category = text(settings!.istd_buyer_category) || "B2C";
   const payload = mapInvoicePayload(invoice);
 
   // Single-writer claim bookkeeping (ported from lib/istdSync.ts).

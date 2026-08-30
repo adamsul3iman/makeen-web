@@ -39,6 +39,69 @@ export function isElectron(): boolean {
   return typeof window !== "undefined" && !!window.electronAPI;
 }
 
+// Raw command buffers (TSPL/ESC-POS) belong to BARCODE jobs alone and must
+// never ride the receipt/HTML channel — mirroring the gate in electron/main.js.
+// A rendered receipt is always a document that begins with markup; a raw label
+// buffer begins with a command (SIZE / SET PEEL / PRINT / GAP / CLS / ...).
+const RAW_COMMAND_MARKERS = [
+  /^\s*(CLS|DIR|DRIVE|MODE|GAP|DENSITY|SET|SIZE|PRINT|BARCODE|TEXT|BLOCK|BOX|CUT|EOP|FEED|PEEL)\b/i,
+  /\bsize\s*[\d.]+(\s*mm)?\s*,\s*[\d.]+(\s*mm)?\s*$/im,
+  /\b(set\s+)?peel\s+(on|off)\s*$/im,
+  /^\s*print\s+\d+\s*,\s*\d+\s*$/im,
+  /^\s*gap\s+[\d.]+\s*mm,/im,
+];
+
+/**
+ * True when the given string is a printable HTML document (not a raw TSPL /
+ * ESC-POS command buffer). Used to keep receipts/reports on the graphical
+ * silent bridge and to make raw strings uncapable of reaching the spooler as
+ * a receipt page.
+ */
+export function looksLikeHtmlDocument(html: string | undefined | null): boolean {
+  if (typeof html !== "string") return false;
+  const trimmed = html.replace(/^\uFEFF/, "").trim();
+  if (!trimmed) return false;
+  if (!trimmed.startsWith("<")) return false;
+  return !RAW_COMMAND_MARKERS.some((re) => re.test(trimmed));
+}
+
+/**
+ * Wrap the receipt/report fragment in a full HTML document sized for thermal
+ * paper, exactly as the hidden Electron print window expects. Shared by every
+ * silent-print path so receipts and shift reports go through byte-identical
+ * markup (the same bridge that already prints shift reports reliably).
+ */
+function wrapSilentHtml(renderedHtml: string): string {
+  if (renderedHtml.includes("<!DOCTYPE") || renderedHtml.includes("<html")) {
+    return renderedHtml;
+  }
+  return [
+    "<!DOCTYPE html>",
+    '<html lang="ar" dir="rtl">',
+    "<head>",
+    '<meta charset="utf-8" />',
+    "<style>",
+    "*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}",
+    "html,body{width:100%;background:#fff;color:#000}",
+    "body{font-family:'Courier New',Consolas,monospace;font-size:10px;line-height:1.4;direction:rtl}",
+    /* Thermal paper: size the page to the roll width so the driver never
+       falls back to the browser's A4 default (which mis-sizes the receipt
+       and pushes a blank page through before the real content). */
+    "@page{size:80mm auto;margin:0}",
+    "#thermal-receipt{display:block!important;width:100%;max-width:80mm}",
+    "#thermal-shift-print{display:block!important;width:100%;max-width:80mm}",
+    "#thermal-receipt *,#thermal-shift-print *{visibility:visible;color:#000;background:transparent}",
+    "table{width:100%;border-collapse:collapse}",
+    "th,td{padding:1px 2px;font-size:10px;text-align:right}",
+    "</style>",
+    "</head>",
+    "<body>",
+    renderedHtml,
+    "</body>",
+    "</html>",
+  ].join("\n");
+}
+
 /**
  * Render HTML for the print job (receipt or shift report) and send it
  * to the Electron main process for silent printing — no native dialog.
@@ -59,34 +122,16 @@ async function printViaElectron(
   }
   if (!renderedHtml) return false;
 
-  // Wrap the fragment in a full HTML document for the hidden BrowserWindow
-  const fullHtml = renderedHtml.includes("<!DOCTYPE") || renderedHtml.includes("<html")
-    ? renderedHtml
-    : [
-        "<!DOCTYPE html>",
-        '<html lang="ar" dir="rtl">',
-        "<head>",
-        '<meta charset="utf-8" />',
-        "<style>",
-        "*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}",
-        "html,body{width:100%;background:#fff;color:#000}",
-        "body{font-family:'Courier New',Consolas,monospace;font-size:10px;line-height:1.4;direction:rtl}",
-        /* Thermal paper: size the page to the roll width so the driver never
-           falls back to the browser's A4 default (which mis-sizes the receipt
-           and pushes a blank page through before the real content). */
-        "@page{size:80mm auto;margin:0}",
-        "#thermal-receipt{display:block!important;width:100%;max-width:80mm}",
-        "#thermal-shift-print{display:block!important;width:100%;max-width:80mm}",
-        "#thermal-receipt *,#thermal-shift-print *{visibility:visible;color:#000;background:transparent}",
-        "table{width:100%;border-collapse:collapse}",
-        "th,td{padding:1px 2px;font-size:10px;text-align:right}",
-        "</style>",
-        "</head>",
-        "<body>",
-        renderedHtml,
-        "</body>",
-        "</html>",
-      ].join("\n");
+  // Graphical path only — a raw TSPL buffer must never reach the silent bridge.
+  if (!looksLikeHtmlDocument(renderedHtml)) {
+    console.warn("[printAgent] printViaElectron rejected: payload is not HTML", {
+      jobType,
+      printerKind,
+    });
+    return false;
+  }
+
+  const fullHtml = wrapSilentHtml(renderedHtml);
 
   // The main process resolves the actual device by enumerating installed
   // printers against printerKind (hardcoded names never match drivers like
@@ -104,6 +149,47 @@ async function printViaElectron(
     return result.success;
   } catch (err) {
     console.warn("[printAgent] Electron IPC print failed:", err);
+    return false;
+  }
+}
+
+/**
+ * Direct Electron silent-print bridge for post-checkout receipts. This is the
+ * EXACT same IPC call (window.electronAPI.printSilent → "print:silent") that
+ * reliably prints shift reports and operational logs, used here with NO tier
+ * fallback, NO Supabase print_jobs queue insert, and NO hidden-iframe dialog —
+ * so a checkout receipt goes straight to the thermal printer with zero
+ * intervening failure points inside the desktop wrapper.
+ *
+ * Returns true only when the OS spooler actually accepted the job. Callers in
+ * the POS should treat a false return as "did not print" and surface the
+ * in-app notice (never a native dialog) so the checkout lane is not blocked.
+ */
+export async function printReceiptSilently(options: {
+  html: string;
+  printerName?: string;
+  printerKind?: PrinterKind;
+}): Promise<boolean> {
+  if (!isElectron() || !window.electronAPI) return false;
+  // The receipt channel is graphical HTML only. Reject raw label buffers so a
+  // BARCODE job can never be printed as literal TSPL on the receipt printer.
+  if (!looksLikeHtmlDocument(options.html)) {
+    console.warn("[printAgent] checkout silent print rejected: payload is not HTML");
+    return false;
+  }
+  const fullHtml = wrapSilentHtml(options.html);
+  try {
+    const result = await window.electronAPI.printSilent({
+      html: fullHtml,
+      printerName: options.printerName,
+      printerKind: options.printerKind ?? "THERMAL",
+    });
+    if (!result.success && result.error) {
+      console.warn("[printAgent] checkout silent print rejected:", result.error);
+    }
+    return result.success;
+  } catch (err) {
+    console.warn("[printAgent] checkout silent print IPC failed:", err);
     return false;
   }
 }
@@ -150,83 +236,6 @@ export async function isPrintAgentAvailable(): Promise<boolean> {
 export function invalidateHealthCache(): void {
   lastHealthCheck = 0;
   lastHealthResult = false;
-}
-
-// ── Receipt HTML capture ───────────────────────────────────────────
-
-/**
- * Capture the rendered receipt HTML from the hidden ThermalReceipt DOM node.
- * Returns a full HTML document ready for the agent to pipe to Puppeteer.
- * Returns null if the receipt element is not in the DOM.
- */
-export function captureReceiptHtml(): string | null {
-  if (typeof document === "undefined") return null;
-  const el = document.getElementById("thermal-receipt");
-  if (!el) return null;
-
-  const receiptHtml = el.innerHTML;
-
-  return [
-    "<!DOCTYPE html>",
-    '<html lang="ar" dir="rtl">',
-    "<head>",
-    '<meta charset="utf-8" />',
-    "<title>إيصال مبيعات</title>",
-    "<style>",
-    "*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}",
-    "html,body{width:100%;background:#fff;color:#000}",
-    "body{font-family:'Courier New',Consolas,monospace;font-size:10px;line-height:1.4;direction:rtl}",
-    /* Thermal paper: size the page to the roll width so the iframe never
-       falls back to the browser's A4 default (which mis-sizes the receipt
-       and pushes a blank first page through). */
-    "@page{size:80mm auto;margin:0}",
-    "#thermal-receipt{display:block!important;width:100%;max-width:80mm}",
-    "#thermal-receipt *{visibility:visible;color:#000;background:transparent;box-shadow:none;text-shadow:none}",
-    "table{width:100%;border-collapse:collapse}",
-    "th,td{padding:1px 2px;font-size:10px;text-align:right}",
-    "th{font-weight:700}",
-    ".text-center{text-align:center}",
-    ".text-left{text-align:left}",
-    "img{max-width:60%;height:auto}",
-    "</style>",
-    "</head>",
-    "<body>",
-    `<div id="thermal-receipt" dir="rtl" lang="ar">`,
-    receiptHtml,
-    "</div>",
-    "</body>",
-    "</html>",
-  ].join("\n");
-}
-
-/**
- * Wait (bounded) for the ThermalReceipt's async content to commit to the DOM
- * before capturing its HTML. The barcode is an inline SVG built by a lazy
- * `jsbarcode` import and the fiscal QR is a lazily-rendered SVG string — both
- * populated in effects AFTER React commits the leaf markup. Diving straight
- * into `captureReceiptHtml()` in the same tick as checkout can snapshot the
- * receipt before those resolve, printing a blank barcode/QR. This polls the
- * `#thermal-receipt` node until the barcode matches a width and the fiscal QR
- * has non-empty inner HTML, or `timeoutMs` elapses (so a checkout lane is never
- * blocked — best effort only).
- */
-export function waitForReceiptSettle(timeoutMs = 1000): Promise<void> {
-  return new Promise((resolve) => {
-    if (typeof document === "undefined") return resolve();
-    const started = Date.now();
-    const tick = () => {
-      const el = document.getElementById("thermal-receipt");
-      if (!el) return resolve();
-      const barcode = el.querySelector("svg[data-invoice-barcode]");
-      const barcodeReady = !barcode || barcode.childNodes.length > 0;
-      const qr = el.querySelector("[data-fiscal-qr]");
-      const qrReady = !qr || (qr.textContent || "").trim().length > 0;
-      if (barcodeReady && qrReady) return resolve();
-      if (Date.now() - started >= timeoutMs) return resolve();
-      requestAnimationFrame(tick);
-    };
-    tick();
-  });
 }
 
 // ── Browser print (async-safe, via hidden iframe) ─────────────────

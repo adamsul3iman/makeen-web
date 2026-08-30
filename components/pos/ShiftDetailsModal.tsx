@@ -5,8 +5,10 @@ import { Printer, X } from "lucide-react";
 import { usePosStore } from "@/store/usePosStore";
 import { formatMoney } from "@/lib/format";
 import { formatShiftDateTime } from "@/lib/dateTime";
-import { smartPrint, isElectron } from "@/lib/printAgent";
+import { isElectron } from "@/lib/printAgent";
 import { buildLiveShiftAudit } from "@/lib/shiftPrintPayload";
+import { renderShiftPrintHtml } from "@/lib/printRenderer";
+import { dispatchPrintJob } from "@/lib/hardware/dispatch";
 import { useModalEscape } from "@/hooks/useModalEscape";
 
 export default function ShiftDetailsModal() {
@@ -38,23 +40,25 @@ export default function ShiftDetailsModal() {
 
   const handlePrint = async () => {
     setPrinting(true);
+    const shift = buildLiveShiftAudit({
+      shiftId: shiftState.shiftId,
+      startTime: shiftState.startTime,
+      startingCash: shiftState.startingCash,
+      totals: shiftTotals,
+      invoiceCount,
+      cashierName: currentCashier?.name ?? "",
+      branchName: currentStore?.name ?? "",
+    });
     try {
-      const printedSilently = await smartPrint({
-        terminalId: activeTerminalId ?? "",
+      const result = await dispatchPrintJob("A4_REPORT", {
+        html: renderShiftPrintHtml(shift, "X_REPORT"),
+        shift,
         jobType: "X_REPORT",
-        printerKind: "THERMAL",
-        shift: buildLiveShiftAudit({
-          shiftId: shiftState.shiftId,
-          startTime: shiftState.startTime,
-          startingCash: shiftState.startingCash,
-          totals: shiftTotals,
-          invoiceCount,
-          cashierName: currentCashier?.name ?? "",
-          branchName: currentStore?.name ?? "",
-        }),
+        terminalId: activeTerminalId ?? "",
       });
-      // Native dialog is browser-only — never inside the Electron wrapper.
-      if (!printedSilently && !isElectron()) window.print();
+      // If nothing was routed (e.g. no configured A4 slot and a browser lane),
+      // fall back to the live DOM dialog exactly as before.
+      if (!result.printed && !result.attempted && !isElectron()) window.print();
     } catch {
       if (!isElectron()) window.print();
     } finally {

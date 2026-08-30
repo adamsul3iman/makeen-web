@@ -58,7 +58,7 @@ import {
 import { priceMemoryLookupKey, type PriceMemoryEntry } from "@/lib/priceMemory";
 import { sha256Hex } from "@/lib/sha256";
 import { openCashDrawer } from "@/lib/cashDrawer";
-import { loadDeviceHardwareSettings } from "@/lib/deviceHardware";
+import { loadHardwareHubConfig } from "@/lib/hardware/config";
 import { pushAudit } from "@/lib/audit";
 import { requestPersistentStorage } from "@/lib/storageGuard";
 import { newUuid } from "@/lib/uuid";
@@ -197,7 +197,12 @@ export type SecondaryAction =
   | { type: "save_settings"; fields: StoreSettingsUpdate }
   | {
       type: "save_istd";
-      fields: { tax_number?: string; istd_client_id?: string; istd_client_secret?: string };
+      fields: {
+        tax_number?: string;
+        istd_client_id?: string;
+        istd_client_secret?: string;
+        istd_buyer_category?: "B2B" | "B2C";
+      };
     }
   | { type: "approve_discount"; discount: DiscountInput }
   | { type: "toggle_return_mode" };
@@ -2192,6 +2197,22 @@ export const usePosStore = create<PosStore>()(
           cashierName,
         };
 
+        // Cross-tab TOCTOU guard: `setCompletingCrossTab` writes the flag but
+        // the storage `echo` only reaches other tabs after a round-trip. Read
+        // it here synchronously so a simultaneous submit from ANOTHER tab (same
+        // register, two windows) can never slip past the per-tab `isCompleting`
+        // guard and double-ring the sale. The echo re-asserts the flag via
+        // useCrossTabSync, so at least one tab always observes it.
+        if (typeof localStorage !== "undefined") {
+          try {
+            if (localStorage.getItem(POS_COMPLETING_KEY) === "1") {
+              set({ notice: { message: "جارٍ إتمام عملية دفع أخرى", tone: "success" } });
+              return;
+            }
+          } catch {
+            /* storage unavailable: per-tab isCompleting still guards this tab. */
+          }
+        }
         setCompletingCrossTab(true);
         set({ isCompleting: true });
         try {
@@ -2353,6 +2374,15 @@ export const usePosStore = create<PosStore>()(
             settleSuccess();
           }
           emitPosSound("SALE_COMPLETED");
+
+          // Tell the background sync to flush THIS invoice to Supabase right
+          // now (instead of waiting up to the 15s tick). Only when online —
+          // offline the queue stays and the next reconnect/visibility flush
+          // delivers it. Gated on isOnline so a disconnected register never
+          // burns CPU dispatching a flush that syncIfOnline would skip anyway.
+          if (get().isOnline && typeof window !== "undefined") {
+            window.dispatchEvent(new Event("pos:invoice-queued"));
+          }
 
           // ISTD/JoFotara e-invoicing fast path. Detached and never awaited:
           // the local TLV QR already guarantees a valid printed receipt, and
@@ -3737,7 +3767,6 @@ export const usePosStore = create<PosStore>()(
           }
 
           let catalogOnline = false;
-          let customersOnline = false;
 
           const [remoteCatalog, remoteCustomers] = await Promise.allSettled([
             remoteCatalogPromise,
@@ -3780,7 +3809,6 @@ export const usePosStore = create<PosStore>()(
             const data = remoteCustomers.value;
             const customers = normalizeCustomers(data.customers);
             const updatedAt = data.updatedAt || `remote:${Date.now()}`;
-            customersOnline = true;
             if (
               updatedAt !== get().customersUpdatedAt ||
               customers.length !== get().customers.length
@@ -3794,7 +3822,17 @@ export const usePosStore = create<PosStore>()(
             }
           }
 
-          set({ isOnline: catalogOnline || customersOnline });
+          // NOTE: `isOnline` is deliberately NOT derived from the catalog /
+          // customers fetch result here. It must reflect real network
+          // reachability (browser `online`/`offline` events, `navigator.onLine`),
+          // not whether a data-layer fetch happened to succeed. Deriving it from
+          // fetch success turns one non-network failure (schema drift, RLS
+          // regression, transient 500, slow seed) into a hard `isOnline=false`,
+          // and once false, every `syncIfOnline()` short-circuits forever —
+          // processSyncQueue never drains and PENDING invoices are trapped in
+          // IndexedDB while the network is actually up. Drain failures are
+          // already retried gracefully, so sync must never be gated on catalog
+          // fetch success.
 
           if (!catalogOnline && !localCatalog && !get().ready) {
             set({
@@ -4006,9 +4044,13 @@ export const usePosStore = create<PosStore>()(
       },
 
       openDrawer: async () => {
-        const opened = await openCashDrawer(
-          loadDeviceHardwareSettings(get().activeTerminalId),
-        );
+        // Wiring (baud/pin) comes from the central Hardware Hub config; the
+        // licensed manual-open action just pulses the already-authorized port.
+        const hub = loadHardwareHubConfig(get().activeTerminalId);
+        const opened = await openCashDrawer({
+          baudRate: hub.drawer.baudRate,
+          pin: hub.drawer.pin,
+        });
         set({
           notice: opened
             ? { message: "تم فتح الدرج", tone: "success" }

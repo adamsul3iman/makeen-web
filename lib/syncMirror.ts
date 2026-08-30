@@ -495,6 +495,89 @@ async function recordSalesInvoiceLedger(
 }
 
 /**
+ * Guarantee every completed checkout surfaces as a CLOSED row in `pos_orders`
+ * (the Closed Orders tab). A direct (non-parked) sale historically produced
+ * only `sales_invoices` + `sync_events`; no `pos_orders` row was ever created,
+ * so walk-ups never appeared in Closed Orders. This handler mirrors EVERY
+ * INVOICE_CREATED event into a CLOSED order so the settled history is complete
+ * regardless of whether the sale began as a parked order or a walk-up.
+ *
+ * Idempotency: keyed on the natural unique key `(store_id, order_number)` —
+ * the terminal-minted invoice number (e.g. T1-0007) is unique per store, so a
+ * retried drain can never mint a duplicate closed order. The row carries
+ * `invoice_sync_id = event.sync_id`, satisfying the
+ * `pos_orders_closed_needs_invoice` CHECK constraint. A failed mirror leaves
+ * the event unacked (stays PENDING) so the order is created on retry.
+ */
+async function recordCompletedOrder(
+  db: SupabaseClient,
+  event: SyncQueueRecord,
+  storeId: string,
+): Promise<{ recorded: boolean; error?: string }> {
+  if (event.action_type !== "INVOICE_CREATED") return { recorded: false };
+  const payload = event.payload as InvoiceCreatedPayload;
+
+  const orderNumber = text(payload.invoiceNumber);
+
+  const finalOrderNumber = orderNumber || `INV-${event.sync_id.slice(0, 13)}`;
+
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const totals = {
+    subtotal: money(payload.subtotal),
+    tax: money(payload.tax),
+    discount: money(payload.discount),
+    deliveryFee: money(payload.deliveryFee),
+    total: money(payload.total),
+  };
+
+  const closedAt = text(payload.completed_at) || new Date().toISOString();
+
+  // Parked-origin guard: when this invoice closed a real parked order, that
+  // order already exists as a CLOSED row keyed by invoice_sync_id (via the
+  // client's closeWithInvoice → closeOrder path). Creating an additional
+  // invoice-number-keyed row here would duplicate the sale in Closed Orders.
+  // Walk-up sales (no parked order) never match this check, so they always
+  // get their completed-order row.
+  const byInvoice = await db
+    .from("pos_orders")
+    .select("id")
+    .eq("store_id", storeId)
+    .eq("invoice_sync_id", event.sync_id)
+    .maybeSingle();
+  if (byInvoice.error) return { recorded: false, error: byInvoice.error.message };
+  if (byInvoice.data?.id) return { recorded: true };
+
+  const row = {
+    store_id: storeId,
+    branch_id: uuidOrNull(payload.branchId),
+    terminal_id: uuidOrNull(payload.terminalId),
+    order_number: finalOrderNumber,
+    status: "CLOSED",
+    items,
+    totals,
+    invoice_discount: null,
+    delivery_fee: money(payload.deliveryFee),
+    customer_id: uuidOrNull(payload.customerId),
+    customer_name: text(payload.customerName) || null,
+    customer_phone: text(payload.customerPhone) || null,
+    cashier_id: uuidOrNull(payload.cashierId),
+    cashier_name: text(payload.cashierName ?? event.cashierName) || null,
+    payments: [],
+    invoice_sync_id: event.sync_id,
+    closed_at: closedAt,
+    updated_at: closedAt,
+    created_at: closedAt,
+  };
+
+  const { error } = await db
+    .from("pos_orders")
+    .upsert(row, { onConflict: "store_id,order_number" })
+    .select("id");
+  if (error) return { recorded: false, error: error.message };
+  return { recorded: true };
+}
+
+/**
  * Stamp a fast-path ISTD result carried on the queued payload onto the
  * ledger row. The invoice was already cleared online when possible; this
  * only backfills the columns the mirror insert could not have known about.
@@ -1978,6 +2061,15 @@ export async function mirrorSyncBatch(
     const salesLedgerResult = await recordSalesInvoiceLedger(db, event, storeId);
     if (salesLedgerResult.error) {
       console.error(`Sales ledger sync error for ${event.sync_id}:`, salesLedgerResult.error);
+      continue;
+    }
+    // Every invoice — walk-up or parked — becomes a CLOSED row in pos_orders
+    // so the Closed Orders tab shows the completed sale. Best-effort with the
+    // same retry semantics as the other ledger effects: a failure here keeps
+    // the event PENDING so the order is created on a later drain.
+    const orderResult = await recordCompletedOrder(db, event, storeId);
+    if (orderResult.error) {
+      console.error(`Completed-order sync error for ${event.sync_id}:`, orderResult.error);
       continue;
     }
     await stampCarriedIstd(db, event, storeId);

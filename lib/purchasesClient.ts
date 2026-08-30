@@ -18,6 +18,8 @@ export interface PurchaseOrder {
   status: string;
   total_amount: number;
   paid_amount: number;
+  /** Total input (recoverable) VAT across all lines of this order. */
+  tax_amount: number;
   notes: string | null;
   expected_date: string | null;
   created_at: string;
@@ -29,8 +31,13 @@ export interface PurchaseOrderItem {
   purchase_order_id: string;
   product_id: string | null;
   quantity: number;
+  /** Gross unit cost agreed with the supplier (VAT may be inside or added on). */
   unit_cost: number;
   total_price: number;
+  /** Input VAT % for this line (0 = exempt). Jordan standard default 16. */
+  tax_percent: number;
+  /** True when `unit_cost` already includes VAT; false when VAT is added on top. */
+  tax_included: boolean;
   /** Selling price captured at PO time and pushed onto the product at receive. */
   new_selling_price: number | null;
   /** Tier 3.5 enrichment — which variant was ordered. */
@@ -60,6 +67,8 @@ export interface PurchaseOrderItemInput {
   product_id?: unknown;
   quantity?: unknown;
   unit_cost?: unknown;
+  tax_percent?: unknown;
+  tax_included?: unknown;
   new_selling_price?: unknown;
   variant_id?: unknown;
   unit_id?: unknown;
@@ -74,6 +83,7 @@ interface PurchaseOrderRow {
   status: string;
   total_amount: number | string | null;
   paid_amount: number | string | null;
+  tax_amount: number | string | null;
   notes: string | null;
   expected_date: string | null;
   created_at: string;
@@ -87,6 +97,8 @@ interface PurchaseOrderItemRow {
   quantity: number | string | null;
   unit_cost: number | string | null;
   total_price: number | string | null;
+  tax_percent: number | string | null;
+  tax_included: boolean | null;
   new_selling_price: number | string | null;
   variant_id: string | null;
   unit_id: string | null;
@@ -98,6 +110,8 @@ interface StoredPoItemRow {
   product_id: string | null;
   quantity: number | string | null;
   unit_cost: number | string | null;
+  tax_percent: number | string | null;
+  tax_included: boolean | null;
   new_selling_price: number | string | null;
   variant_id: string | null;
   unit_id: string | null;
@@ -105,9 +119,9 @@ interface StoredPoItemRow {
 }
 
 const PO_SELECT =
-  "id,store_id,supplier_id,order_number,status,total_amount,paid_amount,notes,expected_date,created_at";
+  "id,store_id,supplier_id,order_number,status,total_amount,paid_amount,tax_amount,notes,expected_date,created_at";
 const PO_ITEM_SELECT =
-  "id,store_id,purchase_order_id,product_id,quantity,unit_cost,total_price,new_selling_price,variant_id,unit_id,qty_in_unit";
+  "id,store_id,purchase_order_id,product_id,quantity,unit_cost,total_price,tax_percent,tax_included,new_selling_price,variant_id,unit_id,qty_in_unit";
 const INVOICE_OPTION_SELECT =
   "id,supplier_id,invoice_number,total_amount,paid_amount,status,due_date";
 const RECEIVED_STATUSES = new Set(["received", "RECEIVED"]);
@@ -123,6 +137,57 @@ function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
+/** Clamp a tax percent into [0, 100]; defaults to the Jordan standard 16%. */
+function taxPercentOf(value: unknown, fallback: number): number {
+  const raw =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number(value)
+        : NaN;
+  if (!Number.isFinite(raw) || raw < 0 || raw > 100) return fallback;
+  return round2(raw);
+}
+
+/** True when a stored/supplied `tax_included` boolean resolves true. */
+function taxIncludedOf(value: unknown, fallback = true): boolean {
+  if (typeof value === "boolean") return value;
+  return fallback;
+}
+
+/**
+ * Split a gross (supplier-negotiated) unit cost into the recoverable input VAT
+ * and the net (tax-exclusive) cost used for stocking.
+ *
+ *   tax_included = true  → net = gross / (1 + p/100); VAT is inside gross.
+ *   tax_included = false → net = gross;               VAT is added on top.
+ *
+ * The returned `netUnitCost` is what `products.cost_price` should hold
+ * (cost excluding recoverable input VAT) and what the linked supplier invoice
+ * books as its net line cost.
+ */
+function splitUnitCost(
+  grossUnitCost: number,
+  taxPercent: number,
+  taxIncluded: boolean,
+): { netUnitCost: number; inputTaxPerUnit: number } {
+  const net = round2(taxIncluded && taxPercent > 0 ? grossUnitCost / (1 + taxPercent / 100) : grossUnitCost);
+  const inputTax = round2(taxIncluded ? grossUnitCost - net : (net * taxPercent) / 100);
+  return { netUnitCost: net, inputTaxPerUnit: inputTax };
+}
+
+/** Aggregate input tax across line gross quantities for a header total. */
+function sumInputTax(
+  rows: Array<{ quantity: number; unit_cost: number; tax_percent: number; tax_included: boolean }>,
+): number {
+  let total = 0;
+  for (const row of rows) {
+    const { inputTaxPerUnit } = splitUnitCost(row.unit_cost, row.tax_percent, row.tax_included);
+    total += row.quantity * inputTaxPerUnit;
+  }
+  return round2(total);
+}
+
 function cleanText(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -135,6 +200,8 @@ function parsePoItems(input: unknown): Array<{
   quantity: number;
   unit_cost: number;
   total_price: number;
+  tax_percent: number;
+  tax_included: boolean;
   new_selling_price: number | null;
   variant_id: string | null;
   unit_id: string | null;
@@ -148,6 +215,8 @@ function parsePoItems(input: unknown): Array<{
     quantity: number;
     unit_cost: number;
     total_price: number;
+    tax_percent: number;
+    tax_included: boolean;
     new_selling_price: number | null;
     variant_id: string | null;
     unit_id: string | null;
@@ -159,6 +228,8 @@ function parsePoItems(input: unknown): Array<{
       ? Math.round(it.quantity * 1000) / 1000
       : 0;
     const unitCost = typeof it.unit_cost === "number" && Number.isFinite(it.unit_cost) ? it.unit_cost : 0;
+    const taxPercent = taxPercentOf(it.tax_percent, 16);
+    const taxIncluded = taxIncludedOf(it.tax_included, true);
     const newSellingPrice =
       typeof it.new_selling_price === "number" && Number.isFinite(it.new_selling_price) && it.new_selling_price > 0
         ? round2(it.new_selling_price)
@@ -176,6 +247,8 @@ function parsePoItems(input: unknown): Array<{
       quantity,
       unit_cost: round2(unitCost),
       total_price: round2(quantity * unitCost),
+      tax_percent: taxPercent,
+      tax_included: taxIncluded,
       new_selling_price: newSellingPrice,
       variant_id: variantId,
       unit_id: unitId,
@@ -195,6 +268,8 @@ function toPurchaseOrderItem(row: PurchaseOrderItemRow): PurchaseOrderItem {
     quantity: asNum(row.quantity),
     unit_cost: asNum(row.unit_cost),
     total_price: asNum(row.total_price),
+    tax_percent: taxPercentOf(row.tax_percent, 16),
+    tax_included: taxIncludedOf(row.tax_included, true),
     new_selling_price:
       row.new_selling_price === null || row.new_selling_price === undefined
         ? null
@@ -229,6 +304,7 @@ function toPurchaseOrder(row: PurchaseOrderRow, supplierNames: Map<string, strin
     status: row.status,
     total_amount: asNum(row.total_amount),
     paid_amount: asNum(row.paid_amount),
+    tax_amount: asNum(row.tax_amount),
     notes: row.notes,
     expected_date: row.expected_date,
     created_at: row.created_at,
@@ -322,6 +398,10 @@ export async function createPurchaseOrder(data: {
   if (data.expected_date !== undefined) payload.expected_date = cleanText(data.expected_date);
   if (payload.total_amount === undefined && parsedItems.length > 0) {
     payload.total_amount = round2(parsedItems.reduce((acc, it) => acc + it.total_price, 0));
+  }
+  if (parsedItems.length > 0) {
+    // Header input VAT = Σ(qty × recoverable input VAT per unit) across lines.
+    payload.tax_amount = sumInputTax(parsedItems);
   }
 
   const { data: po, error: poError } = await sb
@@ -486,6 +566,7 @@ export async function updatePurchaseOrderItems(
 
   const patch: Record<string, unknown> = {
     total_amount: round2(parsedItems.reduce((acc, it) => acc + it.total_price, 0)),
+    tax_amount: sumInputTax(parsedItems),
   };
   if (data.supplier_id !== undefined) {
     const supplierId = typeof data.supplier_id === "string" ? data.supplier_id.trim() : "";
@@ -554,7 +635,7 @@ export async function receivePurchaseOrder(
 
   const { data: storedItems, error: itemsError } = await sb
     .from("purchase_order_items")
-    .select("id,product_id,quantity,unit_cost,new_selling_price,variant_id,unit_id,qty_in_unit")
+    .select("id,product_id,quantity,unit_cost,tax_percent,tax_included,new_selling_price,variant_id,unit_id,qty_in_unit")
     .eq("purchase_order_id", orderId)
     .eq("store_id", storeId);
   if (itemsError) throw new Error(itemsError.message);
@@ -595,16 +676,20 @@ export async function receivePurchaseOrder(
   }
 
   // 2) Price control — sync the negotiated cost and any updated selling price
-  // onto the product so margins hold the moment goods arrive.
+  // onto the product so margins hold the moment goods arrive. COGS is stocked
+  // at the NET cost (recoverable input VAT excluded), per Jordan ISTD norms.
   for (const item of rows) {
     if (!item.product_id) continue;
-    const unitCost = asNum(item.unit_cost);
+    const gross = asNum(item.unit_cost);
+    const taxPercent = taxPercentOf(item.tax_percent, 16);
+    const taxIncluded = taxIncludedOf(item.tax_included, true);
+    const { netUnitCost } = splitUnitCost(gross, taxPercent, taxIncluded);
     const newSellingPrice =
       item.new_selling_price === null || item.new_selling_price === undefined
         ? null
         : asNum(item.new_selling_price, 0) || null;
     const pricePatch: Record<string, number> = {};
-    if (unitCost > 0) pricePatch.cost_price = round2(unitCost);
+    if (netUnitCost > 0) pricePatch.cost_price = round2(netUnitCost);
     if (newSellingPrice !== null && newSellingPrice > 0) pricePatch.selling_price = newSellingPrice;
     if (Object.keys(pricePatch).length === 0) continue;
     const { error: priceError } = await sb
@@ -630,13 +715,21 @@ export async function receivePurchaseOrder(
     const invoiceNumber =
       cleanText(poRecord.order_number) ??
       `PO-${orderId.replace(/-/g, "").slice(0, 12).toUpperCase()}`;
-    const invoiceItems = rows.map((item) => ({
-      productId: item.product_id ?? "",
-      description: item.product_id ? nameMap.get(item.product_id) ?? "بند أمر شراء" : "بند أمر شراء",
-      quantity: asNum(item.quantity),
-      unitCost: asNum(item.unit_cost),
-      taxPercent: 0,
-    }));
+    const invoiceItems = rows.map((item) => {
+      const gross = asNum(item.unit_cost);
+      const taxPercent = taxPercentOf(item.tax_percent, 16);
+      const taxIncluded = taxIncludedOf(item.tax_included, true);
+      const { netUnitCost } = splitUnitCost(gross, taxPercent, taxIncluded);
+      return {
+        productId: item.product_id ?? "",
+        description: item.product_id ? nameMap.get(item.product_id) ?? "بند أمر شراء" : "بند أمر شراء",
+        quantity: asNum(item.quantity),
+        // create_supplier_invoice treats unitCost as NET and adds tax on top,
+        // so payables = net + input VAT and input VAT is recoverable.
+        unitCost: netUnitCost,
+        taxPercent,
+      };
+    });
     const { error: invoiceError } = await sb.rpc("create_supplier_invoice", {
       p_store_id: storeId,
       p_supplier_id: poRecord.supplier_id,
@@ -715,7 +808,7 @@ export async function receivePurchaseOrderWithReconciliation(
 
   const { data: storedItems, error: itemsError } = await sb
     .from("purchase_order_items")
-    .select("id,product_id,quantity,unit_cost,new_selling_price,variant_id,unit_id,qty_in_unit")
+    .select("id,product_id,quantity,unit_cost,tax_percent,tax_included,new_selling_price,variant_id,unit_id,qty_in_unit")
     .eq("purchase_order_id", orderId)
     .eq("store_id", storeId);
   if (itemsError) throw new Error(itemsError.message);
@@ -731,7 +824,12 @@ export async function receivePurchaseOrderWithReconciliation(
     if (!row.product_id) continue;
     const ov = overrideMap.get(row.id);
     const receivedQty = ov ? ov.receivedQty : asNum(row.quantity);
-    const unitCost = ov ? ov.unitCost : asNum(row.unit_cost);
+    const grossUnitCost = ov ? ov.unitCost : asNum(row.unit_cost);
+    // Tax policy (percent + inclusive flag) is a property of the line as
+    // ordered; a reconciliation unitCost override re-costs within that policy.
+    const taxPercent = taxPercentOf(row.tax_percent, 16);
+    const taxIncluded = taxIncludedOf(row.tax_included, true);
+    const { netUnitCost } = splitUnitCost(grossUnitCost, taxPercent, taxIncluded);
     const newSellingPrice = ov
       ? ov.newSellingPrice
       : row.new_selling_price === null || row.new_selling_price === undefined
@@ -740,7 +838,7 @@ export async function receivePurchaseOrderWithReconciliation(
 
     // log_cost_history — Security Definer reads old prices before we update.
     const pricePatch: Record<string, number> = {};
-    if (unitCost > 0) pricePatch.cost_price = round2(unitCost);
+    if (netUnitCost > 0) pricePatch.cost_price = round2(netUnitCost);
     if (newSellingPrice !== null && newSellingPrice > 0) pricePatch.selling_price = newSellingPrice;
     if (Object.keys(pricePatch).length > 0) {
       const { error: logErr } = await sb.rpc("log_cost_history", {
@@ -770,7 +868,7 @@ export async function receivePurchaseOrderWithReconciliation(
         p_actor_id: null,
         p_actor_name: opts.actorName ?? null,
         p_reason: opts.reason ?? "استلام أمر شراء (تسوية)",
-        p_metadata: { purchaseOrderItemId: row.id, unitCost, reconciled: ov != null },
+        p_metadata: { purchaseOrderItemId: row.id, unitCost: grossUnitCost, reconciled: ov != null },
         p_variant_id: row.variant_id ?? null,
       });
       if (movementError) throw new Error(movementError.message);
@@ -815,12 +913,18 @@ export async function receivePurchaseOrderWithReconciliation(
 
     const invoiceItems = rows.map((item) => {
       const ov = overrideMap.get(item.id);
+      const gross = ov ? ov.unitCost : asNum(item.unit_cost);
+      const taxPercent = taxPercentOf(item.tax_percent, 16);
+      const taxIncluded = taxIncludedOf(item.tax_included, true);
+      const { netUnitCost } = splitUnitCost(gross, taxPercent, taxIncluded);
       return {
         productId: item.product_id ?? "",
         description: item.product_id ? nameMap.get(item.product_id) ?? "بند أمر شراء" : "بند أمر شراء",
         quantity: ov ? ov.receivedQty : asNum(item.quantity),
-        unitCost: ov ? ov.unitCost : asNum(item.unit_cost),
-        taxPercent: 0,
+        // create_supplier_invoice treats unitCost as NET and adds tax on top,
+        // so payables = net + input VAT and input VAT is recoverable.
+        unitCost: netUnitCost,
+        taxPercent,
       };
     });
     const { error: invoiceError } = await sb.rpc("create_supplier_invoice", {
